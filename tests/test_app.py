@@ -1,0 +1,7 @@
+from aisc_salesforce.app import main
+
+
+def test_main_logs_greeting(capfd):
+    main()
+    captured = capfd.readouterr()
+    assert "Hello from aisc_salesforce!" in captured.err
