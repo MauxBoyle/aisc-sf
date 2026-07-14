@@ -8,7 +8,7 @@ version = "0.0.1"
 description = "A Python application."
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = ["loguru>=0.7"]
+dependencies = ["loguru>=0.7", "requests>=2.32"]
 
 [project.scripts]
 aisc_salesforce = "aisc_salesforce.app:main"
