@@ -1,5 +1,6 @@
 from aisc_salesforce import app
 from aisc_salesforce.dictionary import ExportField
+from aisc_salesforce.profile_updates import AutomationCounts
 
 
 def test_cli_success_uses_custom_output_dir(monkeypatch, tmp_path, capsys):
@@ -41,3 +42,87 @@ def test_cli_configuration_failure_is_nonzero(monkeypatch, capsys):
     )
     assert app.main(["snapshot"]) == 1
     assert "SF_CLIENT_SECRET" in capsys.readouterr().err
+
+
+def test_dotenv_removes_inline_comments_but_preserves_hashes(monkeypatch, tmp_path):
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "QUEUE_ID = 00G123  # Queue ID\n"
+        "SECRET=abc#part\n"
+        'LOGIN_URL="https://example.com/#fragment" # Login URL\n',
+        encoding="utf-8",
+    )
+    for name in ("QUEUE_ID", "SECRET", "LOGIN_URL"):
+        monkeypatch.delenv(name, raising=False)
+
+    app._load_dotenv(dotenv)
+
+    assert app.os.environ["QUEUE_ID"] == "00G123"
+    assert app.os.environ["SECRET"] == "abc#part"
+    assert app.os.environ["LOGIN_URL"] == "https://example.com/#fragment"
+
+
+def test_profile_updates_cli_prints_counts_and_succeeds(monkeypatch, capsys):
+    monkeypatch.setattr(app, "_load_dotenv", lambda path: None)
+    monkeypatch.setattr(app, "get_credentials", lambda env: {"ok": "yes"})
+    monkeypatch.setattr(app, "get_oauth_url", lambda env: "https://example/token")
+    monkeypatch.setattr(
+        app, "request_access_token", lambda credentials, oauth_url: object()
+    )
+    monkeypatch.setattr(app, "SalesforceClient", lambda auth: object())
+    monkeypatch.setenv("CERTIFICATION_QUEUE_ID", "queue")
+    monkeypatch.setenv("PRIMARY_RESPONDER_ID", "responder")
+
+    class Service:
+        def __init__(self, client, queue_id, responder_id):
+            assert queue_id == "queue"
+            assert responder_id == "responder"
+
+        def run(self):
+            return AutomationCounts(created=2, reused=3, skipped=4)
+
+    monkeypatch.setattr(app, "ProfileUpdateService", Service)
+
+    assert app.main(["profile-updates"]) == 0
+    output = capsys.readouterr().out
+    assert "created: 2" in output
+    assert "reused: 3" in output
+    assert "skipped: 4" in output
+    assert "failed: 0" in output
+
+
+def test_profile_updates_cli_requires_both_ids(monkeypatch, capsys):
+    monkeypatch.setattr(app, "_load_dotenv", lambda path: None)
+    monkeypatch.delenv("CERTIFICATION_QUEUE_ID", raising=False)
+    monkeypatch.delenv("PRIMARY_RESPONDER_ID", raising=False)
+
+    assert app.main(["profile-updates"]) == 1
+    error = capsys.readouterr().err
+    assert "CERTIFICATION_QUEUE_ID" in error
+    assert "PRIMARY_RESPONDER_ID" in error
+
+
+def test_profile_updates_cli_is_nonzero_when_records_fail(monkeypatch, capsys):
+    monkeypatch.setattr(app, "_load_dotenv", lambda path: None)
+    monkeypatch.setattr(app, "get_credentials", lambda env: {"ok": "yes"})
+    monkeypatch.setattr(app, "get_oauth_url", lambda env: "https://example/token")
+    monkeypatch.setattr(
+        app, "request_access_token", lambda credentials, oauth_url: object()
+    )
+    monkeypatch.setattr(app, "SalesforceClient", lambda auth: object())
+    monkeypatch.setenv("CERTIFICATION_QUEUE_ID", "queue")
+    monkeypatch.setenv("PRIMARY_RESPONDER_ID", "responder")
+
+    class Service:
+        errors = ["audit-1: feed unavailable"]
+
+        def __init__(self, client, queue_id, responder_id):
+            pass
+
+        def run(self):
+            return AutomationCounts(failed=1)
+
+    monkeypatch.setattr(app, "ProfileUpdateService", Service)
+
+    assert app.main(["profile-updates"]) == 1
+    assert "audit-1: feed unavailable" in capsys.readouterr().err

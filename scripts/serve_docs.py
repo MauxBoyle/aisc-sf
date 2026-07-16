@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Serve MkDocs with output captured to mkdocs.log."""
+
 import subprocess
 import sys
 
