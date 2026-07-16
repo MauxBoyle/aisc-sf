@@ -8,46 +8,85 @@ Clone the repository, then install the project and its dependencies:
 uv sync
 ```
 
-## Usage
+## Configuration
 
-Create a read-only snapshot via the CLI entrypoint:
-
-```bash
-uv run aisc_salesforce snapshot
-```
-
-Use the development environment settings explicitly:
-
-```bash
-uv run aisc_salesforce snapshot
-```
-
-Or run it as a Python module:
-
-```bash
-uv run python -m aisc_salesforce snapshot
-```
-
-## Environment Variables
-
-`.env.example` is the committed template. Copy it to `.env` for development:
+`.env.example` is the committed template. Copy it to `.env`:
 
 ```bash
 cp .env.example .env
 ```
 
-Add the existing Salesforce Connected App values for `SF_CLIENT_ID` and
-`SF_CLIENT_SECRET`. The application uses the client-credentials OAuth2 flow,
-matching the existing Salesforce gateway. It reads this local file
-automatically. `.env` and generated snapshot files are sensitive and are
-ignored by Git; never commit them.
+Set these values in `.env`:
 
-For a specific Salesforce org or sandbox, set `SF_LOGIN_URL` to either its base
-URL or its full token endpoint. For example:
+- `SF_CLIENT_ID` and `SF_CLIENT_SECRET`: credentials for the existing
+  Salesforce Connected App.
+- `CERTIFICATION_QUEUE_ID`: the Case owner used by `profile-updates`.
+- `PRIMARY_RESPONDER_ID`: the Case Primary Responder used by
+  `profile-updates`.
+- `SF_LOGIN_URL` (optional): an org URL or complete OAuth token URL. It
+  defaults to Salesforce's production login service.
+
+The application loads `.env` automatically. This file and generated snapshots
+are ignored by Git because they can contain sensitive data. Never commit
+`.env`.
+
+For a specific Salesforce org or sandbox, for example:
 
 ```bash
 SF_LOGIN_URL=https://aisc.my.salesforce.com/services/oauth2/token
 ```
+
+## Commands
+
+Create a read-only snapshot:
+
+```bash
+uv run aisc_salesforce snapshot
+```
+
+Process recent audit notes and New company profile submissions:
+
+```bash
+uv run aisc_salesforce profile-updates
+```
+
+Both commands are also available as a Python module:
+
+```bash
+uv run python -m aisc_salesforce profile-updates
+```
+
+`profile-updates` prints `created`, `reused`, `skipped`, and `failed` counts. A
+successful run returns exit code `0`; missing configuration or a Salesforce
+failure returns `1`.
+
+### Daily scheduling
+
+The command is non-interactive, so an external scheduler can run it once per
+day. For example, a Linux cron entry can change to the repository and run it at
+2:00 AM:
+
+```cron
+0 2 * * * cd /path/to/aisc-sf && uv run aisc_salesforce profile-updates
+```
+
+Windows Task Scheduler can run the same command with the repository as its
+working directory. Scheduling is deliberately kept outside this project.
+
+### Safe retries and duplicate prevention
+
+The automation checks Cases only on the relevant Account. It reuses the newest
+appropriate Expected or Received Case and checks the Case and Audit Chatter
+feeds for the exact automation message before posting. Therefore, rerunning
+after a partial failure fills in missing work without duplicating completed
+comments. New submission names are appended with ` / ` once.
+
+Audit Dates from 30 days ago through today are eligible. Blank explanations,
+`None`, and `N/A` are ignored. If adding a Profile Update name would make a
+Case Subject longer than Salesforce's 255-character limit, that record is
+reported as failed instead of silently truncating its identifier.
+
+## Snapshot schema
 
 The schema dictionary is stored at
 `src/aisc_salesforce/data/salesforce_schema_dictionary.csv` and controls the
@@ -62,11 +101,6 @@ Account, Contact, Case, `Cert_Audit__c`, and `Company_Profile_Change__c`, plus
 ```bash
 uv run aisc_salesforce snapshot --output-dir /secure/snapshot-location
 ```
-
-The command is ready for a future scheduler because it is non-interactive and
-uses exit codes. Choosing cron, Windows Task Scheduler, or GitHub Actions is a
-separate operational decision.
-
 
 ## Testing
 
