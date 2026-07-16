@@ -4,7 +4,8 @@ Welcome to the **aisc-salesforce** documentation.
 
 ## Overview
 
-aisc-salesforce is a Python application.
+aisc-salesforce creates read-only data snapshots and automates daily Profile
+Update Case work from certification audits and participant submissions.
 
 ## Quick Links
 

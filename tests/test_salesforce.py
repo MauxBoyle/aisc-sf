@@ -34,6 +34,10 @@ class Session:
         self.calls.append(("get", args, kwargs))
         return self.responses.pop(0)
 
+    def patch(self, *args, **kwargs):
+        self.calls.append(("patch", args, kwargs))
+        return self.responses.pop(0)
+
 
 def credentials():
     return {
@@ -128,3 +132,123 @@ def test_query_failure_names_object():
     )
     with pytest.raises(SalesforceError, match="Account.*bad field"):
         client.query_all("Account", [ExportField("Nope", "nope")])
+
+
+def test_filtered_query_supports_sorting_and_pagination():
+    session = Session(
+        [
+            Response(
+                {
+                    "done": False,
+                    "records": [{"Id": "one"}],
+                    "nextRecordsUrl": "/next-page",
+                }
+            ),
+            Response({"done": True, "records": [{"Id": "two"}]}),
+        ]
+    )
+    client = SalesforceClient(SalesforceSession("https://example", "token"), session)
+
+    records = client.query_records(
+        "Case",
+        ["Id", "Subject"],
+        where="AccountId = 'account'",
+        order_by="CreatedDate DESC",
+    )
+
+    assert records == [{"Id": "one"}, {"Id": "two"}]
+    assert session.calls[0][2]["params"]["q"] == (
+        "SELECT Id, Subject FROM Case WHERE AccountId = 'account' "
+        "ORDER BY CreatedDate DESC"
+    )
+    assert session.calls[1][1][0] == "https://example/next-page"
+
+
+def test_record_create_update_and_retrieve_use_salesforce_rest_api():
+    session = Session(
+        [
+            Response({"id": "500-created", "success": True}),
+            Response({}, ok=True),
+            Response({"Id": "500-created", "CaseNumber": "1234"}),
+        ]
+    )
+    client = SalesforceClient(SalesforceSession("https://example", "token"), session)
+
+    assert client.create_record("Case", {"Subject": "Test"}) == "500-created"
+    client.update_record("Case", "500-created", {"Status": "Pending"})
+    record = client.get_record("Case", "500-created", ["Id", "CaseNumber"])
+
+    assert record["CaseNumber"] == "1234"
+    assert session.calls[0] == (
+        "post",
+        ("https://example/services/data/v60.0/sobjects/Case",),
+        {
+            "headers": {
+                "Authorization": "Bearer token",
+                "Content-Type": "application/json",
+            },
+            "json": {"Subject": "Test"},
+            "timeout": 30,
+        },
+    )
+    assert session.calls[1][0] == "patch"
+    assert session.calls[2][2]["params"] == {"fields": "Id,CaseNumber"}
+
+
+def test_feed_messages_follow_pages_and_post_with_subject_id():
+    session = Session(
+        [
+            Response(
+                {
+                    "elements": [
+                        {
+                            "body": {
+                                "messageSegments": [{"type": "Text", "text": "First"}]
+                            }
+                        }
+                    ],
+                    "nextPageUrl": "/feed-next",
+                }
+            ),
+            Response(
+                {
+                    "elements": [
+                        {
+                            "body": {
+                                "messageSegments": [{"type": "Text", "text": "Second"}]
+                            }
+                        }
+                    ]
+                }
+            ),
+            Response({"id": "feed-item"}),
+        ]
+    )
+    client = SalesforceClient(SalesforceSession("https://example", "token"), session)
+
+    assert client.get_feed_messages("500-case") == ["First", "Second"]
+    client.post_feed_message("500-case", "A message")
+
+    assert session.calls[1][1][0] == "https://example/feed-next"
+    assert session.calls[2][2]["json"] == {
+        "body": {"messageSegments": [{"type": "Text", "text": "A message"}]},
+        "feedElementType": "FeedItem",
+        "subjectId": "500-case",
+    }
+
+
+def test_write_and_feed_http_errors_are_wrapped():
+    client = SalesforceClient(
+        SalesforceSession("https://example", "token"),
+        Session([Response([{"message": "not allowed"}], ok=False)]),
+    )
+
+    with pytest.raises(SalesforceError, match="create Case.*not allowed"):
+        client.create_record("Case", {"Subject": "Test"})
+
+    feed_client = SalesforceClient(
+        SalesforceSession("https://example", "token"),
+        Session([Response("server broke", ok=False, text="server broke")]),
+    )
+    with pytest.raises(SalesforceError, match="post Chatter.*server broke"):
+        feed_client.post_feed_message("500-case", "Test")

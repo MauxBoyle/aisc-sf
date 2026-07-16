@@ -1,4 +1,4 @@
-"""Command-line interface for manual Salesforce snapshots."""
+"""Command-line interface for Salesforce snapshots and daily automation."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from .dictionary import DictionaryError, load_export_plan
+from .profile_updates import ProfileUpdateService
 from .salesforce import (
     SalesforceClient,
     SalesforceError,
@@ -21,7 +22,7 @@ from .snapshot import write_snapshot
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI and return a shell-friendly status code."""
     parser = argparse.ArgumentParser(
-        description="Create a read-only Salesforce data snapshot."
+        description="Run AISC Salesforce data and workflow commands."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     snapshot_parser = subparsers.add_parser(
@@ -33,6 +34,10 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("snapshots"),
         help="Directory to contain snapshot folders.",
     )
+    subparsers.add_parser(
+        "profile-updates",
+        help="Process recent audits and New profile update submissions.",
+    )
     args = parser.parse_args(argv)
     if args.command == "snapshot":
         try:
@@ -40,12 +45,20 @@ def main(argv: list[str] | None = None) -> int:
         except (DictionaryError, SalesforceError, OSError) as error:
             print(f"Snapshot failed: {error}", file=sys.stderr)
             return 1
+    if args.command == "profile-updates":
+        try:
+            return _run_profile_updates()
+        except (SalesforceError, OSError) as error:
+            print(f"Profile updates failed: {error}", file=sys.stderr)
+            return 1
     return 1
 
 
 def _run_snapshot(output_dir: Path) -> int:
     _load_dotenv(Path(".env"))
-    dictionary_path = Path(__file__).with_name("data") / "salesforce_schema_dictionary.csv"
+    dictionary_path = (
+        Path(__file__).with_name("data") / "salesforce_schema_dictionary.csv"
+    )
     plan = load_export_plan(dictionary_path)
     environment = dict(os.environ)
     credentials = get_credentials(environment)
@@ -62,6 +75,38 @@ def _run_snapshot(output_dir: Path) -> int:
     return 0
 
 
+def _run_profile_updates() -> int:
+    """Connect to Salesforce and run the profile update service once."""
+    _load_dotenv(Path(".env"))
+    environment = dict(os.environ)
+    queue_id, responder_id = get_profile_update_configuration(environment)
+    credentials = get_credentials(environment)
+    auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
+    service = ProfileUpdateService(SalesforceClient(auth), queue_id, responder_id)
+    counts = service.run()
+    print("Profile updates complete:")
+    print(f"created: {counts.created}")
+    print(f"reused: {counts.reused}")
+    print(f"skipped: {counts.skipped}")
+    print(f"failed: {counts.failed}")
+    for error in getattr(service, "errors", []):
+        print(error, file=sys.stderr)
+    return 1 if counts.failed else 0
+
+
+def get_profile_update_configuration(
+    environment: dict[str, str],
+) -> tuple[str, str]:
+    """Read the two Salesforce IDs required by profile update automation."""
+    names = ("CERTIFICATION_QUEUE_ID", "PRIMARY_RESPONDER_ID")
+    missing = [name for name in names if not environment.get(name, "").strip()]
+    if missing:
+        raise SalesforceError(
+            "Missing Profile Update configuration: " + ", ".join(missing)
+        )
+    return tuple(environment[name].strip() for name in names)
+
+
 def _load_dotenv(path: Path) -> None:
     """Load simple KEY=VALUE entries without overwriting real environment variables."""
     if not path.is_file():
@@ -71,6 +116,23 @@ def _load_dotenv(path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        key, value = key.strip(), value.strip().strip("\"'")
+        key, value = key.strip(), _dotenv_value(value)
         if key:
             os.environ.setdefault(key, value)
+
+
+def _dotenv_value(value: str) -> str:
+    """Remove quotes and comments from one value read from a ``.env`` file."""
+    value = value.strip()
+    if not value:
+        return ""
+    if value[0] in {'"', "'"}:
+        quote = value[0]
+        for index, character in enumerate(value[1:], start=1):
+            if character == quote and value[index - 1] != "\\":
+                return value[1:index]
+        return value[1:]
+    for index, character in enumerate(value):
+        if character == "#" and index > 0 and value[index - 1].isspace():
+            return value[:index].rstrip()
+    return value
