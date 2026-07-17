@@ -61,6 +61,7 @@ metadata.
         - ProcessingResult
         - ProcessingError
         - ProcessingInterrupted
+        - ProcessingStoppedEarly
         - ProfileUpdateProcessingWorkflow
         - InteractiveProfileUpdateProcessor
         - read_staged_profile_updates
@@ -68,15 +69,30 @@ metadata.
         - format_response_emails
 
 `ProfileUpdateProcessingWorkflow` keeps Case preparation, staging publication,
-disk validation, and review in a fixed order. The smaller processing data types
-keep proposal construction, decisions, execution, response formatting, and
-audit writing separate.
+disk validation, and review in a fixed order. Its `output_fn` callback sends
+startup progress through the same channel as interactive output. The smaller
+processing data types and methods keep proposal construction, reviewer
+decisions, Salesforce execution, response formatting, and audit writing
+separate.
 
 `InteractiveProfileUpdateProcessor` refetches a target immediately before each
 decision. It writes `review_audit.jsonl` after every result and
-`response_emails.txt` for applied or manually verified changes. Profile Update
-closure and the Case's final status happen only after the entire Case batch is
-resolved.
+`response_emails.txt` for successful Account changes and completed submitted
+roles. Profile Update closure and the Case's final status happen only after the
+entire Case batch is resolved. `format_response_emails` keeps Account field
+results in their field-level format while combining each submitted Contact role
+into one response line; the underlying field decisions remain separate audit
+entries.
+
+`ProcessingResult.stopped_early` distinguishes a deliberate `Q`/`Quit` from a
+failure or keyboard interruption. A deliberate stop is handled inside
+`review()`: it writes a `stopped early` batch event, keeps the current Case
+Pending, and returns normally so the CLI can use exit code `0`.
+
+Single-record reads and writes continue to use the Salesforce REST sObject Rows
+API style, while Contact matching and Account History lookup use SOQL. See the
+[Salesforce API overview](https://developer.salesforce.com/blogs/2024/04/accessing-object-data-with-salesforce-platform-apis)
+and [record-update guidance](https://developer.salesforce.com/docs/marketing/marketing-cloud-growth/guide/mc-manage-objects-update-rest.html).
 
 ## CLI
 

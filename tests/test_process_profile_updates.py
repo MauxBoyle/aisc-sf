@@ -84,12 +84,18 @@ def account_record(**changes):
 
 
 class Feeder:
-    def __init__(self, answers):
+    def __init__(self, answers, *, row_answers=None):
         self.answers = iter(answers)
+        self.row_answers = iter(row_answers or [])
         self.prompts = []
 
     def __call__(self, prompt):
         self.prompts.append(prompt)
+        if prompt.startswith("Continue with this staged row"):
+            answer = next(self.row_answers, "")
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
         answer = next(self.answers)
         if isinstance(answer, BaseException):
             raise answer
@@ -106,6 +112,15 @@ class FakeClient:
                 "CaseNumber": "00010001",
                 "Status": "Pending",
             },
+            ("Contact", "old-contact"): {
+                "Id": "old-contact",
+                "AccountId": "account-1",
+                "FirstName": "Old",
+                "LastName": "Contact",
+                "Title": "",
+                "Email": "old.contact@example.com",
+                "Phone": "312-555-0000",
+            },
         }
         self.contacts = contacts or []
         for contact in self.contacts:
@@ -121,6 +136,13 @@ class FakeClient:
     def query_records(self, object_name, fields, *, where=None, order_by=None):
         self.queries.append((object_name, fields, where, order_by))
         if object_name == "Contact":
+            if where and where.startswith("Email = '") and where.endswith("'"):
+                email = where.removeprefix("Email = '").removesuffix("'")
+                return [
+                    dict(contact)
+                    for contact in self.contacts
+                    if contact.get("Email") == email
+                ]
             return [dict(contact) for contact in self.contacts]
         if object_name == "AccountHistory":
             return [dict(item) for item in self.history]
@@ -184,6 +206,7 @@ class CapturingProcessor:
 
 def test_workflow_creates_cases_then_stages_and_reads_the_published_csv(tmp_path):
     events = []
+    output = []
     processor = CapturingProcessor(events)
 
     def writer(rows, output_dir):
@@ -203,12 +226,29 @@ def test_workflow_creates_cases_then_stages_and_reads_the_published_csv(tmp_path
         StagingService(events),
         processor,
         staging_writer=writer,
+        output_fn=output.append,
     )
 
     workflow.run(tmp_path)
 
     assert events == ["cases", "stage", "write", "review"]
     assert processor.rows[0]["account_name"] == "value read from disk"
+    progress = [
+        "Preparing Profile Update Cases",
+        "Case preparation complete",
+        "Staging Profile Updates",
+        "Staging complete",
+        "Publishing staging CSV",
+        "Staging CSV published",
+        "Validating published staging CSV",
+        "Staging CSV validated",
+        "Starting interactive review",
+    ]
+    positions = [
+        next(index for index, message in enumerate(output) if text in message)
+        for text in progress
+    ]
+    assert positions == sorted(positions)
 
 
 @pytest.mark.parametrize("failure", ["cases", "stage", "write"])
@@ -234,6 +274,7 @@ def test_workflow_aborts_before_review_when_required_setup_fails(tmp_path, failu
         MaybeFailingStaging(events),
         processor,
         staging_writer=writer,
+        output_fn=lambda message: None,
     )
 
     with pytest.raises((ProcessingError, SalesforceError, OSError)):
@@ -284,6 +325,162 @@ def test_blocking_case_match_is_never_guessed():
             [staged_row(case_id="", case_match_status="ambiguous")],
             now=NOW,
         )
+
+
+@pytest.mark.parametrize("answer", ["", "c", "Continue"])
+def test_each_staged_row_has_a_continue_checkpoint_and_heading(tmp_path, answer):
+    client = FakeClient()
+    feeder = Feeder([], row_answers=[answer, answer.swapcase()])
+    output = []
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=feeder,
+        output_fn=output.append,
+        now=NOW,
+    )
+    rows = [
+        staged_row(source_submission_names='["PU-100"]'),
+        staged_row(source_submission_names='["PU-101"]'),
+    ]
+
+    result = processor.review(rows, tmp_path)
+
+    checkpoint_prompts = [
+        prompt
+        for prompt in feeder.prompts
+        if prompt.startswith("Continue with this staged row")
+    ]
+    assert len(checkpoint_prompts) == 2
+    displayed = "\n".join(output)
+    assert "Account: Acme Steel" in displayed
+    assert "Submitter: Sam Submitter <sam@example.com>" in displayed
+    assert "Profile Updates: PU-100" in displayed
+    assert "Profile Updates: PU-101" in displayed
+    assert result.stopped_early is False
+
+
+@pytest.mark.parametrize("answer", ["q", "Quit"])
+def test_quit_is_audited_preserves_completed_batches_and_returns_success(
+    tmp_path, answer
+):
+    client = FakeClient()
+    client.records.update(
+        {
+            ("Company_Profile_Change__c", "submission-2"): source_record(
+                Id="submission-2",
+                Name="PU-200",
+                Account__c="account-2",
+                CreatedDate="2026-07-16T14:30:00.000+0000",
+            ),
+            ("Account", "account-2"): account_record(
+                Id="account-2",
+                Name="Beta Steel",
+                Cert_Certification_Contact__c="",
+            ),
+            ("Case", "case-2"): {
+                "Id": "case-2",
+                "CaseNumber": "00010002",
+                "Status": "Pending",
+            },
+        }
+    )
+    feeder = Feeder([], row_answers=["", answer])
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=feeder,
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+    rows = [
+        staged_row(),
+        staged_row(
+            source_submission_ids='["submission-2"]',
+            source_submission_names='["PU-200"]',
+            earliest_submission_date="2026-07-16T14:30:00.000+0000",
+            latest_submission_date="2026-07-16T14:30:00.000+0000",
+            account_id="account-2",
+            account_name="Beta Steel",
+            case_id="case-2",
+            case_number="00010002",
+            revised_company_name="Beta Steel LLC",
+        ),
+    ]
+
+    result = processor.review(rows, tmp_path)
+
+    assert result.stopped_early is True
+    assert result.completed_batches == 1
+    assert result.pending_batches == 1
+    assert (
+        "Company_Profile_Change__c",
+        "submission-1",
+        {"Status__c": "Closed"},
+    ) in client.updated
+    assert ("Case", "case-1", {"Status": "Closed"}) in client.updated
+    assert not any(
+        object_name == "Company_Profile_Change__c" and record_id == "submission-2"
+        for object_name, record_id, _ in client.updated
+    )
+    assert ("Case", "case-2", {"Status": "Pending"}) in client.updated
+    assert (
+        "Account",
+        "account-2",
+        {"Name": "Beta Steel LLC"},
+    ) not in client.updated
+    audit = [
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    stopped = next(item for item in audit if item["result"] == "stopped early")
+    assert stopped["case_id"] == "case-2"
+    assert stopped["action"] == "reviewer requested safe stop"
+    assert result.response_path.read_text(encoding="utf-8") == ""
+
+
+@pytest.mark.parametrize(
+    ("shortcut", "expected_decision", "expected_status"),
+    [
+        ("a", "apply automatically", "applied"),
+        ("M", "make manually", "verified manually"),
+        ("n", "will not be made", "rejected"),
+    ],
+)
+def test_decision_shortcuts_are_case_insensitive_but_audit_full_phrases(
+    tmp_path,
+    shortcut,
+    expected_decision,
+    expected_status,
+):
+    client = FakeClient()
+    answers = [shortcut]
+    if shortcut.casefold() == "m":
+        client.get_sequences[("Account", "account-1")] = [
+            account_record(),
+            account_record(Name="Acme Steel LLC"),
+        ]
+        answers.extend(["", "yes"])
+    elif shortcut.casefold() == "a":
+        answers.append("yes")
+    feeder = Feeder(answers)
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=feeder,
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    result = processor.review(
+        [staged_row(revised_company_name="Acme Steel LLC")],
+        tmp_path,
+    )
+
+    audit = [
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    decision = next(item for item in audit if item["field"] == "Name")
+    assert decision["decision"] == expected_decision
+    assert decision["result"] == expected_status
 
 
 def test_account_change_uses_fresh_context_audits_and_closes_completed_batch(tmp_path):
@@ -364,7 +561,7 @@ def test_current_value_is_an_audited_noop_without_prompt_or_email_item(tmp_path)
         tmp_path,
     )
 
-    assert feeder.prompts == []
+    assert not any(prompt.startswith("Decision [") for prompt in feeder.prompts)
     entries = [
         json.loads(line)
         for line in result.audit_path.read_text(encoding="utf-8").splitlines()
@@ -418,10 +615,12 @@ def test_manual_change_mismatch_stops_without_closing_sources(tmp_path):
     assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
 
 
-def test_reviewer_selects_contact_then_reviews_fields_and_role_separately(tmp_path):
+def test_exact_email_match_is_global_and_each_mismatch_precedes_role_decision(
+    tmp_path,
+):
     contact = {
         "Id": "contact-1",
-        "AccountId": "account-1",
+        "AccountId": "different-account",
         "FirstName": "Alex",
         "LastName": "Smith",
         "Title": "Manager",
@@ -431,30 +630,47 @@ def test_reviewer_selects_contact_then_reviews_fields_and_role_separately(tmp_pa
     client = FakeClient(contacts=[contact])
     feeder = Feeder(
         [
-            "select existing",
-            "1",
+            "apply automatically",
+            "apply automatically",
+            "apply automatically",
             "apply automatically",
             "will not be made",
             "yes",
         ]
     )
+    output = []
     processor = InteractiveProfileUpdateProcessor(
         client,
         input_fn=feeder,
-        output_fn=lambda message: None,
+        output_fn=output.append,
         now=NOW,
     )
     row = staged_row(
-        certification_first_name="Alex",
-        certification_last_name="Smith",
-        certification_email="new@example.com",
+        certification_first_name="Alexa",
+        certification_last_name="Jones",
+        certification_title="Director",
+        certification_email="old@example.com",
+        certification_phone="312-555-0199",
         certification_salesforce_contact_id="contact-1",
         certification_resolution_action="update_contact",
     )
 
     result = processor.review([row], tmp_path)
 
-    assert ("Contact", "contact-1", {"Email": "new@example.com"}) in client.updated
+    contact_query = next(query for query in client.queries if query[0] == "Contact")
+    assert contact_query[2] == "Email = 'old@example.com'"
+    assert "AccountId" not in contact_query[2]
+    assert "candidates" not in "\n".join(output).casefold()
+    assert not any("Contact choice" in prompt for prompt in feeder.prompts)
+    assert sum(prompt.startswith("Decision [") for prompt in feeder.prompts) == 5
+    assert (
+        "Contact",
+        "contact-1",
+        {"FirstName": "Alexa"},
+    ) in client.updated
+    assert ("Contact", "contact-1", {"LastName": "Jones"}) in client.updated
+    assert ("Contact", "contact-1", {"Title": "Director"}) in client.updated
+    assert ("Contact", "contact-1", {"Phone": "312-555-0199"}) in client.updated
     assert not any(
         item[0] == "Account" and "Cert_Certification_Contact__c" in item[2]
         for item in client.updated
@@ -464,18 +680,33 @@ def test_reviewer_selects_contact_then_reviews_fields_and_role_separately(tmp_pa
         for line in result.audit_path.read_text(encoding="utf-8").splitlines()
     ]
     assert any(
-        item["field"] == "Email" and item["result"] == "applied" for item in entries
+        item["field"] == "FirstName" and item["result"] == "applied" for item in entries
     )
     assert any(
         item["field"] == "Cert_Certification_Contact__c"
         and item["result"] == "rejected"
         for item in entries
     )
+    displayed = "\n".join(output)
+    assert (
+        "Current Certification Contact:\n"
+        "Name: Alex Smith\n"
+        "Title: Manager\n"
+        "Email: old@example.com\n"
+        "Phone: 312-555-0100"
+    ) in displayed
+    assert (
+        "Certification Account Role\n"
+        "Current Salesforce value: Old Contact <old.contact@example.com>\n"
+        "Proposed value: Alexa Jones <old@example.com>"
+    ) in displayed
+    assert "contact-1" not in "\n".join(feeder.prompts)
+    assert "old-contact" not in "\n".join(feeder.prompts)
 
 
 def test_incomplete_contact_is_not_automatically_created(tmp_path):
     client = FakeClient()
-    feeder = Feeder(["create contact", "will not be made"])
+    feeder = Feeder(["will not be made", "yes"])
     output = []
     processor = InteractiveProfileUpdateProcessor(
         client,
@@ -502,17 +733,16 @@ def test_valid_contact_creation_precedes_field_and_role_decisions(tmp_path):
     client = FakeClient()
     feeder = Feeder(
         [
-            "create contact",
-            "apply automatically",
             "apply automatically",
             "apply automatically",
             "yes",
         ]
     )
+    output = []
     processor = InteractiveProfileUpdateProcessor(
         client,
         input_fn=feeder,
-        output_fn=lambda message: None,
+        output_fn=output.append,
         now=NOW,
     )
 
@@ -528,6 +758,9 @@ def test_valid_contact_creation_precedes_field_and_role_decisions(tmp_path):
         tmp_path,
     )
 
+    contact_query = next(query for query in client.queries if query[0] == "Contact")
+    assert contact_query[2] == "Email = 'new.person@example.com'"
+    assert sum(prompt.startswith("Decision [") for prompt in feeder.prompts) == 2
     assert client.created == [
         (
             "Contact",
@@ -535,19 +768,210 @@ def test_valid_contact_creation_precedes_field_and_role_decisions(tmp_path):
                 "AccountId": "account-1",
                 "FirstName": "New",
                 "LastName": "Person",
+                "Email": "new.person@example.com",
             },
         )
     ]
-    assert (
-        "Contact",
-        "created-1",
-        {"Email": "new.person@example.com"},
-    ) in client.updated
     assert (
         "Account",
         "account-1",
         {"Cert_Certification_Contact__c": "created-1"},
     ) in client.updated
+    assert (
+        "Submitted Certification Contact:\n"
+        "Name: New Person\n"
+        "Title: (blank)\n"
+        "Email: new.person@example.com\n"
+        "Phone: (blank)"
+    ) in "\n".join(output)
+
+
+def test_duplicate_exact_email_matches_are_audited_and_keep_case_retryable(tmp_path):
+    contacts = [
+        {
+            "Id": "contact-1",
+            "AccountId": "account-1",
+            "FirstName": "Alex",
+            "LastName": "Smith",
+            "Title": "",
+            "Email": "shared@example.com",
+            "Phone": "",
+        },
+        {
+            "Id": "contact-2",
+            "AccountId": "different-account",
+            "FirstName": "Alex",
+            "LastName": "Jones",
+            "Title": "",
+            "Email": "shared@example.com",
+            "Phone": "",
+        },
+    ]
+    client = FakeClient(contacts=contacts)
+    feeder = Feeder([])
+    output = []
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=feeder,
+        output_fn=output.append,
+        now=NOW,
+    )
+
+    with pytest.raises(ProcessingError, match="Multiple Salesforce Contacts"):
+        processor.review(
+            [
+                staged_row(
+                    certification_first_name="Alex",
+                    certification_last_name="Smith",
+                    certification_email="shared@example.com",
+                )
+            ],
+            tmp_path,
+        )
+
+    entries = [
+        json.loads(line)
+        for line in (tmp_path / "review_audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    failure = next(
+        item for item in entries if item["action"] == "match Contact by exact email"
+    )
+    assert failure["field"] == "Email"
+    assert failure["proposed_value"] == "shared@example.com"
+    assert failure["result"] == "failed"
+    assert "contact-1" in failure["original_value"]
+    assert "contact-2" in failure["original_value"]
+    assert not any(prompt.startswith("Decision [") for prompt in feeder.prompts)
+    assert not any("Contact choice" in prompt for prompt in feeder.prompts)
+    assert "candidates" not in "\n".join(output).casefold()
+    assert not any(item[0] == "Company_Profile_Change__c" for item in client.updated)
+    assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
+
+
+def test_case_context_and_history_are_loaded_once_for_reused_submission(tmp_path):
+    history = [
+        {
+            "Id": "history-1",
+            "AccountId": "account-1",
+            "Field": "Name",
+            "OldValue": "Old Acme",
+            "NewValue": "Acme Steel",
+            "CreatedDate": "2026-07-15T15:15:00.000+0000",
+        }
+    ]
+    client = FakeClient(history=history)
+    feeder = Feeder([])
+    output = []
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=feeder,
+        output_fn=output.append,
+        now=NOW,
+    )
+    rows = [
+        staged_row(
+            key_answers="Certification contact changed: Yes",
+            effective_date="2026-08-01",
+            warnings="Review this carefully",
+        ),
+        staged_row(
+            key_answers="Certification contact changed: Yes",
+            effective_date="2026-08-01",
+            warnings="Review this carefully",
+        ),
+    ]
+
+    processor.review(rows, tmp_path)
+
+    displayed = "\n".join(output)
+    assert displayed.count("Fresh comment") == 1
+    assert displayed.count("Fresh personnel note") == 1
+    assert displayed.count("Certification contact changed: Yes") == 1
+    assert displayed.count("Effective date: 2026-08-01") == 1
+    assert displayed.count("Review this carefully") == 1
+    assert displayed.count("Account History:") == 1
+    assert (
+        sum(
+            object_name == "Company_Profile_Change__c"
+            for object_name, _, _ in client.gets
+        )
+        == 1
+    )
+    assert sum(query[0] == "AccountHistory" for query in client.queries) == 1
+
+
+def test_role_response_is_consolidated_and_marks_unchanged_roles(tmp_path):
+    contacts = [
+        {
+            "Id": "contact-1",
+            "AccountId": "account-1",
+            "FirstName": "Alex",
+            "LastName": "Smith",
+            "Title": "Safety Director",
+            "Email": "alex@example.com",
+            "Phone": "312-555-0100",
+        },
+        {
+            "Id": "contact-2",
+            "AccountId": "account-1",
+            "FirstName": "Pat",
+            "LastName": "Jones",
+            "Title": "President",
+            "Email": "pat@example.com",
+            "Phone": "312-555-0200",
+        },
+    ]
+    client = FakeClient(
+        account=account_record(
+            Cert_Certification_Contact__c="contact-1",
+            Cert_Principal_Contact__c="contact-2",
+        ),
+        contacts=contacts,
+    )
+    feeder = Feeder(["apply automatically", "yes"])
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=feeder,
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    result = processor.review(
+        [
+            staged_row(
+                certification_first_name="Alex",
+                certification_last_name="Smith",
+                certification_title="Safety Director",
+                certification_email="alex@example.com",
+                certification_phone="312-555-0199",
+                principal_first_name="Pat",
+                principal_last_name="Jones",
+                principal_title="President",
+                principal_email="pat@example.com",
+                principal_phone="312-555-0200",
+            )
+        ],
+        tmp_path,
+    )
+
+    response = result.response_path.read_text(encoding="utf-8")
+    assert response.count("Certification Contact:") == 1
+    assert (
+        "Certification Contact: Alex Smith, Safety Director, "
+        "alex@example.com, 312-555-0199"
+    ) in response
+    assert (
+        "Replaces Alex Smith, Safety Director, alex@example.com, 312-555-0100"
+    ) in response
+    assert (
+        "Principal Contact: Pat Jones, President, "
+        "pat@example.com, 312-555-0200 - no change"
+    ) in response
+    assert response.count("Replaces ") == 1
+    assert "Certification Contact Phone:" not in response
+    assert "Cert_Certification_Contact__c" not in response
 
 
 def test_email_formatter_creates_one_paragraph_per_submitter():

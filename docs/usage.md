@@ -201,34 +201,70 @@ publishes and validates a new CSV and groups all rows with the same Account and
 Case. Batches containing a Key Update strictly older than seven days are
 reviewed first, followed by the remaining batches from oldest to newest.
 
+Progress messages appear around authentication, Case preparation, staging, CSV
+publication, CSV validation, and review startup. The same output channel is
+used for progress and interactive review. Visual separators mark stages, Cases,
+staged rows, Contact roles, and response-email sections.
+
 ### What the reviewer sees
 
-Before decisions, the command fetches current Profile Update, Account, Contact,
-and Account History data. Account History is limited to the source submission
-day in `America/Chicago`. Its field, previous value, new value, and timestamp
-are displayed together with Comments, Other Personnel notes, Key Update
-answers, effective date, and warnings.
+At the beginning of each Case batch, the command fetches current Profile Update
+data and displays Comments, Other Personnel notes, Key Update answers,
+effective dates, and warnings once. Account History is limited to each source
+submission day in `America/Chicago`; a local calendar day shared by several
+rows is queried only once. Each history field, previous value, new value, and
+timestamp is displayed before proposals begin. The fetched submissions are
+then reused throughout that Case review.
 
 Account name, company owner, and each billing-address component are separate
 proposals. Effective date and the Key Update answers remain context unless
 they map to one of those real Account fields.
 
-For a real change, type exactly one of:
+Before every staged CSV row, a heading shows its Account, submitter, and source
+Profile Update names. The next prompt is a checkpoint:
 
-| Decision | Result |
+| Checkpoint answer | Result |
 |---|---|
-| `apply automatically` | Update Salesforce with the proposed value |
-| `make manually` | Pause, refetch, and verify the reviewer’s Salesforce change |
-| `will not be made` | Record the rejection without a Salesforce data change |
+| Enter, `C`, or `Continue` | Review the row |
+| `Q` or `Quit` | Stop successfully before reviewing the row |
+
+Checkpoint answers are case-insensitive. Continue is the default only at this
+checkpoint. For a real change, choose an explicit decision:
+
+| Shortcut | Complete phrase | Result |
+|---|---|---|
+| `A` | `apply automatically` | Update Salesforce with the proposed value |
+| `M` | `make manually` | Pause, refetch, and verify the reviewer’s Salesforce change |
+| `N` | `will not be made` | Record the rejection without a Salesforce data change |
+
+Decision shortcuts and complete phrases are case-insensitive. The JSON Lines
+audit always stores the complete phrase.
 
 An already-current value is an audited no-op. It does not prompt and does not
 appear in response-email text.
 
-For a submitted Contact role, first choose `create contact`, `select existing`,
-or `decline`. Fresh candidate Contacts are displayed. Contact fields are then
-reviewed individually, followed by a separate proposal for the Account role
-lookup. Automatic Contact creation requires a Last Name; incomplete data must
-be completed manually or declined.
+For every submitted Contact role with an email address, the command searches
+all Salesforce Contacts using that exact email:
+
+- With one match, it fetches that Contact and compares every submitted
+  nonblank field. Each mismatch is a separate three-decision proposal.
+- With no match, it asks for one explicit decision about creating a Contact
+  under the Account. Automatic creation requires a Last Name; incomplete data
+  must be completed manually or declined.
+- With more than one match, it does not guess. The ambiguity is written as a
+  failed audit entry, processing for the Case stops, the Case stays Pending,
+  and the source Profile Updates stay open.
+
+No candidate list or Contact-selection prompt is shown. After a Contact is
+created or an exact match is reviewed, assigning that Contact to the Account
+role is always handled as a separate proposal.
+
+For an exact match, the Contact's current name, title, email, and phone are
+displayed together before its individual fields. For a new Contact, all
+submitted details are displayed together before the creation decision.
+Account-role proposals use friendly Contact names and emails for the current
+and proposed values. Salesforce IDs remain available internally for record
+writes and audit entries, but are not exposed in decision prompts.
 
 ### Output and finalization
 
@@ -240,9 +276,13 @@ Each timestamped run folder contains:
 | `review_audit.jsonl` | One immediately flushed JSON object per decision/result |
 | `response_emails.txt` | Generated response text grouped by submitter email |
 
-Only automatically applied and manually verified changes appear in response
-text. Each item uses `ITEM: NEW INFORMATION` followed by
-`Replaces OLD INFORMATION`. The Account paragraph begins:
+Automatically applied and manually verified Account-information changes appear
+in response text using `ITEM: NEW INFORMATION` followed by
+`Replaces OLD INFORMATION`. Each submitted Contact role is instead summarized
+as one line containing its name, title, email, and phone. A role that required
+no change ends with `- no change`. A following `Replaces OLD INFORMATION` line
+is included only when prior role information was actually replaced. The
+Account paragraph begins:
 
 > Thank you for updating your information with AISC. The changes are summarized
 > below. An updated Participant Portal login will be sent by a separate email,
@@ -253,16 +293,23 @@ The command generates and prints email text; it does not send email. The
 reviewer sends it through the approved email system and confirms whether it was
 sent.
 
-After a resolved batch, source Profile Updates are set to `Closed`. The Case is
-set to `Closed` only when every generated response is confirmed sent. If a
-response is not sent, the source records are closed and the Case stays
-`Pending`.
+After a resolved batch, source Profile Updates are set to `Closed`. Answering
+`yes` to every generated response-email confirmation means the email was sent,
+so the Case is also set to `Closed`. If a response is not sent, the source
+records are closed and the Case stays `Pending`.
 
 On interruption, a Salesforce failure, or a manual value that does not verify,
 the audit is flushed, unfinalized source Profile Updates stay open, the Case is
 kept Pending, and the command exits nonzero. Retrying restages open records.
 Values applied before the interruption are fetched again and recorded as
 no-ops, so they are not applied or emailed twice.
+
+`Q` or `Quit` is different from an error or keyboard interruption. It writes a
+`stopped early` audit event, keeps the current Case Pending, leaves that Case's
+Profile Updates open, skips response generation for the unfinished row, and
+returns exit code `0`. Completed earlier batches stay completed. Later batches
+remain untouched. The final CLI summary says that review stopped at the
+reviewer's request and reports completed and pending batch counts.
 
 !!! warning
 

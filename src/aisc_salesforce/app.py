@@ -169,9 +169,11 @@ def _run_process_profile_updates(
     _load_dotenv(Path(".env"))
     environment = dict(os.environ)
     queue_id, responder_id = get_profile_update_configuration(environment)
+    output_fn("Authenticating with Salesforce...")
     credentials = get_credentials(environment)
     auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
     client = SalesforceClient(auth)
+    output_fn("Salesforce authentication complete.")
     workflow = ProfileUpdateProcessingWorkflow(
         ProfileUpdateService(client, queue_id, responder_id),
         ProfileUpdateStagingService(client),
@@ -180,8 +182,13 @@ def _run_process_profile_updates(
             input_fn=input_fn,
             output_fn=output_fn,
         ),
+        output_fn=output_fn,
     )
     result = workflow.run(output_dir)
+    if result.stopped_early:
+        output_fn("Review stopped early at your request.")
+    else:
+        output_fn("Interactive review complete.")
     output_fn(f"Processed Profile Updates from: {result.staging_path}")
     output_fn(f"Audit trail: {result.audit_path}")
     output_fn(f"Response emails: {result.response_path}")

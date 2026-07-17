@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from aisc_salesforce import app
 from aisc_salesforce.dictionary import ExportField
 from aisc_salesforce.profile_updates import AutomationCounts
@@ -221,6 +223,70 @@ def test_process_profile_updates_cli_injects_interactive_io_and_output_dir(
     assert calls == [(tmp_path, input_fn, output.append)]
     assert output == ["Processing complete"]
     assert prompts == []
+
+
+def test_process_profile_updates_reports_authentication_and_safe_stop(
+    monkeypatch, tmp_path
+):
+    output = []
+    captured = {}
+    monkeypatch.setattr(app, "_load_dotenv", lambda path: None)
+    monkeypatch.setattr(
+        app,
+        "get_profile_update_configuration",
+        lambda environment: ("queue", "responder"),
+    )
+    monkeypatch.setattr(app, "get_credentials", lambda environment: {"ok": "yes"})
+    monkeypatch.setattr(app, "get_oauth_url", lambda environment: "token-url")
+    monkeypatch.setattr(
+        app,
+        "request_access_token",
+        lambda credentials, oauth_url: "auth",
+    )
+    monkeypatch.setattr(app, "SalesforceClient", lambda auth: "client")
+    monkeypatch.setattr(app, "ProfileUpdateService", lambda *args: "cases")
+    monkeypatch.setattr(app, "ProfileUpdateStagingService", lambda client: "staging")
+
+    class Processor:
+        def __init__(self, client, *, input_fn, output_fn):
+            captured["processor_output"] = output_fn
+
+    class Workflow:
+        def __init__(
+            self,
+            case_service,
+            staging_service,
+            processor,
+            *,
+            output_fn,
+        ):
+            captured["workflow_output"] = output_fn
+
+        def run(self, output_dir):
+            return SimpleNamespace(
+                staging_path=output_dir / "run",
+                audit_path=output_dir / "run" / "review_audit.jsonl",
+                response_path=output_dir / "run" / "response_emails.txt",
+                completed_batches=1,
+                pending_batches=1,
+                stopped_early=True,
+            )
+
+    monkeypatch.setattr(app, "InteractiveProfileUpdateProcessor", Processor)
+    monkeypatch.setattr(app, "ProfileUpdateProcessingWorkflow", Workflow)
+
+    result = app._run_process_profile_updates(
+        tmp_path,
+        input_fn=lambda prompt: "",
+        output_fn=output.append,
+    )
+
+    assert result == 0
+    assert captured["processor_output"] == output.append
+    assert captured["workflow_output"] == output.append
+    assert "Authenticating with Salesforce" in output[0]
+    assert "Salesforce authentication complete" in output[1]
+    assert "Review stopped early at your request." in output
 
 
 def test_process_profile_updates_cli_reports_processing_failure(monkeypatch, capsys):
