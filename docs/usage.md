@@ -150,19 +150,123 @@ blank role columns.
 
 Resolution actions are `update_contact` for an exact match or a title/phone
 update, `change_email` for a new email applied to the Account's current role
-contact, and `use_submitted_contact` when another submitted role is the first
-exact match. Resolution sources show whether the match came from another
-submitted role, an Account Contact, a sibling Account Contact, or the Account's
-current role lookup.
+contact, `use_submitted_contact` when another submitted role is the first exact
+match, and `create_contact` when an unmatched submitted name describes a new
+Contact. A missing Contact ID or a `create_contact` action always comes with a
+warning for human review. Resolution sources show whether the match came from
+another submitted role, submitted data for a new Contact, an Account Contact, a
+sibling Account Contact, or the Account's current role lookup.
 
 Contact text is compared after trimming and case folding. The resolver does not
 guess nicknames. Name searches stop at the first tier containing candidates:
 other submitted roles, the current Account's Contacts, then Contacts belonging
 to sibling Accounts with the same Parent. Multiple candidates at that first
-tier are reported as ambiguous.
+tier are reported as ambiguous. Repeated identical contact information in
+several submitted roles counts as one candidate; the same name paired with
+conflicting emails remains ambiguous. When a Contact is resolved, missing title
+and phone values are filled from that Contact where possible. Missing title or
+phone alone does not cause a warning.
 
 !!! warning
 
-    A future processor must inspect `has_warnings` and `warnings` before acting
-    on a row. The `warnings` field is readable, newline-separated text; role
-    warnings are also copied into the matching prefixed `warning` column.
+    The interactive processor inspects `has_warnings` and `warnings` before
+    acting on a row. The `warnings` field is readable, newline-separated text;
+    role warnings are also copied into the matching prefixed `warning` column.
+
+Case preparation adds `case_id`, `case_number`, `case_status`, and
+`case_match_status`. A row is processable only when its match status is
+`matched`. Missing and ambiguous Case matches are blocking warnings and are
+never guessed.
+
+Key Update metadata is explicit:
+
+- `has_key_updates` is `true` when at least one source is marked as Key Data or
+  contains a Key Update field.
+- `earliest_key_update_date` is the oldest such source `CreatedDate`.
+
+## Process Profile Updates command
+
+Run the Case preparation, fresh staging, and interactive review as one command:
+
+```bash
+uv run aisc_salesforce process-profile-updates
+uv run aisc_salesforce process-profile-updates \
+  --output-dir /secure/staged-profile-updates
+```
+
+The command has no dry-run option. A staged recommendation alone never causes
+a Salesforce data change. The command first runs `ProfileUpdateService`; if
+Case creation or reuse fails, it stops before staging or review. It then
+publishes and validates a new CSV and groups all rows with the same Account and
+Case. Batches containing a Key Update strictly older than seven days are
+reviewed first, followed by the remaining batches from oldest to newest.
+
+### What the reviewer sees
+
+Before decisions, the command fetches current Profile Update, Account, Contact,
+and Account History data. Account History is limited to the source submission
+day in `America/Chicago`. Its field, previous value, new value, and timestamp
+are displayed together with Comments, Other Personnel notes, Key Update
+answers, effective date, and warnings.
+
+Account name, company owner, and each billing-address component are separate
+proposals. Effective date and the Key Update answers remain context unless
+they map to one of those real Account fields.
+
+For a real change, type exactly one of:
+
+| Decision | Result |
+|---|---|
+| `apply automatically` | Update Salesforce with the proposed value |
+| `make manually` | Pause, refetch, and verify the reviewer’s Salesforce change |
+| `will not be made` | Record the rejection without a Salesforce data change |
+
+An already-current value is an audited no-op. It does not prompt and does not
+appear in response-email text.
+
+For a submitted Contact role, first choose `create contact`, `select existing`,
+or `decline`. Fresh candidate Contacts are displayed. Contact fields are then
+reviewed individually, followed by a separate proposal for the Account role
+lookup. Automatic Contact creation requires a Last Name; incomplete data must
+be completed manually or declined.
+
+### Output and finalization
+
+Each timestamped run folder contains:
+
+| File | Purpose |
+|---|---|
+| `profile_updates.csv` | Exact published staging input used by the reviewer |
+| `review_audit.jsonl` | One immediately flushed JSON object per decision/result |
+| `response_emails.txt` | Generated response text grouped by submitter email |
+
+Only automatically applied and manually verified changes appear in response
+text. Each item uses `ITEM: NEW INFORMATION` followed by
+`Replaces OLD INFORMATION`. The Account paragraph begins:
+
+> Thank you for updating your information with AISC. The changes are summarized
+> below. An updated Participant Portal login will be sent by a separate email,
+> if needed. Unless otherwise noted, previous contacts will remain in the
+> {ACCOUNT NAME} contact list.
+
+The command generates and prints email text; it does not send email. The
+reviewer sends it through the approved email system and confirms whether it was
+sent.
+
+After a resolved batch, source Profile Updates are set to `Closed`. The Case is
+set to `Closed` only when every generated response is confirmed sent. If a
+response is not sent, the source records are closed and the Case stays
+`Pending`.
+
+On interruption, a Salesforce failure, or a manual value that does not verify,
+the audit is flushed, unfinalized source Profile Updates stay open, the Case is
+kept Pending, and the command exits nonzero. Retrying restages open records.
+Values applied before the interruption are fetched again and recorded as
+no-ops, so they are not applied or emailed twice.
+
+!!! warning
+
+    All three artifacts can contain sensitive personal and Salesforce data.
+    Git ignores their default location and generated filenames. Store custom
+    output directories securely, limit access, and do not attach these files
+    to public issues or commits.

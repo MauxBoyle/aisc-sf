@@ -5,8 +5,8 @@ Welcome to the **aisc-salesforce** documentation.
 ## Overview
 
 aisc-salesforce creates read-only data snapshots, stages submitted Profile
-Updates for human review, and automates daily Profile Update Case work from
-certification audits and participant submissions.
+Updates, automates Profile Update Case work, and provides an audited interactive
+review command for approved Account and Contact changes.
 
 ## Quick Links
 
