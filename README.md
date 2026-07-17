@@ -127,6 +127,11 @@ order:
 4. Read that published file back from disk.
 5. Review rows in Account-and-Case batches.
 
+The command prints progress before and after authentication, Case preparation,
+staging, CSV publication, CSV validation, and review startup. Section
+separators make workflow stages, Cases, staged rows, Contact roles, and response
+emails easier to distinguish.
+
 Use `--output-dir` the same way as the staging command:
 
 ```bash
@@ -134,19 +139,42 @@ uv run aisc_salesforce process-profile-updates \
   --output-dir /secure/staged-profile-updates
 ```
 
-Each real field change requires one complete decision phrase:
+Before each staged CSV row, the command shows the Account, submitter, and source
+Profile Update names. At the Continue/Quit checkpoint, press Enter, type `C`,
+or type `Continue` to review that row. Type `Q` or `Quit` to stop safely.
+Only this checkpoint has a default; change decisions always require an explicit
+answer.
 
-- `apply automatically` writes the displayed value to Salesforce.
-- `make manually` pauses for the reviewer to make the change, then refetches
+Each real field change accepts a shortcut or its complete decision phrase:
+
+- `A` or `apply automatically` writes the displayed value to Salesforce.
+- `M` or `make manually` pauses for the reviewer to make the change, then refetches
   Salesforce and continues only if the value matches.
-- `will not be made` records the rejection without changing Salesforce.
+- `N` or `will not be made` records the rejection without changing Salesforce.
+
+Shortcuts and phrases are case-insensitive. Audit entries always store the
+complete phrase.
 
 Already-current values are recorded as no-ops and do not prompt. For each
-submitted Contact role, the command displays fresh Contact candidates and asks
-the reviewer to create a Contact, select an existing Contact, or decline. It
-then reviews Contact fields individually and treats the Account role lookup as
-a separate decision. A Contact without the Salesforce-required Last Name
-cannot be created automatically.
+submitted Contact role, the command searches all Salesforce Contacts for the
+exact submitted email address. One match is fetched and each mismatched
+submitted field is reviewed separately. No match leads to an explicit Contact
+creation decision. In both cases, assigning the resolved Contact to the
+Account role is a separate decision. Potential-contact lists are never shown.
+More than one exact-email match is audited as an error; the Case stays Pending
+and its source submissions remain open for a safe retry. A Contact without the
+Salesforce-required Last Name cannot be created automatically.
+
+Before individual fields are reviewed, an existing Contact's name, title,
+email, and phone are shown together. The submitted values are shown together
+before a new-Contact decision. Account-role proposals show current and proposed
+Contact names and emails; Salesforce Contact IDs remain internal to writes and
+the audit trail instead of appearing in decision prompts.
+
+Comments, Other Personnel notes, Key Update answers, effective dates, warnings,
+and same-day Account History are shown once at the beginning of each Case
+batch. Reused submissions and local calendar days are fetched only once during
+that Case review.
 
 The timestamped staging folder contains:
 
@@ -157,16 +185,26 @@ response_emails.txt
 ```
 
 The JSON Lines audit is flushed after every decision and Salesforce result.
-The response file contains one generated paragraph per submitter email. The
-command prints the text but does not send email itself; after sending it
-through the normal email system, the reviewer confirms `yes` or `no`.
+The response file contains one generated paragraph per submitter email.
+Account-information changes keep the `ITEM: NEW INFORMATION` and
+`Replaces OLD INFORMATION` format. Each submitted Contact role is consolidated
+into one contact-information line. An unchanged role ends with `- no change`;
+`Replaces ...` appears only when existing role information was actually
+replaced. The command prints the text but does not send email itself; after
+sending it through the normal email system, the reviewer confirms `yes` or
+`no`.
 
 When all rows in a Case batch are resolved, source Profile Updates are set to
-`Closed`. The Case is set to `Closed` only after every generated response is
-confirmed sent; otherwise it remains `Pending`. An interruption, failed write,
-or failed manual verification leaves unfinalized Profile Updates open and the
-Case Pending. A retry creates a new staging snapshot of open records and
-records already-applied Salesforce values as no-ops.
+`Closed`. Answering `yes` after every generated response confirms the email was
+sent and closes the Case too; otherwise the Case remains `Pending`.
+
+A deliberate `Q` or `Quit` is audited and returns exit code `0`. The current
+Case stays `Pending`, its Profile Updates stay open, no response text is
+generated for its unfinished row, and later batches are not started. Earlier
+completed batches and their audit records are preserved. An interruption,
+failed write, or failed manual verification instead exits nonzero while leaving
+unfinalized Profile Updates open and the Case Pending. On any retry, previously
+applied Salesforce values are fetched again and recorded as no-ops.
 
 > [!WARNING]
 > Staging, audit, and response files contain personal and Salesforce data.
