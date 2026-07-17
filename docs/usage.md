@@ -150,16 +150,22 @@ blank role columns.
 
 Resolution actions are `update_contact` for an exact match or a title/phone
 update, `change_email` for a new email applied to the Account's current role
-contact, and `use_submitted_contact` when another submitted role is the first
-exact match. Resolution sources show whether the match came from another
-submitted role, an Account Contact, a sibling Account Contact, or the Account's
-current role lookup.
+contact, `use_submitted_contact` when another submitted role is the first exact
+match, and `create_contact` when an unmatched submitted name describes a new
+Contact. A missing Contact ID or a `create_contact` action always comes with a
+warning for human review. Resolution sources show whether the match came from
+another submitted role, submitted data for a new Contact, an Account Contact, a
+sibling Account Contact, or the Account's current role lookup.
 
 Contact text is compared after trimming and case folding. The resolver does not
 guess nicknames. Name searches stop at the first tier containing candidates:
 other submitted roles, the current Account's Contacts, then Contacts belonging
 to sibling Accounts with the same Parent. Multiple candidates at that first
-tier are reported as ambiguous.
+tier are reported as ambiguous. Repeated identical contact information in
+several submitted roles counts as one candidate; the same name paired with
+conflicting emails remains ambiguous. When a Contact is resolved, missing title
+and phone values are filled from that Contact where possible. Missing title or
+phone alone does not cause a warning.
 
 !!! warning
 
