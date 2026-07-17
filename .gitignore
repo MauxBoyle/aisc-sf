@@ -194,6 +194,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Project-specific generated and local files
+staged_profile_updates/
 .ruff_cache
 *.log
 site/
