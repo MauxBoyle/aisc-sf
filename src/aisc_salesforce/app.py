@@ -5,9 +5,15 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from .dictionary import DictionaryError, load_export_plan
+from .process_profile_updates import (
+    InteractiveProfileUpdateProcessor,
+    ProcessingError,
+    ProfileUpdateProcessingWorkflow,
+)
 from .profile_updates import ProfileUpdateService
 from .salesforce import (
     SalesforceClient,
@@ -23,7 +29,12 @@ from .stage_profile_updates import (
 )
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    input_fn: Callable[[str], str] = input,
+    output_fn: Callable[[str], None] = print,
+) -> int:
     """Run the CLI and return a shell-friendly status code."""
     parser = argparse.ArgumentParser(
         description="Run AISC Salesforce data and workflow commands."
@@ -52,6 +63,16 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("staged_profile_updates"),
         help="Directory to contain staged profile update folders.",
     )
+    process_parser = subparsers.add_parser(
+        "process-profile-updates",
+        help="Create/reuse Cases, stage submissions, and review changes interactively.",
+    )
+    process_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("staged_profile_updates"),
+        help="Directory to contain staging, audit, and response artifacts.",
+    )
     args = parser.parse_args(argv)
     if args.command == "snapshot":
         try:
@@ -70,6 +91,16 @@ def main(argv: list[str] | None = None) -> int:
             return _run_stage_profile_updates(args.output_dir)
         except (SalesforceError, OSError) as error:
             print(f"Stage profile updates failed: {error}", file=sys.stderr)
+            return 1
+    if args.command == "process-profile-updates":
+        try:
+            return _run_process_profile_updates(
+                args.output_dir,
+                input_fn=input_fn,
+                output_fn=output_fn,
+            )
+        except (ProcessingError, SalesforceError, OSError) as error:
+            print(f"Process profile updates failed: {error}", file=sys.stderr)
             return 1
     return 1
 
@@ -125,6 +156,37 @@ def _run_stage_profile_updates(output_dir: Path) -> int:
     print(f"Staged profile updates complete: {snapshot_path / 'profile_updates.csv'}")
     print(f"staged rows: {len(result.rows)}")
     print(f"warnings: {result.warning_count}")
+    return 0
+
+
+def _run_process_profile_updates(
+    output_dir: Path,
+    *,
+    input_fn: Callable[[str], str] = input,
+    output_fn: Callable[[str], None] = print,
+) -> int:
+    """Connect to Salesforce and run the interactive Profile Update workflow."""
+    _load_dotenv(Path(".env"))
+    environment = dict(os.environ)
+    queue_id, responder_id = get_profile_update_configuration(environment)
+    credentials = get_credentials(environment)
+    auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
+    client = SalesforceClient(auth)
+    workflow = ProfileUpdateProcessingWorkflow(
+        ProfileUpdateService(client, queue_id, responder_id),
+        ProfileUpdateStagingService(client),
+        InteractiveProfileUpdateProcessor(
+            client,
+            input_fn=input_fn,
+            output_fn=output_fn,
+        ),
+    )
+    result = workflow.run(output_dir)
+    output_fn(f"Processed Profile Updates from: {result.staging_path}")
+    output_fn(f"Audit trail: {result.audit_path}")
+    output_fn(f"Response emails: {result.response_path}")
+    output_fn(f"completed Case batches: {result.completed_batches}")
+    output_fn(f"pending Case batches: {result.pending_batches}")
     return 0
 
 

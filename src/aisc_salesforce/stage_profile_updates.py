@@ -19,6 +19,7 @@ ACCOUNT_FIELDS = [
     "Id",
     "Name",
     "Certification_ID__c",
+    "Company_Owner__c",
     "BillingStreet",
     "BillingCity",
     "BillingState",
@@ -40,6 +41,15 @@ CONTACT_FIELDS = [
     "Title",
     "Email",
     "Phone",
+]
+
+PROFILE_CASE_FIELDS = [
+    "Id",
+    "CaseNumber",
+    "Subject",
+    "Status",
+    "CreatedDate",
+    "AccountId",
 ]
 
 KEY_ANSWER_FIELDS = [
@@ -156,6 +166,10 @@ SHARED_COLUMNS = [
     "latest_submission_date",
     "account_id",
     "account_name",
+    "case_id",
+    "case_number",
+    "case_status",
+    "case_match_status",
     "certification_id",
     "submitter_name",
     "submitter_email",
@@ -167,6 +181,8 @@ SHARED_COLUMNS = [
 ]
 
 KEY_COLUMNS = [
+    "has_key_updates",
+    "earliest_key_update_date",
     "effective_date",
     "revised_company_name",
     "revised_company_owner",
@@ -255,6 +271,7 @@ class ProfileUpdateStagingService:
                 all_accounts_by_id.setdefault(sibling_id, sibling)
 
         contacts = self._query_contacts(list(all_accounts_by_id.values()))
+        cases = self._query_cases(requested_account_ids)
         grouped = _group_submissions(submissions)
         rows = [
             self._build_row(
@@ -262,6 +279,7 @@ class ProfileUpdateStagingService:
                 accounts_by_id,
                 all_accounts_by_id,
                 contacts,
+                cases,
             )
             for records in grouped
         ]
@@ -311,12 +329,26 @@ class ProfileUpdateStagingService:
             order_by="AccountId ASC, Id ASC",
         )
 
+    def _query_cases(self, account_ids: list[str]) -> list[dict[str, Any]]:
+        if not account_ids:
+            return []
+        return self.client.query_records(
+            "Case",
+            PROFILE_CASE_FIELDS,
+            where=(
+                f"{_where_in('AccountId', account_ids)} "
+                "AND Subject LIKE '%Profile Update%'"
+            ),
+            order_by="CreatedDate DESC, Id DESC",
+        )
+
     def _build_row(
         self,
         records: list[dict[str, Any]],
         accounts_by_id: dict[str, dict[str, Any]],
         all_accounts_by_id: dict[str, dict[str, Any]],
         contacts: list[dict[str, Any]],
+        cases: list[dict[str, Any]],
     ) -> dict[str, str]:
         row = {column: "" for column in CSV_COLUMNS}
         merged = _merge_records(records)
@@ -324,6 +356,7 @@ class ProfileUpdateStagingService:
 
         account_id = _clean_text(merged.get("Account__c"))
         account = accounts_by_id.get(account_id)
+        key_records = [record for record in records if _is_key_update(record)]
         row.update(
             {
                 "source_submission_ids": json.dumps(
@@ -338,6 +371,12 @@ class ProfileUpdateStagingService:
                 "latest_submission_date": _clean_text(records[-1].get("CreatedDate")),
                 "account_id": account_id,
                 "account_name": _account_name(account, merged),
+                "has_key_updates": "true" if key_records else "false",
+                "earliest_key_update_date": (
+                    _clean_text(key_records[0].get("CreatedDate"))
+                    if key_records
+                    else ""
+                ),
                 "certification_id": _first_nonblank(
                     account.get("Certification_ID__c") if account else None,
                     merged.get("Certification_ID__c"),
@@ -358,6 +397,7 @@ class ProfileUpdateStagingService:
                 ),
             }
         )
+        self._populate_case(row, records, cases, warnings)
 
         if not row["submitter_email"]:
             warnings.append("Submission group has a blank submitter email.")
@@ -394,6 +434,62 @@ class ProfileUpdateStagingService:
         row["has_warnings"] = "true" if warnings else "false"
         row["warnings"] = "\n".join(warnings)
         return row
+
+    @staticmethod
+    def _populate_case(
+        row: dict[str, str],
+        records: list[dict[str, Any]],
+        cases: list[dict[str, Any]],
+        warnings: list[str],
+    ) -> None:
+        account_id = row["account_id"]
+        source_names = [
+            name for record in records if (name := _clean_text(record.get("Name")))
+        ]
+        account_cases = [
+            case for case in cases if _clean_text(case.get("AccountId")) == account_id
+        ]
+        matches = [
+            case
+            for case in account_cases
+            if source_names
+            and all(
+                _case_subject_has_name(case.get("Subject"), name)
+                for name in source_names
+            )
+        ]
+        if len(matches) == 1:
+            case = matches[0]
+            row.update(
+                {
+                    "case_id": _clean_text(case.get("Id")),
+                    "case_number": _clean_text(case.get("CaseNumber")),
+                    "case_status": _clean_text(case.get("Status")),
+                    "case_match_status": "matched",
+                }
+            )
+            return
+
+        partial_matches = [
+            case
+            for case in account_cases
+            if any(
+                _case_subject_has_name(case.get("Subject"), name)
+                for name in source_names
+            )
+        ]
+        status = "ambiguous" if matches or partial_matches else "missing"
+        row["case_match_status"] = status
+        if status == "ambiguous":
+            warning = (
+                "Blocking Case match: source submissions match more than one "
+                "Case or do not share one Case."
+            )
+        else:
+            warning = (
+                "Blocking Case match: no Case contains the source submission names."
+            )
+        warnings.append(warning)
 
     @staticmethod
     def _populate_address(
@@ -465,6 +561,13 @@ class ProfileUpdateStagingService:
             if suffix == "warning":
                 continue
             row[f"{prefix}_{suffix}"] = resolution.get(suffix, "")
+        _fill_missing_optional_role_fields(
+            row,
+            role,
+            all_roles,
+            contacts,
+            resolution,
+        )
         row[f"{prefix}_warning"] = warning
         if warning:
             warnings.append(f"{role.definition.label} role: {warning}")
@@ -564,20 +667,26 @@ def _resolve_role(
                 _matching_contact_names(sibling_contacts, first_name, last_name),
             ),
         ]
-        return _first_tier_resolution(tiers)
+        resolution, warning = _first_tier_resolution(tiers, no_match_is_warning=False)
+        if resolution or warning:
+            return resolution, warning
+        return _new_contact_resolution(
+            role,
+            "No exact contact match was found; a new contact will need to be created.",
+        )
 
     if last_name:
-        return {}, "Last-name-only input cannot be resolved safely."
+        return _new_contact_resolution(
+            role,
+            "Last-name-only input cannot be resolved safely; a new contact will "
+            "need to be created after human review.",
+        )
 
     if email:
         tiers = [
             (
                 "submitted_role",
-                [
-                    candidate
-                    for candidate in submitted_candidates
-                    if _normalized(candidate.values.get("email")) == _normalized(email)
-                ],
+                _matching_submitted_emails(submitted_candidates, email),
             ),
             (
                 "account_contact",
@@ -620,7 +729,7 @@ def _resolve_role(
 def _matching_submitted_names(
     candidates: list[MergedRole], first_name: str, last_name: str
 ) -> list[MergedRole]:
-    return [
+    matches = [
         candidate
         for candidate in candidates
         if _normalized(candidate.values.get("first_name")) == _normalized(first_name)
@@ -629,6 +738,59 @@ def _matching_submitted_names(
             or _normalized(candidate.values.get("last_name")) == _normalized(last_name)
         )
     ]
+    return _distinct_submitted_contacts(
+        matches,
+        identity_fields=("first_name", "last_name"),
+        conflict_field="email",
+    )
+
+
+def _matching_submitted_emails(
+    candidates: list[MergedRole], email: str
+) -> list[MergedRole]:
+    matches = [
+        candidate
+        for candidate in candidates
+        if _normalized(candidate.values.get("email")) == _normalized(email)
+    ]
+    return _distinct_submitted_contacts(matches, identity_fields=("email",))
+
+
+def _distinct_submitted_contacts(
+    candidates: list[MergedRole],
+    *,
+    identity_fields: tuple[str, ...],
+    conflict_field: str | None = None,
+) -> list[MergedRole]:
+    """Combine repeated role entries for the same submitted person."""
+    grouped: dict[tuple[str, ...], list[MergedRole]] = {}
+    for candidate in candidates:
+        identity = tuple(
+            _normalized(candidate.values.get(field_name))
+            for field_name in identity_fields
+        )
+        grouped.setdefault(identity, []).append(candidate)
+
+    distinct: list[MergedRole] = []
+    for group in grouped.values():
+        conflicts = (
+            {
+                value
+                for candidate in group
+                if (value := _normalized(candidate.values.get(conflict_field)))
+            }
+            if conflict_field
+            else set()
+        )
+        if len(conflicts) > 1:
+            distinct.extend(group)
+        else:
+            distinct.append(max(group, key=_role_detail_count))
+    return distinct
+
+
+def _role_detail_count(role: MergedRole) -> int:
+    return sum(bool(_clean_text(value)) for value in role.values.values())
 
 
 def _matching_contact_names(
@@ -689,20 +851,80 @@ def _existing_role_resolution(
     missing_message: str,
 ) -> tuple[dict[str, str], str]:
     contact_id = _clean_text(account.get(definition.account_lookup)) if account else ""
+    resolution = {
+        "resolution_action": action,
+        "resolution_source": "account_role_lookup",
+    }
     if not contact_id:
         return (
-            {},
+            resolution,
             f"{missing_message}, and the Account has no existing "
             f"{definition.label} role contact.",
         )
+    resolution["salesforce_contact_id"] = contact_id
+    return resolution, ""
+
+
+def _new_contact_resolution(
+    role: MergedRole, warning: str
+) -> tuple[dict[str, str], str]:
+    """Record that submitted role data describes a contact to be created."""
     return (
         {
-            "resolution_action": action,
-            "salesforce_contact_id": contact_id,
-            "resolution_source": "account_role_lookup",
+            "resolution_action": "create_contact",
+            "resolution_source": "submitted_data",
+            "source_submission_id": role.source_submission_id,
+            "source_role": role.definition.prefix,
         },
-        "",
+        warning,
     )
+
+
+def _fill_missing_optional_role_fields(
+    row: dict[str, str],
+    role: MergedRole,
+    all_roles: list[MergedRole],
+    contacts: list[dict[str, Any]],
+    resolution: dict[str, str],
+) -> None:
+    """Fill missing title and phone from the resolved contact when available."""
+    fallback: dict[str, Any] | None = None
+    if resolution.get("resolution_source") == "submitted_role":
+        source_role = resolution.get("source_role")
+        matched_role = next(
+            (
+                candidate
+                for candidate in all_roles
+                if candidate.definition.prefix == source_role
+            ),
+            None,
+        )
+        if matched_role is not None:
+            fallback = matched_role.values
+    else:
+        contact_id = resolution.get("salesforce_contact_id")
+        fallback = next(
+            (
+                contact
+                for contact in contacts
+                if _clean_text(contact.get("Id")) == contact_id
+            ),
+            None,
+        )
+
+    if fallback is None:
+        return
+    prefix = role.definition.prefix
+    if role.definition.title_field is not None and not row[f"{prefix}_title"]:
+        row[f"{prefix}_title"] = _first_nonblank(
+            fallback.get("title"),
+            fallback.get("Title"),
+        )
+    if not row[f"{prefix}_phone"]:
+        row[f"{prefix}_phone"] = _first_nonblank(
+            fallback.get("phone"),
+            fallback.get("Phone"),
+        )
 
 
 def write_staged_profile_updates(
@@ -751,6 +973,27 @@ def _submission_sort_key(record: dict[str, Any]) -> tuple[str, str]:
         _clean_text(record.get("CreatedDate")),
         _clean_text(record.get("Id")),
     )
+
+
+def _is_key_update(record: dict[str, Any]) -> bool:
+    key_fields = [
+        "Effective_Date__c",
+        "Revised_Company_Name__c",
+        "Revised_Company_Owner__c",
+        *(api_name for _, api_name, _ in ADDRESS_FIELDS),
+        *(api_name for api_name, _ in KEY_ANSWER_FIELDS),
+    ]
+    return _normalized(record.get("Type__c")) == "key data" or any(
+        _has_value(record.get(api_name)) for api_name in key_fields
+    )
+
+
+def _case_subject_has_name(subject: Any, update_name: str) -> bool:
+    text = _clean_text(subject)
+    if " - " not in text:
+        return False
+    names = [name.strip().casefold() for name in text.rsplit(" - ", 1)[1].split("/")]
+    return update_name.strip().casefold() in names
 
 
 def _where_in(field_name: str, values: list[str]) -> str:

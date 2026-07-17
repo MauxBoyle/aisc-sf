@@ -51,11 +51,41 @@ def account(**changes):
 
 
 class FakeClient:
-    def __init__(self, submissions, accounts=None, siblings=None, contacts=None):
+    def __init__(
+        self,
+        submissions,
+        accounts=None,
+        siblings=None,
+        contacts=None,
+        cases=None,
+    ):
         self.submissions = submissions
         self.accounts = accounts or []
         self.siblings = siblings or []
         self.contacts = contacts or []
+        self.cases = (
+            cases
+            if cases is not None
+            else [
+                {
+                    "Id": "case-1",
+                    "CaseNumber": "00010001",
+                    "Subject": (
+                        "Profile Update Received - "
+                        + " / ".join(
+                            dict.fromkeys(
+                                record.get("Name", "")
+                                for record in submissions
+                                if record.get("Name")
+                            )
+                        )
+                    ),
+                    "Status": "Pending",
+                    "CreatedDate": "2026-07-15T15:00:00.000+0000",
+                    "AccountId": "account-1",
+                }
+            ]
+        )
         self.queries = []
 
     def query_records(self, object_name, fields, *, where=None, order_by=None):
@@ -68,11 +98,13 @@ class FakeClient:
             return list(self.siblings)
         if object_name == "Contact":
             return list(self.contacts)
+        if object_name == "Case":
+            return list(self.cases)
         raise AssertionError(object_name)
 
 
-def stage(submissions, *, accounts=None, siblings=None, contacts=None):
-    client = FakeClient(submissions, accounts, siblings, contacts)
+def stage(submissions, *, accounts=None, siblings=None, contacts=None, cases=None):
+    client = FakeClient(submissions, accounts, siblings, contacts, cases)
     result = ProfileUpdateStagingService(client).stage()
     return result, client
 
@@ -108,7 +140,8 @@ def test_merges_same_account_and_email_with_later_nonblank_values():
     assert row["comments"] == "First comment"
     assert client.queries[0][3] == "CreatedDate ASC, Id ASC"
     assert client.queries[1][1] == ACCOUNT_FIELDS
-    assert client.queries[-1][1] == CONTACT_FIELDS
+    contact_query = next(query for query in client.queries if query[0] == "Contact")
+    assert contact_query[1] == CONTACT_FIELDS
 
 
 def test_keeps_different_emails_separate_and_blank_emails_independent():
@@ -242,6 +275,50 @@ def test_name_resolution_stops_at_first_candidate_tier():
     assert row["certification_salesforce_contact_id"] == ""
 
 
+def test_same_submitted_contact_in_multiple_roles_is_not_ambiguous():
+    record = submission(
+        Cert_First_Name__c="Jordan",
+        Cert_Last_Name__c="Lee",
+        Principal_First_Name__c="Jordan",
+        Principal_Last_Name__c="Lee",
+        Principal_Title__c="President",
+        Principal_Email__c="jordan@example.com",
+        Principal_Phone__c="312-555-0142",
+        AP_First_Name__c="Jordan",
+        AP_Last_Name__c="Lee",
+        AP_Email__c="jordan@example.com",
+    )
+
+    result, _ = stage([record], accounts=[account()])
+
+    row = result.rows[0]
+    assert row["certification_resolution_action"] == "use_submitted_contact"
+    assert row["certification_title"] == "President"
+    assert row["certification_phone"] == "312-555-0142"
+    assert row["certification_warning"] == ""
+    assert row["has_warnings"] == "false"
+
+
+def test_same_submitted_name_with_different_emails_is_ambiguous():
+    record = submission(
+        Cert_First_Name__c="Jordan",
+        Cert_Last_Name__c="Lee",
+        Principal_First_Name__c="Jordan",
+        Principal_Last_Name__c="Lee",
+        Principal_Email__c="first.jordan@example.com",
+        AP_First_Name__c="Jordan",
+        AP_Last_Name__c="Lee",
+        AP_Email__c="second.jordan@example.com",
+    )
+
+    result, _ = stage([record], accounts=[account()])
+
+    row = result.rows[0]
+    assert row["certification_resolution_action"] == ""
+    assert "ambiguous" in row["certification_warning"].lower()
+    assert row["has_warnings"] == "true"
+
+
 def test_name_resolution_uses_account_then_sibling_contacts_and_warns_on_ambiguity():
     account_contact = {
         "Id": "account-match",
@@ -285,6 +362,47 @@ def test_name_resolution_uses_account_then_sibling_contacts_and_warns_on_ambigui
     assert "ambiguous" in result.rows[0]["certification_warning"].lower()
 
 
+def test_existing_contact_fills_optional_title_and_phone_without_warning():
+    matching = {
+        "Id": "existing-contact",
+        "AccountId": "account-1",
+        "FirstName": "Alex",
+        "LastName": "Smith",
+        "Title": "Certification Manager",
+        "Email": "alex@example.com",
+        "Phone": "312-555-0105",
+    }
+    record = submission(
+        Cert_First_Name__c="Alex",
+        Cert_Last_Name__c="Smith",
+        Cert_Email__c="alex@example.com",
+    )
+
+    result, _ = stage([record], accounts=[account()], contacts=[matching])
+
+    row = result.rows[0]
+    assert row["certification_salesforce_contact_id"] == "existing-contact"
+    assert row["certification_title"] == "Certification Manager"
+    assert row["certification_phone"] == "312-555-0105"
+    assert row["certification_warning"] == ""
+    assert row["has_warnings"] == "false"
+
+
+def test_email_only_can_match_another_submitted_role():
+    record = submission(
+        Cert_Email__c="shared@example.com",
+        Principal_Email__c=" SHARED@example.com ",
+    )
+
+    result, _ = stage([record], accounts=[account()])
+
+    row = result.rows[0]
+    assert row["certification_resolution_action"] == "use_submitted_contact"
+    assert row["certification_resolution_source"] == "submitted_role"
+    assert row["certification_source_role"] == "principal"
+    assert row["certification_warning"] == ""
+
+
 def test_email_and_partial_field_resolution_use_existing_role_contact():
     matching = {
         "Id": "existing-email",
@@ -313,6 +431,56 @@ def test_email_and_partial_field_resolution_use_existing_role_contact():
     assert row["new_york_salesforce_contact_id"] == "contact-ny"
 
 
+def test_role_lookup_contact_fills_missing_optional_details():
+    quality_contact = {
+        "Id": "contact-quality",
+        "AccountId": "account-1",
+        "FirstName": "Quinn",
+        "LastName": "Davis",
+        "Title": "Old title",
+        "Email": "quinn@example.com",
+        "Phone": "312-555-0199",
+    }
+    record = submission(QC_Title__c="Quality Director")
+
+    result, _ = stage(
+        [record],
+        accounts=[account()],
+        contacts=[quality_contact],
+    )
+
+    row = result.rows[0]
+    assert row["quality_title"] == "Quality Director"
+    assert row["quality_phone"] == "312-555-0199"
+    assert row["quality_warning"] == ""
+
+
+def test_unmatched_named_contact_records_create_intent_and_warning():
+    record = submission(
+        Cert_First_Name__c="New",
+        Cert_Last_Name__c="Person",
+        Cert_Email__c="new.person@example.com",
+    )
+
+    result, _ = stage([record], accounts=[account()])
+
+    row = result.rows[0]
+    assert row["certification_resolution_action"] == "create_contact"
+    assert "new contact will need to be created" in row["certification_warning"].lower()
+    assert row["has_warnings"] == "true"
+
+
+def test_unmatched_first_name_only_records_new_contact_warning():
+    result, _ = stage(
+        [submission(Cert_First_Name__c="Unlisted")],
+        accounts=[account()],
+    )
+
+    row = result.rows[0]
+    assert row["certification_resolution_action"] == "create_contact"
+    assert "new contact will need to be created" in row["certification_warning"].lower()
+
+
 def test_missing_account_and_last_name_only_are_staged_with_warnings():
     record = submission(
         Account__c="missing-account",
@@ -325,6 +493,7 @@ def test_missing_account_and_last_name_only_are_staged_with_warnings():
     assert row["account_id"] == "missing-account"
     assert row["account_name"] == "Acme Steel"
     assert row["has_warnings"] == "true"
+    assert row["certification_resolution_action"] == "create_contact"
     assert "could not be retrieved" in row["warnings"]
     assert "last-name-only" in row["certification_warning"].lower()
 
@@ -350,8 +519,9 @@ def test_unresolved_name_and_missing_role_lookup_have_explicit_warnings():
     )
 
     row = result.rows[0]
-    assert row["certification_salesforce_contact_id"] == ""
-    assert "No exact contact match" in row["certification_warning"]
+    assert row["certification_resolution_action"] == "create_contact"
+    assert "new contact will need to be created" in row["certification_warning"]
+    assert row["accounting_resolution_action"] == "update_contact"
     assert "no existing Accounting role contact" in row["accounting_warning"]
 
 
@@ -387,3 +557,47 @@ def test_writer_removes_temporary_output_after_failure(monkeypatch, tmp_path):
         write_staged_profile_updates([], tmp_path)
 
     assert list(tmp_path.iterdir()) == []
+
+
+def test_staging_records_case_and_key_update_metadata():
+    record = submission(
+        Type__c="Key Data",
+        Revised_Company_Name__c="Acme Steel LLC",
+    )
+
+    result, client = stage([record], accounts=[account()])
+
+    row = result.rows[0]
+    assert row["case_id"] == "case-1"
+    assert row["case_number"] == "00010001"
+    assert row["case_match_status"] == "matched"
+    assert row["has_key_updates"] == "true"
+    assert row["earliest_key_update_date"] == record["CreatedDate"]
+    case_query = next(query for query in client.queries if query[0] == "Case")
+    assert "AccountId IN ('account-1')" in case_query[2]
+
+
+def test_missing_or_ambiguous_case_match_is_a_blocking_warning():
+    record = submission()
+
+    missing, _ = stage([record], accounts=[account()], cases=[])
+    assert missing.rows[0]["case_match_status"] == "missing"
+    assert missing.rows[0]["case_id"] == ""
+    assert "blocking" in missing.rows[0]["warnings"].lower()
+
+    matching_case = {
+        "Id": "case-1",
+        "CaseNumber": "0001",
+        "Subject": "Profile Update Received - PU-100",
+        "Status": "Pending",
+        "CreatedDate": "2026-07-15T15:00:00.000+0000",
+        "AccountId": "account-1",
+    }
+    ambiguous, _ = stage(
+        [record],
+        accounts=[account()],
+        cases=[matching_case, {**matching_case, "Id": "case-2"}],
+    )
+    assert ambiguous.rows[0]["case_match_status"] == "ambiguous"
+    assert ambiguous.rows[0]["case_id"] == ""
+    assert "blocking" in ambiguous.rows[0]["warnings"].lower()

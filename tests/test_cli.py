@@ -190,3 +190,50 @@ def test_stage_profile_updates_cli_reports_file_failure(monkeypatch, capsys):
 
     assert app.main(["stage-profile-updates"]) == 1
     assert "Stage profile updates failed: disk full" in capsys.readouterr().err
+
+
+def test_process_profile_updates_cli_injects_interactive_io_and_output_dir(
+    monkeypatch, tmp_path
+):
+    prompts = []
+    output = []
+    calls = []
+
+    def input_fn(prompt):
+        prompts.append(prompt)
+        return "will not be made"
+
+    def run(output_dir, *, input_fn, output_fn):
+        calls.append((output_dir, input_fn, output_fn))
+        output_fn("Processing complete")
+        return 0
+
+    monkeypatch.setattr(app, "_run_process_profile_updates", run)
+
+    assert (
+        app.main(
+            ["process-profile-updates", "--output-dir", str(tmp_path)],
+            input_fn=input_fn,
+            output_fn=output.append,
+        )
+        == 0
+    )
+    assert calls == [(tmp_path, input_fn, output.append)]
+    assert output == ["Processing complete"]
+    assert prompts == []
+
+
+def test_process_profile_updates_cli_reports_processing_failure(monkeypatch, capsys):
+    monkeypatch.setattr(
+        app,
+        "_run_process_profile_updates",
+        lambda output_dir, **kwargs: (_ for _ in ()).throw(
+            app.ProcessingError("manual verification failed")
+        ),
+    )
+
+    assert app.main(["process-profile-updates"]) == 1
+    assert (
+        "Process profile updates failed: manual verification failed"
+        in capsys.readouterr().err
+    )
