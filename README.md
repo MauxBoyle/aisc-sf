@@ -93,12 +93,17 @@ prefixed role columns for `certification_`, `principal_`, `accounting_`,
 `quality_`, and `new_york_`. Role columns preserve submitted values and record
 the proposed resolution action, Contact ID, resolution source, source
 submission/role, and any role-specific warning. New York does not have a title
-column.
+column. When an existing Contact is resolved, a missing title or phone is
+filled from that Contact where possible. Repeating the same contact information
+in several roles does not create a warning, but conflicting emails for the same
+submitted name are treated as ambiguous.
 
 Before processing a staged row, inspect both `has_warnings` and `warnings`.
 `warnings` is newline-separated and identifies ambiguous contacts, incomplete
 Accounts, missing role lookups, partial addresses that could not be filled, and
-other cases needing human review.
+other cases needing human review. An unmatched submitted name uses the
+`create_contact` resolution action and warns that a new Contact will need to be
+created.
 
 Each run creates an independent timestamped directory. The CSV is first written
 inside a temporary directory and is published only after the complete write

@@ -465,6 +465,13 @@ class ProfileUpdateStagingService:
             if suffix == "warning":
                 continue
             row[f"{prefix}_{suffix}"] = resolution.get(suffix, "")
+        _fill_missing_optional_role_fields(
+            row,
+            role,
+            all_roles,
+            contacts,
+            resolution,
+        )
         row[f"{prefix}_warning"] = warning
         if warning:
             warnings.append(f"{role.definition.label} role: {warning}")
@@ -564,20 +571,26 @@ def _resolve_role(
                 _matching_contact_names(sibling_contacts, first_name, last_name),
             ),
         ]
-        return _first_tier_resolution(tiers)
+        resolution, warning = _first_tier_resolution(tiers, no_match_is_warning=False)
+        if resolution or warning:
+            return resolution, warning
+        return _new_contact_resolution(
+            role,
+            "No exact contact match was found; a new contact will need to be created.",
+        )
 
     if last_name:
-        return {}, "Last-name-only input cannot be resolved safely."
+        return _new_contact_resolution(
+            role,
+            "Last-name-only input cannot be resolved safely; a new contact will "
+            "need to be created after human review.",
+        )
 
     if email:
         tiers = [
             (
                 "submitted_role",
-                [
-                    candidate
-                    for candidate in submitted_candidates
-                    if _normalized(candidate.values.get("email")) == _normalized(email)
-                ],
+                _matching_submitted_emails(submitted_candidates, email),
             ),
             (
                 "account_contact",
@@ -620,7 +633,7 @@ def _resolve_role(
 def _matching_submitted_names(
     candidates: list[MergedRole], first_name: str, last_name: str
 ) -> list[MergedRole]:
-    return [
+    matches = [
         candidate
         for candidate in candidates
         if _normalized(candidate.values.get("first_name")) == _normalized(first_name)
@@ -629,6 +642,59 @@ def _matching_submitted_names(
             or _normalized(candidate.values.get("last_name")) == _normalized(last_name)
         )
     ]
+    return _distinct_submitted_contacts(
+        matches,
+        identity_fields=("first_name", "last_name"),
+        conflict_field="email",
+    )
+
+
+def _matching_submitted_emails(
+    candidates: list[MergedRole], email: str
+) -> list[MergedRole]:
+    matches = [
+        candidate
+        for candidate in candidates
+        if _normalized(candidate.values.get("email")) == _normalized(email)
+    ]
+    return _distinct_submitted_contacts(matches, identity_fields=("email",))
+
+
+def _distinct_submitted_contacts(
+    candidates: list[MergedRole],
+    *,
+    identity_fields: tuple[str, ...],
+    conflict_field: str | None = None,
+) -> list[MergedRole]:
+    """Combine repeated role entries for the same submitted person."""
+    grouped: dict[tuple[str, ...], list[MergedRole]] = {}
+    for candidate in candidates:
+        identity = tuple(
+            _normalized(candidate.values.get(field_name))
+            for field_name in identity_fields
+        )
+        grouped.setdefault(identity, []).append(candidate)
+
+    distinct: list[MergedRole] = []
+    for group in grouped.values():
+        conflicts = (
+            {
+                value
+                for candidate in group
+                if (value := _normalized(candidate.values.get(conflict_field)))
+            }
+            if conflict_field
+            else set()
+        )
+        if len(conflicts) > 1:
+            distinct.extend(group)
+        else:
+            distinct.append(max(group, key=_role_detail_count))
+    return distinct
+
+
+def _role_detail_count(role: MergedRole) -> int:
+    return sum(bool(_clean_text(value)) for value in role.values.values())
 
 
 def _matching_contact_names(
@@ -689,20 +755,80 @@ def _existing_role_resolution(
     missing_message: str,
 ) -> tuple[dict[str, str], str]:
     contact_id = _clean_text(account.get(definition.account_lookup)) if account else ""
+    resolution = {
+        "resolution_action": action,
+        "resolution_source": "account_role_lookup",
+    }
     if not contact_id:
         return (
-            {},
+            resolution,
             f"{missing_message}, and the Account has no existing "
             f"{definition.label} role contact.",
         )
+    resolution["salesforce_contact_id"] = contact_id
+    return resolution, ""
+
+
+def _new_contact_resolution(
+    role: MergedRole, warning: str
+) -> tuple[dict[str, str], str]:
+    """Record that submitted role data describes a contact to be created."""
     return (
         {
-            "resolution_action": action,
-            "salesforce_contact_id": contact_id,
-            "resolution_source": "account_role_lookup",
+            "resolution_action": "create_contact",
+            "resolution_source": "submitted_data",
+            "source_submission_id": role.source_submission_id,
+            "source_role": role.definition.prefix,
         },
-        "",
+        warning,
     )
+
+
+def _fill_missing_optional_role_fields(
+    row: dict[str, str],
+    role: MergedRole,
+    all_roles: list[MergedRole],
+    contacts: list[dict[str, Any]],
+    resolution: dict[str, str],
+) -> None:
+    """Fill missing title and phone from the resolved contact when available."""
+    fallback: dict[str, Any] | None = None
+    if resolution.get("resolution_source") == "submitted_role":
+        source_role = resolution.get("source_role")
+        matched_role = next(
+            (
+                candidate
+                for candidate in all_roles
+                if candidate.definition.prefix == source_role
+            ),
+            None,
+        )
+        if matched_role is not None:
+            fallback = matched_role.values
+    else:
+        contact_id = resolution.get("salesforce_contact_id")
+        fallback = next(
+            (
+                contact
+                for contact in contacts
+                if _clean_text(contact.get("Id")) == contact_id
+            ),
+            None,
+        )
+
+    if fallback is None:
+        return
+    prefix = role.definition.prefix
+    if role.definition.title_field is not None and not row[f"{prefix}_title"]:
+        row[f"{prefix}_title"] = _first_nonblank(
+            fallback.get("title"),
+            fallback.get("Title"),
+        )
+    if not row[f"{prefix}_phone"]:
+        row[f"{prefix}_phone"] = _first_nonblank(
+            fallback.get("phone"),
+            fallback.get("Phone"),
+        )
 
 
 def write_staged_profile_updates(
