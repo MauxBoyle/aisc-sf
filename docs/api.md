@@ -43,7 +43,40 @@ with the target record supplied as `subjectId`.
         - write_staged_profile_updates
 
 `ProfileUpdateStagingService` only reads Salesforce data. The writer publishes
-the resulting rows atomically in a timestamped directory.
+the resulting rows atomically in a timestamped directory. Rows include
+blocking-safe Case match fields plus Key Update presence and earliest-date
+metadata.
+
+## Interactive Profile Update processing
+
+::: aisc_salesforce.process_profile_updates
+    options:
+      show_root_heading: true
+      members:
+        - ChangeProposal
+        - ReviewDecision
+        - ActionResult
+        - ActionStatus
+        - CaseBatch
+        - ProcessingResult
+        - ProcessingError
+        - ProcessingInterrupted
+        - ProfileUpdateProcessingWorkflow
+        - InteractiveProfileUpdateProcessor
+        - read_staged_profile_updates
+        - build_case_batches
+        - format_response_emails
+
+`ProfileUpdateProcessingWorkflow` keeps Case preparation, staging publication,
+disk validation, and review in a fixed order. The smaller processing data types
+keep proposal construction, decisions, execution, response formatting, and
+audit writing separate.
+
+`InteractiveProfileUpdateProcessor` refetches a target immediately before each
+decision. It writes `review_audit.jsonl` after every result and
+`response_emails.txt` for applied or manually verified changes. Profile Update
+closure and the Case's final status happen only after the entire Case batch is
+resolved.
 
 ## CLI
 

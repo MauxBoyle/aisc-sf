@@ -20,9 +20,10 @@ Set these values in `.env`:
 
 - `SF_CLIENT_ID` and `SF_CLIENT_SECRET`: credentials for the existing
   Salesforce Connected App.
-- `CERTIFICATION_QUEUE_ID`: the Case owner used by `profile-updates`.
+- `CERTIFICATION_QUEUE_ID`: the Case owner used by `profile-updates` and
+  `process-profile-updates`.
 - `PRIMARY_RESPONDER_ID`: the Case Primary Responder used by
-  `profile-updates`.
+  `profile-updates` and `process-profile-updates`.
 - `SF_LOGIN_URL` (optional): an org URL or complete OAuth token URL. It
   defaults to Salesforce's production login service.
 
@@ -54,6 +55,12 @@ Stage New company profile submissions in a read-only CSV:
 
 ```bash
 uv run aisc_salesforce stage-profile-updates
+```
+
+Create/reuse Cases, publish a fresh staging CSV, and review it interactively:
+
+```bash
+uv run aisc_salesforce process-profile-updates
 ```
 
 All commands are also available as a Python module:
@@ -109,10 +116,69 @@ Each run creates an independent timestamped directory. The CSV is first written
 inside a temporary directory and is published only after the complete write
 succeeds, so a failed run cannot leave a partial snapshot.
 
+### Interactive Profile Update processing
+
+`process-profile-updates` performs the complete processing workflow in this
+order:
+
+1. Run the existing Case automation.
+2. Stop if any required Case operation fails.
+3. Publish a fresh `profile_updates.csv`.
+4. Read that published file back from disk.
+5. Review rows in Account-and-Case batches.
+
+Use `--output-dir` the same way as the staging command:
+
+```bash
+uv run aisc_salesforce process-profile-updates \
+  --output-dir /secure/staged-profile-updates
+```
+
+Each real field change requires one complete decision phrase:
+
+- `apply automatically` writes the displayed value to Salesforce.
+- `make manually` pauses for the reviewer to make the change, then refetches
+  Salesforce and continues only if the value matches.
+- `will not be made` records the rejection without changing Salesforce.
+
+Already-current values are recorded as no-ops and do not prompt. For each
+submitted Contact role, the command displays fresh Contact candidates and asks
+the reviewer to create a Contact, select an existing Contact, or decline. It
+then reviews Contact fields individually and treats the Account role lookup as
+a separate decision. A Contact without the Salesforce-required Last Name
+cannot be created automatically.
+
+The timestamped staging folder contains:
+
+```text
+profile_updates.csv
+review_audit.jsonl
+response_emails.txt
+```
+
+The JSON Lines audit is flushed after every decision and Salesforce result.
+The response file contains one generated paragraph per submitter email. The
+command prints the text but does not send email itself; after sending it
+through the normal email system, the reviewer confirms `yes` or `no`.
+
+When all rows in a Case batch are resolved, source Profile Updates are set to
+`Closed`. The Case is set to `Closed` only after every generated response is
+confirmed sent; otherwise it remains `Pending`. An interruption, failed write,
+or failed manual verification leaves unfinalized Profile Updates open and the
+Case Pending. A retry creates a new staging snapshot of open records and
+records already-applied Salesforce values as no-ops.
+
+> [!WARNING]
+> Staging, audit, and response files contain personal and Salesforce data.
+> They are ignored by Git, but they must still be stored in an
+> access-controlled location and shared only through approved secure channels.
+
 ### Daily scheduling
 
-The command is non-interactive, so an external scheduler can run it once per
-day. For example, a Linux cron entry can change to the repository and run it at
+The `profile-updates` Case-preparation command is non-interactive, so an
+external scheduler can run it once per day. The
+`process-profile-updates` review command remains interactive. For example, a
+Linux cron entry can change to the repository and run Case preparation at
 2:00 AM:
 
 ```cron
