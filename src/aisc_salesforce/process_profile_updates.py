@@ -24,6 +24,8 @@ from .stage_profile_updates import (
 )
 
 CHICAGO = ZoneInfo("America/Chicago")
+STAGE_SEPARATOR = "=" * 72
+ITEM_SEPARATOR = "-" * 72
 
 ACCOUNT_REVIEW_FIELDS = [
     "Id",
@@ -120,6 +122,10 @@ class ProcessingInterrupted(ProcessingError):
     """The reviewer interrupted processing before the batch was finalized."""
 
 
+class ProcessingStoppedEarly(Exception):
+    """The reviewer deliberately stopped before the current row was reviewed."""
+
+
 class ReviewDecision(StrEnum):
     """The only decisions allowed for a real Salesforce change."""
 
@@ -137,6 +143,7 @@ class ActionStatus(StrEnum):
     NOOP = "no-op"
     FAILED = "failed"
     INTERRUPTED = "interrupted"
+    STOPPED_EARLY = "stopped early"
 
 
 @dataclass(frozen=True)
@@ -202,6 +209,19 @@ class ProcessingResult:
     response_path: Path
     completed_batches: int
     pending_batches: int
+    stopped_early: bool = False
+
+
+@dataclass(frozen=True)
+class _RoleResponse:
+    """One completed submitted role, consolidated for response-email text."""
+
+    account_name: str
+    submitter_email: str
+    label: str
+    contact_details: str
+    previous_details: str
+    changed: bool
 
 
 class ProfileUpdateProcessingWorkflow:
@@ -216,14 +236,17 @@ class ProfileUpdateProcessingWorkflow:
         staging_writer: Callable[
             [list[dict[str, str]], Path], Path
         ] = write_staged_profile_updates,
+        output_fn: Callable[[str], None] = print,
     ):
         self.case_service = case_service
         self.staging_service = staging_service
         self.processor = processor
         self.staging_writer = staging_writer
+        self.output_fn = output_fn
 
     def run(self, output_dir: Path) -> ProcessingResult | Any:
         """Execute setup in the required order and review the published CSV."""
+        self.output_fn(_section_heading("Preparing Profile Update Cases"))
         counts: AutomationCounts = self.case_service.run()
         if counts.failed:
             details = "; ".join(getattr(self.case_service, "errors", []))
@@ -231,9 +254,22 @@ class ProfileUpdateProcessingWorkflow:
             raise ProcessingError(
                 f"{counts.failed} required Case operation(s) failed{suffix}"
             )
+        self.output_fn("Case preparation complete.")
+
+        self.output_fn(_section_heading("Staging Profile Updates"))
         staged: StagingResult = self.staging_service.stage()
+        self.output_fn(f"Staging complete: {len(staged.rows)} row(s).")
+
+        self.output_fn(_section_heading("Publishing staging CSV"))
         staging_path = self.staging_writer(staged.rows, output_dir)
-        rows = read_staged_profile_updates(staging_path / "profile_updates.csv")
+        csv_path = staging_path / "profile_updates.csv"
+        self.output_fn(f"Staging CSV published: {csv_path}")
+
+        self.output_fn(_section_heading("Validating published staging CSV"))
+        rows = read_staged_profile_updates(csv_path)
+        self.output_fn(f"Staging CSV validated: {len(rows)} row(s).")
+
+        self.output_fn(_section_heading("Starting interactive review"))
         result = self.processor.review(rows, staging_path)
         if isinstance(result, ProcessingResult):
             return ProcessingResult(
@@ -242,6 +278,7 @@ class ProfileUpdateProcessingWorkflow:
                 response_path=result.response_path,
                 completed_batches=result.completed_batches,
                 pending_batches=result.pending_batches,
+                stopped_early=result.stopped_early,
             )
         return result
 
@@ -421,12 +458,24 @@ class InteractiveProfileUpdateProcessor:
         batches = build_case_batches(rows, now=self.now)
         completed = 0
         pending = 0
+        stopped_early = False
         try:
             with _AuditWriter(audit_path, lambda: datetime.now(UTC)) as audit:
                 self._audit = audit
                 for batch in batches:
                     try:
                         is_pending = self._review_batch(batch, response_writer)
+                    except ProcessingStoppedEarly:
+                        self._append_batch_event(
+                            batch,
+                            ActionStatus.STOPPED_EARLY,
+                            action="reviewer requested safe stop",
+                            error="",
+                        )
+                        self._keep_case_pending(batch)
+                        pending += len(batches) - completed
+                        stopped_early = True
+                        break
                     except ProcessingInterrupted:
                         self._keep_case_pending(batch)
                         raise
@@ -463,12 +512,22 @@ class InteractiveProfileUpdateProcessor:
             response_path=response_path,
             completed_batches=completed,
             pending_batches=pending,
+            stopped_early=stopped_early,
         )
 
     def _review_batch(self, batch: CaseBatch, response_writer: _ResponseWriter) -> bool:
+        account_name = next(
+            (
+                row.get("account_name", "").strip()
+                for row in batch.rows
+                if row.get("account_name", "").strip()
+            ),
+            batch.account_id,
+        )
         self.output_fn(
-            f"\nReviewing Case {batch.case_number or batch.case_id} "
-            f"for Account {batch.account_id}"
+            _section_heading(
+                f"Case {batch.case_number or batch.case_id}: {account_name}"
+            )
         )
         self._update_status_with_audit(
             batch,
@@ -478,21 +537,38 @@ class InteractiveProfileUpdateProcessor:
             "Pending",
             action="prepare batch",
         )
-        results: list[ActionResult] = []
-        for row in batch.rows:
-            fresh_submissions = self._fresh_submissions(row)
-            self._show_submission_context(row, fresh_submissions)
-            self._show_account_history(row, fresh_submissions)
-            results.extend(
-                self._review_account_proposals(batch, row, fresh_submissions)
-            )
-            results.extend(self._review_roles(batch, row, fresh_submissions))
+        fresh_by_id = self._fresh_case_submissions(batch)
+        self._show_case_context(batch, fresh_by_id)
+        self._show_account_history(batch, list(fresh_by_id.values()))
 
-        emails = format_response_emails(results)
+        results: list[ActionResult] = []
+        account_results: list[ActionResult] = []
+        role_responses: list[_RoleResponse] = []
+        for row in batch.rows:
+            self._checkpoint_row(row)
+            fresh_submissions = [
+                fresh_by_id[source_id]
+                for source_id in _json_string_list(row["source_submission_ids"])
+            ]
+            reviewed_account = self._review_account_proposals(
+                batch, row, fresh_submissions
+            )
+            account_results.extend(reviewed_account)
+            results.extend(reviewed_account)
+            reviewed_roles, responses = self._review_roles(
+                batch, row, fresh_submissions
+            )
+            results.extend(reviewed_roles)
+            role_responses.extend(responses)
+
+        emails = format_response_emails(account_results, role_responses)
         all_sent = True
         for email, text in emails.items():
             response_writer.append(batch.case_id, email, text)
-            self.output_fn(f"\nResponse email for {email}:\n{text}")
+            self.output_fn(
+                f"{_section_heading(f'Response email for {email}', ITEM_SEPARATOR)}"
+                f"\n{text}"
+            )
             sent = self._prompt_yes_no(
                 f"Was the response email to {email} sent? [yes/no]: "
             )
@@ -503,7 +579,10 @@ class InteractiveProfileUpdateProcessor:
             and not result.proposal.submitter_email.strip()
             for result in results
         )
-        all_sent = all_sent and not successful_without_email
+        missing_role_email = any(
+            not response.submitter_email.strip() for response in role_responses
+        )
+        all_sent = all_sent and not successful_without_email and not missing_role_email
         for source_id in batch.source_submission_ids:
             self._update_status_with_audit(
                 batch,
@@ -522,26 +601,71 @@ class InteractiveProfileUpdateProcessor:
         )
         return not all_sent
 
-    def _fresh_submissions(self, row: dict[str, str]) -> list[dict[str, Any]]:
-        return [
-            self.client.get_record(
+    def _checkpoint_row(self, row: dict[str, str]) -> None:
+        account_name = (
+            row.get("account_name", "").strip() or row.get("account_id", "").strip()
+        )
+        submitter_name = row.get("submitter_name", "").strip() or "(name unavailable)"
+        submitter_email = (
+            row.get("submitter_email", "").strip() or "(email unavailable)"
+        )
+        source_names = ", ".join(
+            _json_string_list(row.get("source_submission_names", "[]"))
+        )
+        heading = (
+            f"Staged row\n"
+            f"Account: {account_name or '(unavailable)'}\n"
+            f"Submitter: {submitter_name} <{submitter_email}>\n"
+            f"Profile Updates: {source_names or '(unnamed)'}"
+        )
+        self.output_fn(_section_heading(heading, ITEM_SEPARATOR))
+        while True:
+            answer = self.input_fn(
+                "Continue with this staged row? [C/Continue/Q/Quit] "
+                "(default Continue): "
+            )
+            normalized = answer.strip().casefold()
+            if normalized in {"", "c", "continue"}:
+                return
+            if normalized in {"q", "quit"}:
+                raise ProcessingStoppedEarly
+            self.output_fn("Enter C or Continue, Q or Quit, or press Enter.")
+
+    def _fresh_case_submissions(self, batch: CaseBatch) -> dict[str, dict[str, Any]]:
+        return {
+            source_id: self.client.get_record(
                 "Company_Profile_Change__c",
                 source_id,
                 SUBMISSION_FIELDS,
             )
-            for source_id in _json_string_list(row["source_submission_ids"])
-        ]
+            for source_id in batch.source_submission_ids
+        }
 
-    def _show_submission_context(
+    def _show_case_context(
         self,
-        row: dict[str, str],
-        submissions: list[dict[str, Any]],
+        batch: CaseBatch,
+        submissions_by_id: dict[str, dict[str, Any]],
     ) -> None:
-        self.output_fn(
-            f"Account: {row.get('account_name') or row.get('account_id')}\n"
-            f"Submitter: {row.get('submitter_name')} <{row.get('submitter_email')}>"
+        account_name = next(
+            (
+                row.get("account_name", "").strip()
+                for row in batch.rows
+                if row.get("account_name", "").strip()
+            ),
+            batch.account_id,
         )
-        for submission in submissions:
+        self.output_fn(f"Account: {account_name}")
+        submitters = dict.fromkeys(
+            (
+                row.get("submitter_name", "").strip(),
+                row.get("submitter_email", "").strip(),
+            )
+            for row in batch.rows
+        )
+        for name, email in submitters:
+            self.output_fn(f"Submitter: {name} <{email}>")
+
+        for submission in submissions_by_id.values():
             self.output_fn(
                 f"Profile Update {submission.get('Name') or submission.get('Id')} "
                 f"(status: {submission.get('Status__c', '')})"
@@ -552,19 +676,31 @@ class InteractiveProfileUpdateProcessor:
                 self.output_fn(f"Comments: {comments}")
             if notes:
                 self.output_fn(f"Other Personnel notes: {notes}")
-        if row.get("effective_date"):
-            self.output_fn(f"Effective date: {row['effective_date']}")
-        if row.get("key_answers"):
-            self.output_fn(f"Key Update answers:\n{row['key_answers']}")
-        if row.get("warnings"):
-            self.output_fn(f"Warnings:\n{row['warnings']}")
+
+        self._show_unique_row_context(batch.rows, "effective_date", "Effective date")
+        self._show_unique_row_context(batch.rows, "key_answers", "Key Update answers")
+        self._show_unique_row_context(batch.rows, "warnings", "Warnings")
+
+    def _show_unique_row_context(
+        self,
+        rows: list[dict[str, str]],
+        field_name: str,
+        label: str,
+    ) -> None:
+        values = dict.fromkeys(
+            row.get(field_name, "").strip()
+            for row in rows
+            if row.get(field_name, "").strip()
+        )
+        for value in values:
+            self.output_fn(f"{label}: {value}")
 
     def _show_account_history(
         self,
-        row: dict[str, str],
+        batch: CaseBatch,
         submissions: list[dict[str, Any]],
     ) -> None:
-        account_id = row["account_id"]
+        account_id = batch.account_id
         days = {
             _required_datetime(_display(submission.get("CreatedDate")))
             .astimezone(CHICAGO)
@@ -626,8 +762,9 @@ class InteractiveProfileUpdateProcessor:
         batch: CaseBatch,
         row: dict[str, str],
         submissions: list[dict[str, Any]],
-    ) -> list[ActionResult]:
+    ) -> tuple[list[ActionResult], list[_RoleResponse]]:
         results: list[ActionResult] = []
+        responses: list[_RoleResponse] = []
         for role in ROLE_DEFINITIONS:
             prefix = role.prefix
             submitted = {
@@ -639,97 +776,208 @@ class InteractiveProfileUpdateProcessor:
             }
             if not any(submitted.values()):
                 continue
-            contacts = self._fresh_contact_candidates(
-                batch.account_id,
-                row.get(f"{prefix}_salesforce_contact_id", "").strip(),
+            self.output_fn(
+                _section_heading(f"{role.label} Contact role", ITEM_SEPARATOR)
             )
-            self.output_fn(f"\n{role.label} Contact candidates:")
-            if contacts:
-                for number, contact in enumerate(contacts, start=1):
-                    self.output_fn(
-                        f"{number}. {contact.get('FirstName', '')} "
-                        f"{contact.get('LastName', '')} "
-                        f"<{contact.get('Email', '')}> [{contact.get('Id')}]"
-                    )
-            else:
-                self.output_fn("(none)")
 
-            choice = self._prompt_contact_choice(role.label)
-            contact_id = ""
-            if choice == "select existing":
-                contact_id = self._select_contact_id(contacts)
-            elif choice == "create contact":
+            original_role_id, original_role_contact = self._fresh_role_contact(
+                batch, role.account_lookup
+            )
+            matched = self._fresh_contact_by_email(
+                batch,
+                row,
+                role.label,
+                submitted.get("email", ""),
+            )
+            contact_results: list[ActionResult] = []
+            if matched is None:
                 created = self._review_new_contact(batch, row, role.label, submitted)
                 results.append(created)
+                contact_results.append(created)
                 if created.status in {
                     ActionStatus.APPLIED,
                     ActionStatus.VERIFIED_MANUAL,
                 }:
                     contact_id = created.proposal.target_record_id
+                else:
+                    contact_id = ""
             else:
-                declined = self._proposal(
+                self._show_contact_details(
+                    f"Current {role.label} Contact",
+                    matched,
+                )
+                contact_id = _display(matched.get("Id"))
+                for suffix, contact_field, field_label in CONTACT_SUFFIX_FIELDS:
+                    if suffix == "title" and role.title_field is None:
+                        continue
+                    proposed = submitted.get(suffix, "")
+                    if not proposed:
+                        continue
+                    proposal = self._proposal(
+                        batch,
+                        row,
+                        target_object="Contact",
+                        target_record_id=contact_id,
+                        field_name=contact_field,
+                        label=f"{role.label} Contact {field_label}",
+                        proposed_value=proposed,
+                    )
+                    reviewed = self._review_proposal(proposal)
+                    results.append(reviewed)
+                    contact_results.append(reviewed)
+
+            if not contact_id:
+                responses.append(
+                    self._build_role_response(
+                        row,
+                        role.label,
+                        original_role_contact,
+                        original_role_contact,
+                        changed=False,
+                    )
+                )
+                continue
+
+            proposed_role_contact = self.client.get_record(
+                "Contact",
+                contact_id,
+                CONTACT_REVIEW_FIELDS,
+            )
+            role_result = self._review_proposal(
+                self._proposal(
                     batch,
                     row,
                     target_object="Account",
                     target_record_id=batch.account_id,
                     field_name=role.account_lookup,
                     label=f"{role.label} Account Role",
-                    proposed_value="No role change",
-                    original_value="",
-                )
-                result = ActionResult(
-                    declined,
-                    ReviewDecision.WILL_NOT_BE_MADE,
-                    ActionStatus.REJECTED,
-                    action="decline contact",
-                )
-                self._append_audit(result)
-                results.append(result)
+                    proposed_value=contact_id,
+                ),
+                original_display=_contact_name_email(original_role_contact),
+                proposed_display=_contact_name_email(proposed_role_contact),
+            )
+            results.append(role_result)
 
-            if not contact_id:
-                continue
-            for suffix, contact_field, field_label in CONTACT_SUFFIX_FIELDS:
-                if suffix == "title" and role.title_field is None:
-                    continue
-                proposed = submitted.get(suffix, "")
-                if not proposed:
-                    continue
-                proposal = self._proposal(
-                    batch,
+            resolved_role = role_result.status in {
+                ActionStatus.APPLIED,
+                ActionStatus.VERIFIED_MANUAL,
+                ActionStatus.NOOP,
+            }
+            final_role_id = contact_id if resolved_role else original_role_id
+            final_role_contact = (
+                self.client.get_record("Contact", final_role_id, CONTACT_REVIEW_FIELDS)
+                if final_role_id
+                else None
+            )
+            contact_changed = any(
+                result.status in {ActionStatus.APPLIED, ActionStatus.VERIFIED_MANUAL}
+                for result in contact_results
+            )
+            role_changed = role_result.status in {
+                ActionStatus.APPLIED,
+                ActionStatus.VERIFIED_MANUAL,
+            }
+            responses.append(
+                self._build_role_response(
                     row,
-                    target_object="Contact",
-                    target_record_id=contact_id,
-                    field_name=contact_field,
-                    label=f"{role.label} Contact {field_label}",
-                    proposed_value=proposed,
+                    role.label,
+                    final_role_contact,
+                    original_role_contact,
+                    changed=role_changed
+                    or (contact_changed and final_role_id == contact_id),
                 )
-                results.append(self._review_proposal(proposal))
+            )
+        return results, responses
 
-            role_proposal = self._proposal(
+    def _fresh_role_contact(
+        self,
+        batch: CaseBatch,
+        account_lookup: str,
+    ) -> tuple[str, dict[str, Any] | None]:
+        account = self.client.get_record(
+            "Account",
+            batch.account_id,
+            ["Id", account_lookup],
+        )
+        contact_id = _display(account.get(account_lookup))
+        if not contact_id:
+            return "", None
+        contact = self.client.get_record(
+            "Contact",
+            contact_id,
+            CONTACT_REVIEW_FIELDS,
+        )
+        return contact_id, contact
+
+    def _fresh_contact_by_email(
+        self,
+        batch: CaseBatch,
+        row: dict[str, str],
+        role_label: str,
+        email: str,
+    ) -> dict[str, Any] | None:
+        contacts: list[dict[str, Any]] = []
+        if email:
+            contacts = self.client.query_records(
+                "Contact",
+                CONTACT_REVIEW_FIELDS,
+                where=f"Email = '{escape_soql_string(email)}'",
+                order_by="Id ASC",
+            )
+        if len(contacts) > 1:
+            error = (
+                f"Multiple Salesforce Contacts have the exact email {email!r}; "
+                f"the {role_label} role cannot be resolved safely."
+            )
+            proposal = self._proposal(
                 batch,
                 row,
-                target_object="Account",
-                target_record_id=batch.account_id,
-                field_name=role.account_lookup,
-                label=f"{role.label} Account Role",
-                proposed_value=contact_id,
+                target_object="Contact",
+                target_record_id="",
+                field_name="Email",
+                label=f"{role_label} Contact exact email match",
+                original_value=tuple(
+                    _display(contact.get("Id")) for contact in contacts
+                ),
+                proposed_value=email,
             )
-            results.append(self._review_proposal(role_proposal))
-        return results
-
-    def _fresh_contact_candidates(
-        self, account_id: str, staged_contact_id: str
-    ) -> list[dict[str, Any]]:
-        where = f"AccountId = '{escape_soql_string(account_id)}'"
-        if staged_contact_id:
-            where = f"({where} OR Id = '{escape_soql_string(staged_contact_id)}')"
-        contacts = self.client.query_records(
-            "Contact",
-            CONTACT_REVIEW_FIELDS,
-            where=where,
-            order_by="LastName ASC, FirstName ASC, Id ASC",
+            self._append_audit(
+                ActionResult(
+                    proposal,
+                    None,
+                    ActionStatus.FAILED,
+                    action="match Contact by exact email",
+                    error=error,
+                )
+            )
+            raise ProcessingError(error)
+        if contacts:
+            return dict(contacts[0])
+        self.output_fn(
+            f"No Salesforce Contact has the exact submitted {role_label} "
+            f"email {_display(email) or '(blank)'}."
         )
-        return [dict(contact) for contact in contacts]
+        return None
+
+    def _build_role_response(
+        self,
+        row: dict[str, str],
+        role_label: str,
+        final_contact: dict[str, Any] | None,
+        original_contact: dict[str, Any] | None,
+        *,
+        changed: bool,
+    ) -> _RoleResponse:
+        current = _contact_summary(final_contact)
+        previous = _contact_summary(original_contact)
+        return _RoleResponse(
+            account_name=row.get("account_name", ""),
+            submitter_email=row.get("submitter_email", ""),
+            label=f"{role_label} Contact",
+            contact_details=current,
+            previous_details=(previous if changed and previous != current else ""),
+            changed=changed,
+        )
 
     def _review_new_contact(
         self,
@@ -738,9 +986,12 @@ class InteractiveProfileUpdateProcessor:
         role_label: str,
         submitted: dict[str, str],
     ) -> ActionResult:
-        first_name = submitted.get("first_name", "")
         last_name = submitted.get("last_name", "")
-        display_name = " ".join(value for value in (first_name, last_name) if value)
+        payload: dict[str, str] = {"AccountId": batch.account_id}
+        for suffix, contact_field, _ in CONTACT_SUFFIX_FIELDS:
+            value = submitted.get(suffix, "")
+            if value:
+                payload[contact_field] = value
         proposal = self._proposal(
             batch,
             row,
@@ -748,31 +999,31 @@ class InteractiveProfileUpdateProcessor:
             target_record_id="(new)",
             field_name="Contact",
             label=f"{role_label} Contact",
-            proposed_value=display_name,
+            proposed_value=payload,
             original_value="",
+        )
+        submitted_contact = {
+            contact_field: submitted.get(suffix, "")
+            for suffix, contact_field, _ in CONTACT_SUFFIX_FIELDS
+        }
+        self._show_contact_details(
+            f"Submitted {role_label} Contact",
+            submitted_contact,
         )
         if not last_name:
             self.output_fn(
                 f"{role_label} Contact cannot be created automatically because "
                 "the required Last Name field is missing."
             )
-        self._show_proposal(proposal)
-        try:
-            decision = self._prompt_decision(
-                automatic_allowed=bool(last_name),
-            )
-        except (KeyboardInterrupt, EOFError) as error:
-            result = ActionResult(
-                proposal,
-                None,
-                ActionStatus.INTERRUPTED,
-                action="create Contact",
-                error="Reviewer interrupted processing.",
-            )
-            self._append_audit(result)
-            raise ProcessingInterrupted(
-                "Profile Update review was interrupted."
-            ) from error
+        self._show_proposal(
+            proposal,
+            proposed_display=_contact_name_email(submitted_contact),
+        )
+        decision = self._review_decision(
+            proposal,
+            automatic_allowed=bool(last_name),
+            action="create Contact",
+        )
 
         if decision is ReviewDecision.WILL_NOT_BE_MADE:
             result = ActionResult(
@@ -786,7 +1037,7 @@ class InteractiveProfileUpdateProcessor:
         if decision is ReviewDecision.MAKE_MANUALLY:
             try:
                 contact_id = self.input_fn(
-                    "Create/select the Contact in Salesforce, then enter its Contact ID: "
+                    "Create the Contact in Salesforce, then enter its Contact ID: "
                 ).strip()
                 if not contact_id:
                     raise ProcessingError(
@@ -827,10 +1078,17 @@ class InteractiveProfileUpdateProcessor:
                 )
                 self._append_audit(result)
                 raise ProcessingError(str(error)) from error
-            if not _values_equal(
-                fresh.get("FirstName"), first_name
-            ) or not _values_equal(fresh.get("LastName"), last_name):
-                error = "Manually selected Contact does not match the proposed name."
+            matches_account = _values_equal(fresh.get("AccountId"), batch.account_id)
+            matches_fields = all(
+                _values_equal(fresh.get(field_name), value)
+                for field_name, value in payload.items()
+                if field_name != "AccountId"
+            )
+            if not matches_account or not matches_fields:
+                error = (
+                    "Manually selected Contact does not match the submitted "
+                    "Contact information."
+                )
                 result = ActionResult(
                     proposal,
                     decision,
@@ -855,12 +1113,6 @@ class InteractiveProfileUpdateProcessor:
             self._append_audit(result)
             return result
 
-        payload = {
-            "AccountId": batch.account_id,
-            "LastName": last_name,
-        }
-        if first_name:
-            payload["FirstName"] = first_name
         try:
             contact_id = self.client.create_record("Contact", payload)
         except SalesforceError as error:
@@ -919,7 +1171,14 @@ class InteractiveProfileUpdateProcessor:
             warnings=row.get("warnings", ""),
         )
 
-    def _review_proposal(self, proposal: ChangeProposal) -> ActionResult:
+    def _review_proposal(
+        self,
+        proposal: ChangeProposal,
+        *,
+        original_display: str | None = None,
+        proposed_display: str | None = None,
+    ) -> ActionResult:
+        """Refresh and present a proposal before asking for a decision."""
         try:
             fresh = self.client.get_record(
                 proposal.target_object,
@@ -953,15 +1212,30 @@ class InteractiveProfileUpdateProcessor:
             self.output_fn(f"{proposal.label}: already current; no change needed.")
             return result
 
-        self._show_proposal(proposal)
+        self._show_proposal(
+            proposal,
+            original_display=original_display,
+            proposed_display=proposed_display,
+        )
+        decision = self._review_decision(proposal)
+        return self._execute_proposal(proposal, decision)
+
+    def _review_decision(
+        self,
+        proposal: ChangeProposal,
+        *,
+        automatic_allowed: bool = True,
+        action: str = "review",
+    ) -> ReviewDecision:
+        """Ask for one validated reviewer decision and audit interruptions."""
         try:
-            decision = self._prompt_decision()
+            return self._prompt_decision(automatic_allowed=automatic_allowed)
         except (KeyboardInterrupt, EOFError) as error:
             interrupted = ActionResult(
                 proposal,
                 None,
                 ActionStatus.INTERRUPTED,
-                action="review",
+                action=action,
                 error="Reviewer interrupted processing.",
             )
             self._append_audit(interrupted)
@@ -969,6 +1243,12 @@ class InteractiveProfileUpdateProcessor:
                 "Profile Update review was interrupted."
             ) from error
 
+    def _execute_proposal(
+        self,
+        proposal: ChangeProposal,
+        decision: ReviewDecision,
+    ) -> ActionResult:
+        """Execute an already-made decision and persist its audit result."""
         if decision is ReviewDecision.WILL_NOT_BE_MADE:
             result = ActionResult(
                 proposal,
@@ -1059,27 +1339,70 @@ class InteractiveProfileUpdateProcessor:
         self._append_audit(result)
         return result
 
-    def _show_proposal(self, proposal: ChangeProposal) -> None:
+    def _show_proposal(
+        self,
+        proposal: ChangeProposal,
+        *,
+        original_display: str | None = None,
+        proposed_display: str | None = None,
+    ) -> None:
+        current = (
+            original_display
+            if original_display is not None
+            else _display(proposal.original_value)
+        )
+        proposed = (
+            proposed_display
+            if proposed_display is not None
+            else _display(proposal.proposed_value)
+        )
         self.output_fn(
             f"\n{proposal.label}\n"
-            f"Current Salesforce value: {_display(proposal.original_value) or '(blank)'}\n"
-            f"Proposed value: {_display(proposal.proposed_value) or '(blank)'}"
+            f"Current Salesforce value: {current or '(blank)'}\n"
+            f"Proposed value: {proposed or '(blank)'}"
         )
-        if proposal.context:
-            self.output_fn(f"Submission context: {proposal.context}")
-        if proposal.warnings:
-            self.output_fn(f"Warnings: {proposal.warnings}")
+
+    def _show_contact_details(
+        self,
+        heading: str,
+        contact: dict[str, Any],
+    ) -> None:
+        name = " ".join(
+            value
+            for value in (
+                _display(contact.get("FirstName")),
+                _display(contact.get("LastName")),
+            )
+            if value
+        )
+        self.output_fn(
+            f"{heading}:\n"
+            f"Name: {name or '(blank)'}\n"
+            f"Title: {_display(contact.get('Title')) or '(blank)'}\n"
+            f"Email: {_display(contact.get('Email')) or '(blank)'}\n"
+            f"Phone: {_display(contact.get('Phone')) or '(blank)'}"
+        )
 
     def _prompt_decision(self, *, automatic_allowed: bool = True) -> ReviewDecision:
         values = {decision.value: decision for decision in ReviewDecision}
+        values.update(
+            {
+                "a": ReviewDecision.APPLY_AUTOMATICALLY,
+                "m": ReviewDecision.MAKE_MANUALLY,
+                "n": ReviewDecision.WILL_NOT_BE_MADE,
+            }
+        )
         while True:
             answer = self.input_fn(
-                "Decision [apply automatically / make manually / will not be made]: "
+                "Decision [A/apply automatically / M/make manually / "
+                "N/will not be made]: "
             )
             normalized = answer.strip().casefold()
             decision = values.get(normalized)
             if decision is None:
-                self.output_fn("Enter one of the three complete decision phrases.")
+                self.output_fn(
+                    "Enter A, M, or N, or one of the three complete decision phrases."
+                )
                 continue
             if decision is ReviewDecision.APPLY_AUTOMATICALLY and not automatic_allowed:
                 self.output_fn(
@@ -1088,31 +1411,6 @@ class InteractiveProfileUpdateProcessor:
                 )
                 continue
             return decision
-
-    def _prompt_contact_choice(self, role_label: str) -> str:
-        allowed = {"create contact", "select existing", "decline"}
-        while True:
-            answer = self.input_fn(
-                f"{role_label} Contact choice "
-                "[create contact / select existing / decline]: "
-            )
-            normalized = answer.strip().casefold()
-            if normalized in allowed:
-                return normalized
-            self.output_fn("Choose create contact, select existing, or decline.")
-
-    def _select_contact_id(self, contacts: list[dict[str, Any]]) -> str:
-        while True:
-            answer = self.input_fn(
-                "Enter a candidate number or an existing Salesforce Contact ID: "
-            ).strip()
-            if answer.isdigit() and 1 <= int(answer) <= len(contacts):
-                return _display(contacts[int(answer) - 1].get("Id"))
-            if answer and any(
-                _display(contact.get("Id")) == answer for contact in contacts
-            ):
-                return answer
-            self.output_fn("Select one of the fresh Contact candidates shown.")
 
     def _prompt_yes_no(self, prompt: str) -> bool:
         while True:
@@ -1240,7 +1538,10 @@ class InteractiveProfileUpdateProcessor:
         self._audit.append(result)
 
 
-def format_response_emails(results: list[ActionResult]) -> dict[str, str]:
+def format_response_emails(
+    results: list[ActionResult],
+    role_responses: list[_RoleResponse] | None = None,
+) -> dict[str, str]:
     """Return one response paragraph per submitter email."""
     grouped: dict[str, list[ChangeProposal]] = {}
     for result in results:
@@ -1255,15 +1556,32 @@ def format_response_emails(results: list[ActionResult]) -> dict[str, str]:
             continue
         grouped.setdefault(email, []).append(proposal)
 
+    roles_by_email: dict[str, list[_RoleResponse]] = {}
+    for response in role_responses or []:
+        email = response.submitter_email.strip()
+        if not email:
+            continue
+        roles_by_email.setdefault(email, []).append(response)
+
     emails: dict[str, str] = {}
-    for email, proposals in grouped.items():
+    ordered_emails = dict.fromkeys([*grouped, *roles_by_email])
+    for email in ordered_emails:
+        proposals = grouped.get(email, [])
+        roles = roles_by_email.get(email, [])
         account_name = next(
             (
                 proposal.account_name.strip()
                 for proposal in proposals
                 if proposal.account_name.strip()
             ),
-            "your account",
+            next(
+                (
+                    response.account_name.strip()
+                    for response in roles
+                    if response.account_name.strip()
+                ),
+                "your account",
+            ),
         )
         lines = [ACCOUNT_EMAIL_OPENING.format(account_name=account_name)]
         seen: set[tuple[str, str, str, str]] = set()
@@ -1284,6 +1602,21 @@ def format_response_emails(results: list[ActionResult]) -> dict[str, str]:
                     f"Replaces {_display(proposal.original_value) or '(blank)'}",
                 ]
             )
+        seen_roles: set[tuple[str, str, str, bool]] = set()
+        for response in roles:
+            identity = (
+                response.label,
+                response.contact_details,
+                response.previous_details,
+                response.changed,
+            )
+            if identity in seen_roles:
+                continue
+            seen_roles.add(identity)
+            suffix = "" if response.changed else " - no change"
+            lines.extend(["", f"{response.label}: {response.contact_details}{suffix}"])
+            if response.previous_details:
+                lines.append(f"Replaces {response.previous_details}")
         emails[email] = "\n".join(lines)
     return emails
 
@@ -1342,3 +1675,48 @@ def _display(value: Any) -> str:
 
 def _values_equal(current: Any, proposed: Any) -> bool:
     return _display(current) == _display(proposed)
+
+
+def _section_heading(title: str, separator: str = STAGE_SEPARATOR) -> str:
+    return f"\n{separator}\n{title}\n{separator}"
+
+
+def _contact_name_email(contact: dict[str, Any] | None) -> str:
+    if not contact:
+        return "(blank)"
+    name = " ".join(
+        value
+        for value in (
+            _display(contact.get("FirstName")),
+            _display(contact.get("LastName")),
+        )
+        if value
+    )
+    email = _display(contact.get("Email"))
+    if name and email:
+        return f"{name} <{email}>"
+    return name or email or "(blank)"
+
+
+def _contact_summary(contact: dict[str, Any] | None) -> str:
+    if not contact:
+        return "(blank)"
+    name = " ".join(
+        value
+        for value in (
+            _display(contact.get("FirstName")),
+            _display(contact.get("LastName")),
+        )
+        if value
+    )
+    details = [
+        value
+        for value in (
+            name,
+            _display(contact.get("Title")),
+            _display(contact.get("Email")),
+            _display(contact.get("Phone")),
+        )
+        if value
+    ]
+    return ", ".join(details) or "(blank)"
