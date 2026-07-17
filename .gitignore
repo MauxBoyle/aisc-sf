@@ -133,6 +133,7 @@ activemq-data/
 .env.*
 !.env.example
 snapshots/
+staged_profile_updates/
 .envrc
 .venv
 env/

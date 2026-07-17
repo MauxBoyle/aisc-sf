@@ -32,6 +32,19 @@ Chatter posts use the Connect REST API's
 [feed element format](https://developer.salesforce.com/docs/platform/connect-rest-api/guide/features_feeds_feed_elements.html)
 with the target record supplied as `subjectId`.
 
+## Profile Update staging service
+
+::: aisc_salesforce.stage_profile_updates
+    options:
+      show_root_heading: true
+      members:
+        - StagingResult
+        - ProfileUpdateStagingService
+        - write_staged_profile_updates
+
+`ProfileUpdateStagingService` only reads Salesforce data. The writer publishes
+the resulting rows atomically in a timestamped directory.
+
 ## CLI
 
 ::: aisc_salesforce.app

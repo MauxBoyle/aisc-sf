@@ -4,8 +4,9 @@ Welcome to the **aisc-salesforce** documentation.
 
 ## Overview
 
-aisc-salesforce creates read-only data snapshots and automates daily Profile
-Update Case work from certification audits and participant submissions.
+aisc-salesforce creates read-only data snapshots, stages submitted Profile
+Updates for human review, and automates daily Profile Update Case work from
+certification audits and participant submissions.
 
 ## Quick Links
 

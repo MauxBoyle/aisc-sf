@@ -17,6 +17,10 @@ from .salesforce import (
     request_access_token,
 )
 from .snapshot import write_snapshot
+from .stage_profile_updates import (
+    ProfileUpdateStagingService,
+    write_staged_profile_updates,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -38,6 +42,16 @@ def main(argv: list[str] | None = None) -> int:
         "profile-updates",
         help="Process recent audits and New profile update submissions.",
     )
+    stage_parser = subparsers.add_parser(
+        "stage-profile-updates",
+        help="Stage New profile update submissions in a read-only CSV snapshot.",
+    )
+    stage_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("staged_profile_updates"),
+        help="Directory to contain staged profile update folders.",
+    )
     args = parser.parse_args(argv)
     if args.command == "snapshot":
         try:
@@ -50,6 +64,12 @@ def main(argv: list[str] | None = None) -> int:
             return _run_profile_updates()
         except (SalesforceError, OSError) as error:
             print(f"Profile updates failed: {error}", file=sys.stderr)
+            return 1
+    if args.command == "stage-profile-updates":
+        try:
+            return _run_stage_profile_updates(args.output_dir)
+        except (SalesforceError, OSError) as error:
+            print(f"Stage profile updates failed: {error}", file=sys.stderr)
             return 1
     return 1
 
@@ -92,6 +112,20 @@ def _run_profile_updates() -> int:
     for error in getattr(service, "errors", []):
         print(error, file=sys.stderr)
     return 1 if counts.failed else 0
+
+
+def _run_stage_profile_updates(output_dir: Path) -> int:
+    """Connect to Salesforce and publish one read-only staging snapshot."""
+    _load_dotenv(Path(".env"))
+    environment = dict(os.environ)
+    credentials = get_credentials(environment)
+    auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
+    result = ProfileUpdateStagingService(SalesforceClient(auth)).stage()
+    snapshot_path = write_staged_profile_updates(result.rows, output_dir)
+    print(f"Staged profile updates complete: {snapshot_path / 'profile_updates.csv'}")
+    print(f"staged rows: {len(result.rows)}")
+    print(f"warnings: {result.warning_count}")
+    return 0
 
 
 def get_profile_update_configuration(
