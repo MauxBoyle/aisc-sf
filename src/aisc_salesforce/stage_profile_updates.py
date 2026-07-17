@@ -19,6 +19,7 @@ ACCOUNT_FIELDS = [
     "Id",
     "Name",
     "Certification_ID__c",
+    "Company_Owner__c",
     "BillingStreet",
     "BillingCity",
     "BillingState",
@@ -40,6 +41,15 @@ CONTACT_FIELDS = [
     "Title",
     "Email",
     "Phone",
+]
+
+PROFILE_CASE_FIELDS = [
+    "Id",
+    "CaseNumber",
+    "Subject",
+    "Status",
+    "CreatedDate",
+    "AccountId",
 ]
 
 KEY_ANSWER_FIELDS = [
@@ -156,6 +166,10 @@ SHARED_COLUMNS = [
     "latest_submission_date",
     "account_id",
     "account_name",
+    "case_id",
+    "case_number",
+    "case_status",
+    "case_match_status",
     "certification_id",
     "submitter_name",
     "submitter_email",
@@ -167,6 +181,8 @@ SHARED_COLUMNS = [
 ]
 
 KEY_COLUMNS = [
+    "has_key_updates",
+    "earliest_key_update_date",
     "effective_date",
     "revised_company_name",
     "revised_company_owner",
@@ -255,6 +271,7 @@ class ProfileUpdateStagingService:
                 all_accounts_by_id.setdefault(sibling_id, sibling)
 
         contacts = self._query_contacts(list(all_accounts_by_id.values()))
+        cases = self._query_cases(requested_account_ids)
         grouped = _group_submissions(submissions)
         rows = [
             self._build_row(
@@ -262,6 +279,7 @@ class ProfileUpdateStagingService:
                 accounts_by_id,
                 all_accounts_by_id,
                 contacts,
+                cases,
             )
             for records in grouped
         ]
@@ -311,12 +329,26 @@ class ProfileUpdateStagingService:
             order_by="AccountId ASC, Id ASC",
         )
 
+    def _query_cases(self, account_ids: list[str]) -> list[dict[str, Any]]:
+        if not account_ids:
+            return []
+        return self.client.query_records(
+            "Case",
+            PROFILE_CASE_FIELDS,
+            where=(
+                f"{_where_in('AccountId', account_ids)} "
+                "AND Subject LIKE '%Profile Update%'"
+            ),
+            order_by="CreatedDate DESC, Id DESC",
+        )
+
     def _build_row(
         self,
         records: list[dict[str, Any]],
         accounts_by_id: dict[str, dict[str, Any]],
         all_accounts_by_id: dict[str, dict[str, Any]],
         contacts: list[dict[str, Any]],
+        cases: list[dict[str, Any]],
     ) -> dict[str, str]:
         row = {column: "" for column in CSV_COLUMNS}
         merged = _merge_records(records)
@@ -324,6 +356,7 @@ class ProfileUpdateStagingService:
 
         account_id = _clean_text(merged.get("Account__c"))
         account = accounts_by_id.get(account_id)
+        key_records = [record for record in records if _is_key_update(record)]
         row.update(
             {
                 "source_submission_ids": json.dumps(
@@ -338,6 +371,12 @@ class ProfileUpdateStagingService:
                 "latest_submission_date": _clean_text(records[-1].get("CreatedDate")),
                 "account_id": account_id,
                 "account_name": _account_name(account, merged),
+                "has_key_updates": "true" if key_records else "false",
+                "earliest_key_update_date": (
+                    _clean_text(key_records[0].get("CreatedDate"))
+                    if key_records
+                    else ""
+                ),
                 "certification_id": _first_nonblank(
                     account.get("Certification_ID__c") if account else None,
                     merged.get("Certification_ID__c"),
@@ -358,6 +397,7 @@ class ProfileUpdateStagingService:
                 ),
             }
         )
+        self._populate_case(row, records, cases, warnings)
 
         if not row["submitter_email"]:
             warnings.append("Submission group has a blank submitter email.")
@@ -394,6 +434,62 @@ class ProfileUpdateStagingService:
         row["has_warnings"] = "true" if warnings else "false"
         row["warnings"] = "\n".join(warnings)
         return row
+
+    @staticmethod
+    def _populate_case(
+        row: dict[str, str],
+        records: list[dict[str, Any]],
+        cases: list[dict[str, Any]],
+        warnings: list[str],
+    ) -> None:
+        account_id = row["account_id"]
+        source_names = [
+            name for record in records if (name := _clean_text(record.get("Name")))
+        ]
+        account_cases = [
+            case for case in cases if _clean_text(case.get("AccountId")) == account_id
+        ]
+        matches = [
+            case
+            for case in account_cases
+            if source_names
+            and all(
+                _case_subject_has_name(case.get("Subject"), name)
+                for name in source_names
+            )
+        ]
+        if len(matches) == 1:
+            case = matches[0]
+            row.update(
+                {
+                    "case_id": _clean_text(case.get("Id")),
+                    "case_number": _clean_text(case.get("CaseNumber")),
+                    "case_status": _clean_text(case.get("Status")),
+                    "case_match_status": "matched",
+                }
+            )
+            return
+
+        partial_matches = [
+            case
+            for case in account_cases
+            if any(
+                _case_subject_has_name(case.get("Subject"), name)
+                for name in source_names
+            )
+        ]
+        status = "ambiguous" if matches or partial_matches else "missing"
+        row["case_match_status"] = status
+        if status == "ambiguous":
+            warning = (
+                "Blocking Case match: source submissions match more than one "
+                "Case or do not share one Case."
+            )
+        else:
+            warning = (
+                "Blocking Case match: no Case contains the source submission names."
+            )
+        warnings.append(warning)
 
     @staticmethod
     def _populate_address(
@@ -877,6 +973,27 @@ def _submission_sort_key(record: dict[str, Any]) -> tuple[str, str]:
         _clean_text(record.get("CreatedDate")),
         _clean_text(record.get("Id")),
     )
+
+
+def _is_key_update(record: dict[str, Any]) -> bool:
+    key_fields = [
+        "Effective_Date__c",
+        "Revised_Company_Name__c",
+        "Revised_Company_Owner__c",
+        *(api_name for _, api_name, _ in ADDRESS_FIELDS),
+        *(api_name for api_name, _ in KEY_ANSWER_FIELDS),
+    ]
+    return _normalized(record.get("Type__c")) == "key data" or any(
+        _has_value(record.get(api_name)) for api_name in key_fields
+    )
+
+
+def _case_subject_has_name(subject: Any, update_name: str) -> bool:
+    text = _clean_text(subject)
+    if " - " not in text:
+        return False
+    names = [name.strip().casefold() for name in text.rsplit(" - ", 1)[1].split("/")]
+    return update_name.strip().casefold() in names
 
 
 def _where_in(field_name: str, values: list[str]) -> str:

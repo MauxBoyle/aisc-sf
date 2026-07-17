@@ -51,11 +51,41 @@ def account(**changes):
 
 
 class FakeClient:
-    def __init__(self, submissions, accounts=None, siblings=None, contacts=None):
+    def __init__(
+        self,
+        submissions,
+        accounts=None,
+        siblings=None,
+        contacts=None,
+        cases=None,
+    ):
         self.submissions = submissions
         self.accounts = accounts or []
         self.siblings = siblings or []
         self.contacts = contacts or []
+        self.cases = (
+            cases
+            if cases is not None
+            else [
+                {
+                    "Id": "case-1",
+                    "CaseNumber": "00010001",
+                    "Subject": (
+                        "Profile Update Received - "
+                        + " / ".join(
+                            dict.fromkeys(
+                                record.get("Name", "")
+                                for record in submissions
+                                if record.get("Name")
+                            )
+                        )
+                    ),
+                    "Status": "Pending",
+                    "CreatedDate": "2026-07-15T15:00:00.000+0000",
+                    "AccountId": "account-1",
+                }
+            ]
+        )
         self.queries = []
 
     def query_records(self, object_name, fields, *, where=None, order_by=None):
@@ -68,11 +98,13 @@ class FakeClient:
             return list(self.siblings)
         if object_name == "Contact":
             return list(self.contacts)
+        if object_name == "Case":
+            return list(self.cases)
         raise AssertionError(object_name)
 
 
-def stage(submissions, *, accounts=None, siblings=None, contacts=None):
-    client = FakeClient(submissions, accounts, siblings, contacts)
+def stage(submissions, *, accounts=None, siblings=None, contacts=None, cases=None):
+    client = FakeClient(submissions, accounts, siblings, contacts, cases)
     result = ProfileUpdateStagingService(client).stage()
     return result, client
 
@@ -108,7 +140,8 @@ def test_merges_same_account_and_email_with_later_nonblank_values():
     assert row["comments"] == "First comment"
     assert client.queries[0][3] == "CreatedDate ASC, Id ASC"
     assert client.queries[1][1] == ACCOUNT_FIELDS
-    assert client.queries[-1][1] == CONTACT_FIELDS
+    contact_query = next(query for query in client.queries if query[0] == "Contact")
+    assert contact_query[1] == CONTACT_FIELDS
 
 
 def test_keeps_different_emails_separate_and_blank_emails_independent():
@@ -524,3 +557,47 @@ def test_writer_removes_temporary_output_after_failure(monkeypatch, tmp_path):
         write_staged_profile_updates([], tmp_path)
 
     assert list(tmp_path.iterdir()) == []
+
+
+def test_staging_records_case_and_key_update_metadata():
+    record = submission(
+        Type__c="Key Data",
+        Revised_Company_Name__c="Acme Steel LLC",
+    )
+
+    result, client = stage([record], accounts=[account()])
+
+    row = result.rows[0]
+    assert row["case_id"] == "case-1"
+    assert row["case_number"] == "00010001"
+    assert row["case_match_status"] == "matched"
+    assert row["has_key_updates"] == "true"
+    assert row["earliest_key_update_date"] == record["CreatedDate"]
+    case_query = next(query for query in client.queries if query[0] == "Case")
+    assert "AccountId IN ('account-1')" in case_query[2]
+
+
+def test_missing_or_ambiguous_case_match_is_a_blocking_warning():
+    record = submission()
+
+    missing, _ = stage([record], accounts=[account()], cases=[])
+    assert missing.rows[0]["case_match_status"] == "missing"
+    assert missing.rows[0]["case_id"] == ""
+    assert "blocking" in missing.rows[0]["warnings"].lower()
+
+    matching_case = {
+        "Id": "case-1",
+        "CaseNumber": "0001",
+        "Subject": "Profile Update Received - PU-100",
+        "Status": "Pending",
+        "CreatedDate": "2026-07-15T15:00:00.000+0000",
+        "AccountId": "account-1",
+    }
+    ambiguous, _ = stage(
+        [record],
+        accounts=[account()],
+        cases=[matching_case, {**matching_case, "Id": "case-2"}],
+    )
+    assert ambiguous.rows[0]["case_match_status"] == "ambiguous"
+    assert ambiguous.rows[0]["case_id"] == ""
+    assert "blocking" in ambiguous.rows[0]["warnings"].lower()
