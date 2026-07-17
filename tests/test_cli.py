@@ -126,3 +126,67 @@ def test_profile_updates_cli_is_nonzero_when_records_fail(monkeypatch, capsys):
 
     assert app.main(["profile-updates"]) == 1
     assert "audit-1: feed unavailable" in capsys.readouterr().err
+
+
+def test_stage_profile_updates_cli_uses_custom_output_and_prints_counts(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setattr(app, "_load_dotenv", lambda path: None)
+    monkeypatch.setattr(app, "get_credentials", lambda env: {"ok": "yes"})
+    monkeypatch.setattr(app, "get_oauth_url", lambda env: "https://example/token")
+    monkeypatch.setattr(
+        app, "request_access_token", lambda credentials, oauth_url: object()
+    )
+    monkeypatch.setattr(app, "SalesforceClient", lambda auth: object())
+
+    class Result:
+        rows = [{"has_warnings": "true"}, {"has_warnings": "false"}]
+        warning_count = 1
+
+    class Service:
+        def __init__(self, client):
+            pass
+
+        def stage(self):
+            return Result()
+
+    monkeypatch.setattr(app, "ProfileUpdateStagingService", Service)
+    monkeypatch.setattr(
+        app,
+        "write_staged_profile_updates",
+        lambda rows, output_dir: output_dir / "finished",
+    )
+
+    assert app.main(["stage-profile-updates", "--output-dir", str(tmp_path)]) == 0
+    output = capsys.readouterr().out
+    assert str(tmp_path / "finished" / "profile_updates.csv") in output
+    assert "staged rows: 2" in output
+    assert "warnings: 1" in output
+
+
+def test_stage_profile_updates_cli_reports_salesforce_failure(monkeypatch, capsys):
+    monkeypatch.setattr(app, "_load_dotenv", lambda path: None)
+    monkeypatch.setattr(
+        app,
+        "get_credentials",
+        lambda env: (_ for _ in ()).throw(
+            app.SalesforceError("Salesforce unavailable")
+        ),
+    )
+
+    assert app.main(["stage-profile-updates"]) == 1
+    assert (
+        "Stage profile updates failed: Salesforce unavailable"
+        in capsys.readouterr().err
+    )
+
+
+def test_stage_profile_updates_cli_reports_file_failure(monkeypatch, capsys):
+    monkeypatch.setattr(
+        app,
+        "_run_stage_profile_updates",
+        lambda output_dir: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    assert app.main(["stage-profile-updates"]) == 1
+    assert "Stage profile updates failed: disk full" in capsys.readouterr().err

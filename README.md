@@ -50,7 +50,13 @@ Process recent audit notes and New company profile submissions:
 uv run aisc_salesforce profile-updates
 ```
 
-Both commands are also available as a Python module:
+Stage New company profile submissions in a read-only CSV:
+
+```bash
+uv run aisc_salesforce stage-profile-updates
+```
+
+All commands are also available as a Python module:
 
 ```bash
 uv run python -m aisc_salesforce profile-updates
@@ -59,6 +65,44 @@ uv run python -m aisc_salesforce profile-updates
 `profile-updates` prints `created`, `reused`, `skipped`, and `failed` counts. A
 successful run returns exit code `0`; missing configuration or a Salesforce
 failure returns `1`.
+
+### Profile Update staging
+
+`stage-profile-updates` reads every submission whose `Status__c` is `New`. It
+does not create or update any Salesforce records. The default output is:
+
+```text
+staged_profile_updates/YYYY-MM-DDTHH-MM-SSZ/profile_updates.csv
+```
+
+Choose a different parent directory when needed:
+
+```bash
+uv run aisc_salesforce stage-profile-updates \
+  --output-dir /secure/staged-profile-updates
+```
+
+Submissions are grouped by Account ID and the submitter email after trimming
+and case-insensitive comparison. Later nonblank values replace earlier values.
+Different emails stay separate, and every blank-email submission stays
+separate and receives a warning. Each CSV row preserves all source submission
+IDs and names as JSON arrays.
+
+The CSV has shared submission and Account columns, Key Data columns, and
+prefixed role columns for `certification_`, `principal_`, `accounting_`,
+`quality_`, and `new_york_`. Role columns preserve submitted values and record
+the proposed resolution action, Contact ID, resolution source, source
+submission/role, and any role-specific warning. New York does not have a title
+column.
+
+Before processing a staged row, inspect both `has_warnings` and `warnings`.
+`warnings` is newline-separated and identifies ambiguous contacts, incomplete
+Accounts, missing role lookups, partial addresses that could not be filled, and
+other cases needing human review.
+
+Each run creates an independent timestamped directory. The CSV is first written
+inside a temporary directory and is published only after the complete write
+succeeds, so a failed run cannot leave a partial snapshot.
 
 ### Daily scheduling
 

@@ -74,3 +74,95 @@ name, and exact Chatter text to recognize completed work. If a run stops after
 one Chatter post, the next run posts only the missing message.
 
 The project does not install or manage a scheduler itself.
+
+## Stage Profile Updates command
+
+Create a read-only CSV of every New profile-change submission:
+
+```bash
+uv run aisc_salesforce stage-profile-updates
+uv run aisc_salesforce stage-profile-updates \
+  --output-dir /secure/staged-profile-updates
+```
+
+The default file location is:
+
+```text
+staged_profile_updates/YYYY-MM-DDTHH-MM-SSZ/profile_updates.csv
+```
+
+If two runs finish during the same UTC second, the later directory receives a
+numeric suffix such as `-01`. Every run is independent and repeatable. The
+command only queries Salesforce; it never creates or updates a record.
+
+Example output:
+
+```text
+Staged profile updates complete: staged_profile_updates/2026-07-17T12-30-00Z/profile_updates.csv
+staged rows: 7
+warnings: 2
+```
+
+The warning count is the number of newline-separated warnings across all rows.
+Exit code `0` means Salesforce was queried and the complete CSV was published.
+Exit code `1` means configuration, Salesforce communication, or file writing
+failed. A failed write leaves no partially published snapshot.
+
+### Merge rules
+
+Rows are grouped by Account ID plus a trimmed, case-insensitive submitter email.
+Submissions with different Account IDs or emails stay separate. Each submission
+with a blank email also stays separate and receives a warning.
+
+Within a group, submissions are ordered by `CreatedDate` and `Id`. Later
+nonblank values replace earlier values, while blank later values do not erase
+earlier information. Source submission IDs and names are retained as JSON
+arrays.
+
+When at least one revised address component is present, the output contains all
+five components. Missing submitted components are filled from the Account
+billing address where possible.
+
+### CSV contract
+
+Each row contains these groups of columns:
+
+| Group | Columns |
+|---|---|
+| Source and dates | `source_submission_ids`, `source_submission_names`, `earliest_submission_date`, `latest_submission_date` |
+| Account and submitter | `account_id`, `account_name`, `certification_id`, `submitter_name`, `submitter_email`, `submitter_phone` |
+| Notes and review | `comments`, `personnel_notes`, `has_warnings`, `warnings` |
+| Key Data | `effective_date`, revised company name/owner, five revised address columns, and `key_answers` |
+| Contact roles | Columns prefixed with `certification_`, `principal_`, `accounting_`, `quality_`, and `new_york_` |
+
+`key_answers` contains eight labeled lines when a group has Key Data. Each role
+contains its submitted name, title, email, and phone fields, followed by:
+
+- `resolution_action`
+- `salesforce_contact_id`
+- `resolution_source`
+- `source_submission_id`
+- `source_role`
+- `warning`
+
+New York has no submitted title field. Completely blank roles have completely
+blank role columns.
+
+Resolution actions are `update_contact` for an exact match or a title/phone
+update, `change_email` for a new email applied to the Account's current role
+contact, and `use_submitted_contact` when another submitted role is the first
+exact match. Resolution sources show whether the match came from another
+submitted role, an Account Contact, a sibling Account Contact, or the Account's
+current role lookup.
+
+Contact text is compared after trimming and case folding. The resolver does not
+guess nicknames. Name searches stop at the first tier containing candidates:
+other submitted roles, the current Account's Contacts, then Contacts belonging
+to sibling Accounts with the same Parent. Multiple candidates at that first
+tier are reported as ambiguous.
+
+!!! warning
+
+    A future processor must inspect `has_warnings` and `warnings` before acting
+    on a row. The `warnings` field is readable, newline-separated text; role
+    warnings are also copied into the matching prefixed `warning` column.
