@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from aisc_salesforce import app
 from aisc_salesforce.dictionary import ExportField
+from aisc_salesforce.imis_contacts import ContactConsolidationError
 from aisc_salesforce.profile_updates import AutomationCounts
 from aisc_salesforce.rename_profile_update_cases import RenameCounts
 
@@ -45,6 +46,71 @@ def test_cli_configuration_failure_is_nonzero(monkeypatch, capsys):
     )
     assert app.main(["snapshot"]) == 1
     assert "SF_CLIENT_SECRET" in capsys.readouterr().err
+
+
+def test_consolidate_contacts_cli_uses_default_directory_and_prints_summary(
+    monkeypatch,
+):
+    output = []
+    expected = SimpleNamespace(
+        fresh_export=app.Path("imis_contactbasic/Full_CSContactBasic_260719.csv"),
+        prior_combined=None,
+        combined_path=app.Path(
+            "imis_contactbasic/Combined_CSContactBasic_20260719.csv"
+        ),
+        changed_path=None,
+        new_path=None,
+        combined_count=4,
+        changed_count=0,
+        new_count=0,
+    )
+
+    def consolidate(directory, *, output_fn):
+        assert directory == app.Path("imis_contactbasic")
+        output_fn("example warning")
+        return expected
+
+    monkeypatch.setattr(app, "consolidate_contactbasic", consolidate)
+
+    assert app.main(["consolidate-imis-contacts"], output_fn=output.append) == 0
+    assert "example warning" in output
+    assert any("Selected fresh export:" in line for line in output)
+    assert any("Combined contacts: 4" in line for line in output)
+
+
+def test_consolidate_contacts_cli_uses_custom_directory(monkeypatch, tmp_path):
+    calls = []
+
+    def run(directory, *, output_fn):
+        calls.append((directory, output_fn))
+        return 0
+
+    monkeypatch.setattr(app, "_run_consolidate_imis_contacts", run)
+
+    assert (
+        app.main(
+            ["consolidate-imis-contacts", "--directory", str(tmp_path)],
+            output_fn=lambda message: None,
+        )
+        == 0
+    )
+    assert calls[0][0] == tmp_path
+
+
+def test_consolidate_contacts_cli_reports_validation_error(monkeypatch, capsys):
+    monkeypatch.setattr(
+        app,
+        "_run_consolidate_imis_contacts",
+        lambda directory, **kwargs: (_ for _ in ()).throw(
+            ContactConsolidationError("No Full_CSContactBasic export was found")
+        ),
+    )
+
+    assert app.main(["consolidate-imis-contacts"]) == 1
+    assert (
+        "iMIS contact consolidation failed: No Full_CSContactBasic export was found"
+        in capsys.readouterr().err
+    )
 
 
 def test_dotenv_removes_inline_comments_but_preserves_hashes(monkeypatch, tmp_path):

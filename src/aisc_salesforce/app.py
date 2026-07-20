@@ -9,6 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .dictionary import DictionaryError, load_export_plan
+from .imis_contacts import ContactConsolidationError, consolidate_contactbasic
 from .process_profile_updates import (
     InteractiveProfileUpdateProcessor,
     ProcessingError,
@@ -83,6 +84,16 @@ def main(
         action="store_true",
         help="Apply the previewed Subject-only Case updates.",
     )
+    contacts_parser = subparsers.add_parser(
+        "consolidate-imis-contacts",
+        help="Merge the newest dated iMIS CSContactBasic export.",
+    )
+    contacts_parser.add_argument(
+        "--directory",
+        type=Path,
+        default=Path("imis_contactbasic"),
+        help="Directory containing dated CSContactBasic CSV files.",
+    )
     args = parser.parse_args(argv)
     if args.command == "snapshot":
         try:
@@ -120,6 +131,15 @@ def main(
             )
         except (SalesforceError, OSError) as error:
             print(f"Rename profile update Cases failed: {error}", file=sys.stderr)
+            return 1
+    if args.command == "consolidate-imis-contacts":
+        try:
+            return _run_consolidate_imis_contacts(
+                args.directory,
+                output_fn=output_fn,
+            )
+        except ContactConsolidationError as error:
+            print(f"iMIS contact consolidation failed: {error}", file=sys.stderr)
             return 1
     return 1
 
@@ -237,6 +257,28 @@ def _run_rename_profile_update_cases(
     output_fn(f"skipped: {counts.skipped}")
     output_fn(f"failed: {counts.failed}")
     return 1 if counts.failed else 0
+
+
+def _run_consolidate_imis_contacts(
+    directory: Path,
+    *,
+    output_fn: Callable[[str], None] = print,
+) -> int:
+    """Consolidate local iMIS contact exports and print a short summary."""
+    result = consolidate_contactbasic(directory, output_fn=output_fn)
+    output_fn(f"Selected fresh export: {result.fresh_export}")
+    if result.prior_combined is None:
+        output_fn("Selected prior combined table: none (initial run)")
+    else:
+        output_fn(f"Selected prior combined table: {result.prior_combined}")
+    output_fn(f"Published combined file: {result.combined_path}")
+    if result.changed_path is not None and result.new_path is not None:
+        output_fn(f"Published changed file: {result.changed_path}")
+        output_fn(f"Published new file: {result.new_path}")
+    output_fn(f"Combined contacts: {result.combined_count}")
+    output_fn(f"Changed contacts: {result.changed_count}")
+    output_fn(f"New contacts: {result.new_count}")
+    return 0
 
 
 def get_profile_update_configuration(

@@ -60,6 +60,69 @@ failed: 0
 Exit code `0` means the run completed without failures. Exit code `1` means
 configuration, Salesforce communication, or one or more records failed.
 
+## Consolidate iMIS contacts command
+
+Put the downloaded CSV files in `imis_contactbasic/` and run:
+
+```bash
+uv run aisc_salesforce consolidate-imis-contacts \
+  --directory imis_contactbasic
+```
+
+`--directory` defaults to `imis_contactbasic`, so it may be omitted. A custom
+secure directory is also supported.
+
+### Dated files and outputs
+
+Dates come from filenames, not modification times. Fresh exports must be named
+`Full_CSContactBasic_YYMMDD.csv`, where `YY` means `20YY`. Previous combined
+tables must be named `Combined_CSContactBasic_YYYYMMDD.csv`.
+
+An initial run writes only the combined table. Once a combined table exists,
+the fresh export date must be later, and the command writes all three files:
+
+```text
+Combined_CSContactBasic_YYYYMMDD.csv
+Changed_CSContactBasic_YYYYMMDD.csv
+New_CSContactBasic_YYYYMMDD.csv
+```
+
+The changed and new files always receive headers, even when they contain no
+rows. An existing target stops the run instead of being overwritten. A failed
+write removes temporary files and any output started by that run.
+
+### CSV and merge rules
+
+Every selected input must contain exactly these columns, in any order:
+
+```text
+City, Company, Full Name, iMIS Id, Member Type, State Province,
+Company ID, Company Member Type, Date Added, Email, Is Company, Is Member,
+Join Date, Major Key, Member Status, Status, Category, Last Updated,
+Full Address, Country, Website
+```
+
+CSV values are kept as text. Leading zeroes in `iMIS Id`, `Company ID`, and
+`Major Key` are not removed. IDs and other fields use exact comparison;
+capitalization, spaces, and blank values are meaningful differences.
+
+The combined file keeps the previous row order. A matching fresh row replaces
+the previous row in place, contacts found only in the previous table remain,
+and new contacts are appended in fresh-export order. Changed and new reports
+also follow fresh-export order and contain complete fresh rows.
+
+Blank or whitespace-only IDs are skipped, and the warning shows the filename
+and CSV row number. When a selected input repeats a nonblank ID, every row with
+that ID is omitted from that input. A duplicated fresh ID leaves a valid row
+from the previous combined table unchanged.
+
+!!! warning
+
+    iMIS input and output files contain personal data. The usual directory and
+    filename patterns are ignored by Git, including in custom directories.
+    Keep these files uncommitted and in an access-controlled location, and
+    share them only through approved secure channels.
+
 ### Case subject grammar and duplicate handling
 
 New received Cases and Expected Cases converted after a submission use:
