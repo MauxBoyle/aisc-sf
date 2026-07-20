@@ -144,6 +144,62 @@ def test_merges_same_account_and_email_with_later_nonblank_values():
     assert contact_query[1] == CONTACT_FIELDS
 
 
+def test_merges_all_nonblank_notes_in_submission_order():
+    records = [
+        submission(
+            Id="submission-3",
+            CreatedDate="2026-07-17T14:30:00.000+0000",
+            Comments__c="Repeated comment",
+            Other_Personnel_Notes__c="Third note",
+        ),
+        submission(
+            Id="submission-1",
+            Comments__c="Repeated comment",
+            Other_Personnel_Notes__c="First note",
+        ),
+        submission(
+            Id="submission-2",
+            CreatedDate="2026-07-16T14:30:00.000+0000",
+            Comments__c="   ",
+            Other_Personnel_Notes__c=None,
+        ),
+    ]
+
+    result, _ = stage(records, accounts=[account()])
+
+    row = result.rows[0]
+    assert row["comments"] == "Repeated comment\nRepeated comment"
+    assert row["personnel_notes"] == "First note\nThird note"
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        submission(Type__c=None),
+        submission(Type__c="key data"),
+        submission(Type__c=" Key Data "),
+        submission(Revised_Company_Name__c="Acme Steel LLC"),
+    ],
+)
+def test_key_update_metadata_requires_exact_key_data_type(record):
+    result, _ = stage([record], accounts=[account()])
+
+    row = result.rows[0]
+    assert row["has_key_updates"] == "false"
+    assert row["earliest_key_update_date"] == ""
+
+
+def test_key_update_metadata_accepts_exact_key_data_type_without_content():
+    result, _ = stage(
+        [submission(Type__c="Key Data")],
+        accounts=[account()],
+    )
+
+    row = result.rows[0]
+    assert row["has_key_updates"] == "true"
+    assert row["has_no_update_content"] == "true"
+
+
 def test_keeps_different_emails_separate_and_blank_emails_independent():
     records = [
         submission(Id="one", Email__c="first@example.com"),
@@ -384,8 +440,60 @@ def test_existing_contact_fills_optional_title_and_phone_without_warning():
     assert row["certification_salesforce_contact_id"] == "existing-contact"
     assert row["certification_title"] == "Certification Manager"
     assert row["certification_phone"] == "312-555-0105"
+    assert row["has_contact_derived_values"] == "true"
     assert row["certification_warning"] == ""
     assert row["has_warnings"] == "false"
+
+
+def test_another_submitted_role_filling_optional_contact_details_is_reported():
+    record = submission(
+        Cert_First_Name__c="Jordan",
+        Cert_Last_Name__c="Lee",
+        Principal_First_Name__c="Jordan",
+        Principal_Last_Name__c="Lee",
+        Principal_Title__c="President",
+        Principal_Phone__c="312-555-0142",
+    )
+
+    result, _ = stage([record], accounts=[account()])
+
+    row = result.rows[0]
+    assert row["certification_title"] == "President"
+    assert row["certification_phone"] == "312-555-0142"
+    assert row["has_contact_derived_values"] == "true"
+
+
+def test_directly_submitted_optional_contact_details_are_not_reported_as_derived():
+    record = submission(
+        Cert_First_Name__c="Jordan",
+        Cert_Last_Name__c="Lee",
+        Cert_Title__c="President",
+        Cert_Phone__c="312-555-0142",
+    )
+
+    result, _ = stage([record], accounts=[account()])
+
+    assert result.rows[0]["has_contact_derived_values"] == "false"
+
+
+def test_blank_fallback_contact_details_are_not_reported_as_derived():
+    matching = {
+        "Id": "existing-contact",
+        "AccountId": "account-1",
+        "FirstName": "Alex",
+        "LastName": "Smith",
+        "Title": "",
+        "Email": "alex@example.com",
+        "Phone": None,
+    }
+    record = submission(
+        Cert_First_Name__c="Alex",
+        Cert_Last_Name__c="Smith",
+    )
+
+    result, _ = stage([record], accounts=[account()], contacts=[matching])
+
+    assert result.rows[0]["has_contact_derived_values"] == "false"
 
 
 def test_email_only_can_match_another_submitted_role():
@@ -452,7 +560,44 @@ def test_role_lookup_contact_fills_missing_optional_details():
     row = result.rows[0]
     assert row["quality_title"] == "Quality Director"
     assert row["quality_phone"] == "312-555-0199"
+    assert row["has_contact_derived_values"] == "true"
     assert row["quality_warning"] == ""
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        {"Revised_Company_Name__c": "Acme Steel LLC"},
+        {"Will_software_change__c": "No"},
+        {"Cert_Email__c": "cert@example.com"},
+        {"Comments__c": "Please review"},
+        {"Other_Personnel_Notes__c": "Personnel note"},
+    ],
+)
+def test_submitted_update_content_is_not_marked_empty(content):
+    result, _ = stage([submission(**content)], accounts=[account()])
+
+    assert result.rows[0]["has_no_update_content"] == "false"
+
+
+def test_account_submitter_and_fallback_metadata_do_not_count_as_update_content():
+    result, _ = stage([submission()], accounts=[account()])
+
+    row = result.rows[0]
+    assert row["account_name"] == "Acme Steel"
+    assert row["submitter_email"] == "submitter@example.com"
+    assert row["has_no_update_content"] == "true"
+
+
+def test_address_fallback_does_not_hide_that_submitted_content_exists():
+    result, _ = stage(
+        [submission(Revised_Facility_Street__c="99 New Ave")],
+        accounts=[account()],
+    )
+
+    row = result.rows[0]
+    assert row["revised_facility_city"] == "Chicago"
+    assert row["has_no_update_content"] == "false"
 
 
 def test_unmatched_named_contact_records_create_intent_and_warning():
@@ -542,6 +687,8 @@ def test_writer_publishes_csv_atomically_and_repeated_runs_are_independent(tmp_p
     with (first / "profile_updates.csv").open(newline="", encoding="utf-8") as source:
         reader = csv.DictReader(source)
         assert reader.fieldnames == CSV_COLUMNS
+        assert "has_contact_derived_values" in reader.fieldnames
+        assert "has_no_update_content" in reader.fieldnames
         assert list(reader) == rows
 
 

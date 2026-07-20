@@ -156,10 +156,12 @@ uv run aisc_salesforce stage-profile-updates \
 ```
 
 Submissions are grouped by Account ID and the submitter email after trimming
-and case-insensitive comparison. Later nonblank values replace earlier values.
-Different emails stay separate, and every blank-email submission stays
-separate and receives a warning. Each CSV row preserves all source submission
-IDs and names as JSON arrays.
+and case-insensitive comparison. Later nonblank values replace earlier values,
+except that every nonblank Comments and Other Personnel Notes value is
+preserved in submission order and joined with a newline. Different emails stay
+separate, and every blank-email submission stays separate and receives a
+warning. Each CSV row preserves all source submission IDs and names as JSON
+arrays.
 
 The CSV has shared submission and Account columns, Key Data columns, and
 prefixed role columns for `certification_`, `principal_`, `accounting_`,
@@ -171,7 +173,18 @@ filled from that Contact where possible. Repeating the same contact information
 in several roles does not create a warning, but conflicting emails for the same
 submitted name are treated as ambiguous.
 
-Before processing a staged row, inspect both `has_warnings` and `warnings`.
+`has_key_updates` is `true` only when at least one source has the exact
+Salesforce `Type__c` value `"Key Data"`. Populated Key Data fields remain
+visible, but do not set this classification by themselves. The required
+`has_contact_derived_values` column is `true` when a nonblank role title or
+phone was copied from another submitted role or a Salesforce Contact. The
+required `has_no_update_content` column is `true` when the group has no
+submitted Key Data fields, role fields, Comments, or Other Personnel Notes.
+Submitter, Account, and Case metadata, `Type__c`, and fallback-derived values do
+not count as submitted update content.
+
+Before processing a staged row, inspect `has_contact_derived_values`,
+`has_no_update_content`, `has_warnings`, and `warnings`.
 `warnings` is newline-separated and identifies ambiguous contacts, incomplete
 Accounts, missing role lookups, partial addresses that could not be filled, and
 other cases needing human review. An unmatched submitted name uses the
@@ -206,10 +219,12 @@ uv run aisc_salesforce process-profile-updates \
 ```
 
 Before each staged CSV row, the command shows the Account, submitter, and source
-Profile Update names. At the Continue/Quit checkpoint, press Enter, type `C`,
-or type `Continue` to review that row. Type `Q` or `Quit` to stop safely.
-Only this checkpoint has a default; change decisions always require an explicit
-answer.
+Profile Update names. It also notes when contact details were supplemented or
+when the combined update has no submitted update content. At the Continue/Quit
+checkpoint, press Enter, type `C`, or type `Continue` to review that row. Type
+`Q` or `Quit` to stop safely. Only this checkpoint has a default; change
+decisions always require an explicit answer. Published CSV files must include
+both new metadata columns; older staged files fail validation.
 
 Each real field change accepts a shortcut or its complete decision phrase:
 

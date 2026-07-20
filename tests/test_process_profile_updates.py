@@ -15,6 +15,7 @@ from aisc_salesforce.process_profile_updates import (
     ReviewDecision,
     build_case_batches,
     format_response_emails,
+    read_staged_profile_updates,
 )
 from aisc_salesforce.profile_updates import AutomationCounts
 from aisc_salesforce.salesforce import SalesforceError
@@ -251,6 +252,23 @@ def test_workflow_creates_cases_then_stages_and_reads_the_published_csv(tmp_path
     assert positions == sorted(positions)
 
 
+@pytest.mark.parametrize(
+    "missing_column",
+    ["has_contact_derived_values", "has_no_update_content"],
+)
+def test_published_csv_requires_new_staging_metadata_columns(
+    tmp_path, missing_column
+):
+    columns = [column for column in CSV_COLUMNS if column != missing_column]
+    csv_path = tmp_path / "profile_updates.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as output:
+        writer = csv.DictWriter(output, fieldnames=columns)
+        writer.writeheader()
+
+    with pytest.raises(ProcessingError, match=missing_column):
+        read_staged_profile_updates(csv_path)
+
+
 @pytest.mark.parametrize("failure", ["cases", "stage", "write"])
 def test_workflow_aborts_before_review_when_required_setup_fails(tmp_path, failure):
     events = []
@@ -357,6 +375,62 @@ def test_each_staged_row_has_a_continue_checkpoint_and_heading(tmp_path, answer)
     assert "Profile Updates: PU-100" in displayed
     assert "Profile Updates: PU-101" in displayed
     assert result.stopped_early is False
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected_notes"),
+    [
+        (
+            {"has_contact_derived_values": "true"},
+            [
+                (
+                    "Note: contact details were supplemented from available "
+                    "contact information."
+                )
+            ],
+        ),
+        (
+            {"has_no_update_content": "true"},
+            ["Note: this combined profile update has no submitted update content."],
+        ),
+        (
+            {
+                "has_contact_derived_values": "true",
+                "has_no_update_content": "true",
+            },
+            [
+                (
+                    "Note: contact details were supplemented from available "
+                    "contact information."
+                ),
+                (
+                    "Note: this combined profile update has no submitted "
+                    "update content."
+                ),
+            ],
+        ),
+        ({}, []),
+    ],
+)
+def test_staged_row_heading_shows_metadata_notes(tmp_path, flags, expected_notes):
+    client = FakeClient()
+    output = []
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder([]),
+        output_fn=output.append,
+        now=NOW,
+    )
+
+    processor.review([staged_row(**flags)], tmp_path)
+
+    displayed = "\n".join(output)
+    known_notes = [
+        "Note: contact details were supplemented from available contact information.",
+        "Note: this combined profile update has no submitted update content.",
+    ]
+    for note in known_notes:
+        assert (note in displayed) is (note in expected_notes)
 
 
 @pytest.mark.parametrize("answer", ["q", "Quit"])
