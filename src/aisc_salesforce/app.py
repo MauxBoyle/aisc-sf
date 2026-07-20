@@ -15,6 +15,7 @@ from .process_profile_updates import (
     ProfileUpdateProcessingWorkflow,
 )
 from .profile_updates import ProfileUpdateService
+from .rename_profile_update_cases import RenameProfileUpdateCasesService
 from .salesforce import (
     SalesforceClient,
     SalesforceError,
@@ -73,6 +74,15 @@ def main(
         default=Path("staged_profile_updates"),
         help="Directory to contain staging, audit, and response artifacts.",
     )
+    rename_parser = subparsers.add_parser(
+        "rename-profile-update-cases",
+        help="Preview corrections to recent legacy Profile Update Case subjects.",
+    )
+    rename_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply the previewed Subject-only Case updates.",
+    )
     args = parser.parse_args(argv)
     if args.command == "snapshot":
         try:
@@ -101,6 +111,15 @@ def main(
             )
         except (ProcessingError, SalesforceError, OSError) as error:
             print(f"Process profile updates failed: {error}", file=sys.stderr)
+            return 1
+    if args.command == "rename-profile-update-cases":
+        try:
+            return _run_rename_profile_update_cases(
+                apply=args.apply,
+                output_fn=output_fn,
+            )
+        except (SalesforceError, OSError) as error:
+            print(f"Rename profile update Cases failed: {error}", file=sys.stderr)
             return 1
     return 1
 
@@ -195,6 +214,29 @@ def _run_process_profile_updates(
     output_fn(f"completed Case batches: {result.completed_batches}")
     output_fn(f"pending Case batches: {result.pending_batches}")
     return 0
+
+
+def _run_rename_profile_update_cases(
+    *,
+    apply: bool,
+    output_fn: Callable[[str], None] = print,
+) -> int:
+    """Connect to Salesforce and preview or apply recent subject corrections."""
+    _load_dotenv(Path(".env"))
+    environment = dict(os.environ)
+    credentials = get_credentials(environment)
+    auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
+    counts = RenameProfileUpdateCasesService(
+        SalesforceClient(auth), output_fn=output_fn
+    ).run(apply=apply)
+    output_fn("Rename profile update Cases complete:")
+    output_fn(f"matched: {counts.matched}")
+    label = "updated" if apply else "would update"
+    value = counts.updated if apply else counts.would_update
+    output_fn(f"{label}: {value}")
+    output_fn(f"skipped: {counts.skipped}")
+    output_fn(f"failed: {counts.failed}")
+    return 1 if counts.failed else 0
 
 
 def get_profile_update_configuration(

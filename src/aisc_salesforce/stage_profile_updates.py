@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .profile_update_subjects import subject_has_profile_update
 from .profile_updates import SUBMISSION_FIELDS, escape_soql_string
 from .salesforce import SalesforceClient
 
@@ -454,7 +455,7 @@ class ProfileUpdateStagingService:
             for case in account_cases
             if source_names
             and all(
-                _case_subject_has_name(case.get("Subject"), name)
+                subject_has_profile_update(case.get("Subject"), name)
                 for name in source_names
             )
         ]
@@ -474,7 +475,7 @@ class ProfileUpdateStagingService:
             case
             for case in account_cases
             if any(
-                _case_subject_has_name(case.get("Subject"), name)
+                subject_has_profile_update(case.get("Subject"), name)
                 for name in source_names
             )
         ]
@@ -986,14 +987,6 @@ def _is_key_update(record: dict[str, Any]) -> bool:
     return _normalized(record.get("Type__c")) == "key data" or any(
         _has_value(record.get(api_name)) for api_name in key_fields
     )
-
-
-def _case_subject_has_name(subject: Any, update_name: str) -> bool:
-    text = _clean_text(subject)
-    if " - " not in text:
-        return False
-    names = [name.strip().casefold() for name in text.rsplit(" - ", 1)[1].split("/")]
-    return update_name.strip().casefold() in names
 
 
 def _where_in(field_name: str, values: list[str]) -> str:

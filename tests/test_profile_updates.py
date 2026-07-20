@@ -178,6 +178,24 @@ def test_audit_reuses_received_case_and_reopens_only_when_closed():
     assert client.posted[0] == ("received-1", "The company moved.")
 
 
+def test_audit_recognizes_aisc_received_case():
+    received = {
+        "Id": "received-1",
+        "CaseNumber": "0042",
+        "Subject": "AISC Profile Update for Acme Steel - PU-100 26-07-15",
+        "Status": "Working",
+        "IsClosed": False,
+        "CreatedDate": "2026-07-15T00:00:00.000+0000",
+    }
+    client = FakeClient(audits=[audit()], cases={"account-1": [received]})
+
+    counts = service(client).run()
+
+    assert counts.reused == 1
+    assert client.created == []
+    assert client.posted[0] == ("received-1", "The company moved.")
+
+
 def test_audit_preserves_open_received_status_and_skips_newer_other_case():
     open_received = {
         "Id": "received-open",
@@ -262,7 +280,7 @@ def test_new_submission_converts_newest_expected_case():
             "Case",
             "expected-newest",
             {
-                "Subject": "2026-07-15: Profile Update Received for Acme Steel - PU-100",
+                "Subject": "AISC Profile Update for Acme Steel - PU-100 26-07-15",
                 "OwnerId": "queue-id",
                 "Primary_Responder__c": "responder-id",
                 "ContactId": "contact-1",
@@ -287,7 +305,7 @@ def test_new_submission_creates_received_case_with_exact_payload():
         (
             "Case",
             {
-                "Subject": "2026-07-15: Profile Update Received for Acme Steel - PU-100",
+                "Subject": "AISC Profile Update for Acme Steel - PU-100 26-07-15",
                 "OwnerId": "queue-id",
                 "Primary_Responder__c": "responder-id",
                 "ContactId": None,
@@ -306,7 +324,7 @@ def test_new_submission_creates_received_case_with_exact_payload():
 def test_submission_reuses_received_case_and_appends_name_once():
     received = {
         "Id": "received-1",
-        "Subject": "2026-07-01: Profile Update Received for Acme Steel - PU-099",
+        "Subject": "AISC Profile Update for Acme Steel - PU-099 26-07-01",
         "Status": "Working",
         "IsClosed": False,
         "CreatedDate": "2026-07-01T00:00:00.000+0000",
@@ -323,7 +341,8 @@ def test_submission_reuses_received_case_and_appends_name_once():
             "received-1",
             {
                 "Subject": (
-                    "2026-07-01: Profile Update Received for Acme Steel - PU-099 / PU-100"
+                    "AISC Profile Update for Acme Steel - "
+                    "PU-099 26-07-01 / PU-100 26-07-15"
                 )
             },
         )
@@ -333,11 +352,67 @@ def test_submission_reuses_received_case_and_appends_name_once():
     client.updated.clear()
     client.posted.clear()
     client.feeds["received-1"] = [build_submission_summary(submission())]
-    received["Subject"] += " / PU-100"
+    received["Subject"] += " / PU-100 26-07-15"
     retry_counts = service(client).run()
     assert retry_counts.skipped == 1
     assert not client.updated
     assert not client.posted
+
+
+def test_existing_aisc_update_skips_before_reading_chatter_or_writing():
+    received = {
+        "Id": "received-1",
+        "Subject": (
+            "AISC Profile Update for Acme Steel - PU-099 26-07-01 / pu-100 26-07-15"
+        ),
+        "Status": "Working",
+        "IsClosed": False,
+        "CreatedDate": "2026-07-15T15:00:00.000+0000",
+    }
+    client = FakeClient(submissions=[submission()], cases={"account-1": [received]})
+
+    counts = service(client).run()
+
+    assert counts.skipped == 1
+    assert client.updated == []
+    assert client.posted == []
+    assert client.feeds == {}
+
+
+def test_partial_profile_update_number_does_not_count_as_duplicate():
+    received = {
+        "Id": "received-1",
+        "Subject": "AISC Profile Update for Acme Steel - PU-100 26-07-01",
+        "Status": "Working",
+        "IsClosed": False,
+        "CreatedDate": "2026-07-01T00:00:00.000+0000",
+    }
+    client = FakeClient(
+        submissions=[submission(Name="PU-10")],
+        cases={"account-1": [received]},
+    )
+
+    counts = service(client).run()
+
+    assert counts.reused == 1
+    assert client.updated[0][2]["Subject"].endswith(" / PU-10 26-07-15")
+
+
+def test_legacy_retry_still_posts_missing_summary_without_renaming_subject():
+    received = {
+        "Id": "received-1",
+        "Subject": "2026-07-01: Profile Update Received for Acme Steel - PU-100",
+        "Status": "Working",
+        "IsClosed": False,
+        "CreatedDate": "2026-07-01T00:00:00.000+0000",
+    }
+    client = FakeClient(submissions=[submission()], cases={"account-1": [received]})
+
+    counts = service(client).run()
+
+    assert counts.reused == 1
+    assert client.updated == []
+    assert client.posted == [("received-1", build_submission_summary(submission()))]
 
 
 def test_contact_matching_prefers_account_and_rejects_ambiguity():
