@@ -202,3 +202,11 @@ htmlcov/
 .coverage
 .env
 .env.test
+data/
+
+# iMIS CSContactBasic exports and derived files contain personal data.
+imis_contactbasic/
+**/Full_CSContactBasic_*.csv
+**/Combined_CSContactBasic_*.csv
+**/Changed_CSContactBasic_*.csv
+**/New_CSContactBasic_*.csv

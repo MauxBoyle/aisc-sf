@@ -69,6 +69,13 @@ Preview the one-time correction of recent legacy Case subjects:
 uv run aisc_salesforce rename-profile-update-cases
 ```
 
+Consolidate the newest dated iMIS contact export:
+
+```bash
+uv run aisc_salesforce consolidate-imis-contacts \
+  --directory imis_contactbasic
+```
+
 All commands are also available as a Python module:
 
 ```bash
@@ -78,6 +85,43 @@ uv run python -m aisc_salesforce profile-updates
 `profile-updates` prints `created`, `reused`, `skipped`, and `failed` counts. A
 successful run returns exit code `0`; missing configuration or a Salesforce
 failure returns `1`.
+
+### iMIS contact consolidation
+
+Place downloaded exports in `imis_contactbasic/` by default, or select another
+folder with `--directory`. The command discovers dates from filenames rather
+than file modification times:
+
+- Fresh exports use `Full_CSContactBasic_YYMMDD.csv`; `YY` means `20YY`.
+- Combined tables use `Combined_CSContactBasic_YYYYMMDD.csv`.
+
+On the first run, the newest full export creates only a dated combined table.
+On later runs, the newest full export must be newer than the newest combined
+table. The command then publishes a new combined table plus
+`Changed_CSContactBasic_YYYYMMDD.csv` and
+`New_CSContactBasic_YYYYMMDD.csv`. Empty reports still contain the standard
+headers.
+
+Rows match by exact `iMIS Id`. Existing rows keep their position, newer
+matching rows replace them, older-only contacts remain, and new contacts are
+appended in fresh-export order. All 21 fields are compared as exact text, so
+case, whitespace, and blank-value differences count. Identifiers such as
+`iMIS Id`, `Company ID`, and `Major Key` remain strings, preserving leading
+zeroes.
+
+Files may arrange the 21 required headers in any order, but missing or extra
+headers stop the run before output is published. Blank IDs are skipped with
+their CSV row numbers. If one selected file repeats a nonblank ID, every row
+with that ID is omitted from that file and a warning identifies the filename
+and ID. A duplicated ID in the fresh export therefore cannot replace a valid
+older row. Existing outputs are never overwritten, and failed writes clean up
+temporary and partially published files.
+
+> [!WARNING]
+> iMIS contact exports and all three output types contain personal data. Their
+> standard filename patterns are ignored by Git even in a custom directory.
+> Keep them uncommitted, access-controlled, and shared only through approved
+> secure channels.
 
 ### Profile Update Case subjects
 
