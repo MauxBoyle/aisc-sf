@@ -233,8 +233,10 @@ with a blank email also stays separate and receives a warning.
 
 Within a group, submissions are ordered by `CreatedDate` and `Id`. Later
 nonblank values replace earlier values, while blank later values do not erase
-earlier information. Source submission IDs and names are retained as JSON
-arrays.
+earlier information. Comments and Other Personnel Notes are the exception:
+every nonblank value is preserved, including repeated identical text, and
+values are joined with `\n` in submission order. Source submission IDs and
+names are retained as JSON arrays.
 
 When at least one revised address component is present, the output contains all
 five components. Missing submitted components are filled from the Account
@@ -248,7 +250,7 @@ Each row contains these groups of columns:
 |---|---|
 | Source and dates | `source_submission_ids`, `source_submission_names`, `earliest_submission_date`, `latest_submission_date` |
 | Account and submitter | `account_id`, `account_name`, `certification_id`, `submitter_name`, `submitter_email`, `submitter_phone` |
-| Notes and review | `comments`, `personnel_notes`, `has_warnings`, `warnings` |
+| Notes and review | `comments`, `personnel_notes`, `has_contact_derived_values`, `has_no_update_content`, `has_warnings`, `warnings` |
 | Key Data | `effective_date`, revised company name/owner, five revised address columns, and `key_answers` |
 | Contact roles | Columns prefixed with `certification_`, `principal_`, `accounting_`, `quality_`, and `new_york_` |
 
@@ -282,13 +284,27 @@ tier are reported as ambiguous. Repeated identical contact information in
 several submitted roles counts as one candidate; the same name paired with
 conflicting emails remains ambiguous. When a Contact is resolved, missing title
 and phone values are filled from that Contact where possible. Missing title or
-phone alone does not cause a warning.
+phone alone does not cause a warning. `has_contact_derived_values` is `true`
+only when a nonblank title or phone was actually copied from another submitted
+role or a Salesforce Contact. Values submitted directly for that role do not
+set the flag.
+
+`has_no_update_content` is `true` when the grouped raw submissions contain no
+Key Data fields, role fields, Comments, or Other Personnel Notes. Account,
+Case, certification, and submitter metadata do not count. `Type__c` also does
+not count, so an exact `"Key Data"` submission with no update fields can have
+both `has_key_updates=true` and `has_no_update_content=true`. Values filled from
+an Account, another role, or a Salesforce Contact cannot turn the empty-content
+flag off.
 
 !!! warning
 
-    The interactive processor inspects `has_warnings` and `warnings` before
-    acting on a row. The `warnings` field is readable, newline-separated text;
-    role warnings are also copied into the matching prefixed `warning` column.
+    The interactive processor requires `has_contact_derived_values` and
+    `has_no_update_content` in addition to the existing CSV columns. Older
+    staged CSV files fail validation. It also inspects `has_warnings` and
+    `warnings` before acting on a row. The `warnings` field is readable,
+    newline-separated text; role warnings are also copied into the matching
+    prefixed `warning` column.
 
 Case preparation adds `case_id`, `case_number`, `case_status`, and
 `case_match_status`. A row is processable only when its match status is
@@ -299,9 +315,13 @@ for part of a Profile Update identifier.
 
 Key Update metadata is explicit:
 
-- `has_key_updates` is `true` when at least one source is marked as Key Data or
-  contains a Key Update field.
+- `has_key_updates` is `true` only when at least one source has the exact
+  Salesforce `Type__c` value `"Key Data"`. Case differences, surrounding
+  spaces, `None`, and populated Key Data fields alone do not set it.
 - `earliest_key_update_date` is the oldest such source `CreatedDate`.
+
+Populated Key Data fields remain visible in their normal CSV columns and in
+`key_answers` even when they do not set `has_key_updates`.
 
 ## Process Profile Updates command
 
@@ -340,7 +360,13 @@ proposals. Effective date and the Key Update answers remain context unless
 they map to one of those real Account fields.
 
 Before every staged CSV row, a heading shows its Account, submitter, and source
-Profile Update names. The next prompt is a checkpoint:
+Profile Update names. When the matching CSV flag is `true`, the heading also
+shows one or both of these lines:
+
+- `Note: contact details were supplemented from available contact information.`
+- `Note: this combined profile update has no submitted update content.`
+
+The next prompt is a checkpoint:
 
 | Checkpoint answer | Result |
 |---|---|
