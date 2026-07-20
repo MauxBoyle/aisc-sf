@@ -60,6 +60,41 @@ failed: 0
 Exit code `0` means the run completed without failures. Exit code `1` means
 configuration, Salesforce communication, or one or more records failed.
 
+### Case subject grammar and duplicate handling
+
+New received Cases and Expected Cases converted after a submission use:
+
+```text
+AISC Profile Update for {Account Name} - {Profile Update} {YY-MM-DD}
+```
+
+Example:
+
+```text
+AISC Profile Update for Acme Steel - PU-100 26-07-20
+```
+
+Every combined Case stores an ordered Profile Update/date pair for each
+submission:
+
+```text
+AISC Profile Update for Acme Steel - PU-099 26-07-01 / PU-100 26-07-15
+```
+
+The date beside each identifier is that submission's received date. Matching
+trims whitespace, ignores letter case, and compares the complete identifier.
+For example, `pu-100` matches `PU-100`, but `PU-10` and `PU-1000` do not.
+
+The daily automation and staging workflow recognize both the AISC grammar and
+legacy subjects containing `Profile Update Received`. When an Account-scoped
+AISC Case already contains the exact identifier, the daily automation
+immediately reports the submission as skipped. It does not query or post
+Chatter for that duplicate.
+
+When recurring automation reuses a legacy received Case, it keeps the old
+subject format. A missing Chatter summary can therefore still be added on a
+retry without silently normalizing legacy Cases outside the correction window.
+
 ## Scheduling and retries
 
 Use cron, Windows Task Scheduler, or another external scheduler to call the
@@ -74,6 +109,88 @@ name, and exact Chatter text to recognize completed work. If a run stops after
 one Chatter post, the next run posts only the missing message.
 
 The project does not install or manage a scheduler itself.
+
+## Rename Profile Update Cases command
+
+Use the one-time command to correct recently created legacy Case subjects. The
+safe default is preview mode:
+
+```bash
+uv run aisc_salesforce rename-profile-update-cases
+```
+
+Preview mode authenticates and queries Salesforce but does not update a Case.
+It prints each proposal in this form:
+
+```text
+00012345: would update: 2026-07-15: Profile Update Received for Acme Steel - PU-100 -> AISC Profile Update for Acme Steel - PU-100 26-07-15
+```
+
+After reviewing the preview, `--apply` is the only option that enables writes:
+
+```bash
+uv run aisc_salesforce rename-profile-update-cases --apply
+```
+
+Apply mode sends a PATCH containing only `Subject`; omitted Case fields are not
+changed. See Salesforce's
+[record-update guidance](https://developer.salesforce.com/docs/marketing/marketing-cloud-growth/guide/mc-manage-objects-update-rest.html).
+
+### Correction window and parsing rules
+
+The query covers seven `America/Chicago` calendar dates: today plus the six
+preceding dates. The lower boundary is local midnight six dates ago, and the
+exclusive upper boundary is the local midnight after today. Both boundaries
+are converted to UTC for the SOQL `CreatedDate` comparison because Salesforce
+stores date/time values in GMT. See Salesforce's
+[date/time guidance](https://developer.salesforce.com/docs/atlas.en-us.formula_date_time_tipsheet.meta/formula_date_time_tipsheet).
+
+These dated legacy prefixes are supported:
+
+- `YYYY-MM-DD: Profile Update Received ...`
+- `YYYY-MM-DD - Profile Update Received ...`
+- `YY-MM-DD - Profile Update Received ...`
+
+The embedded received date is required. It is used instead of the Case
+`CreatedDate`, and a subject with several identifiers gives that same embedded
+date to every identifier:
+
+```text
+26-07-15 - Profile Update Received for Acme Steel - PU-100 / PU-101
+```
+
+becomes:
+
+```text
+AISC Profile Update for Acme Steel - PU-100 26-07-15 / PU-101 26-07-15
+```
+
+An unparseable date, a missing date, or a corrected subject over Salesforce's
+255-character Subject limit is skipped with a reason. The command does not
+guess from `CreatedDate`.
+
+### Output, failures, and reruns
+
+Every Case receives an individual `would update`, `updated`, `skipped`, or
+`failed` line. The final totals are:
+
+```text
+Rename profile update Cases complete:
+matched: 3
+would update: 2
+skipped: 1
+failed: 0
+```
+
+Apply mode prints `updated` instead of `would update`. It continues processing
+after an individual Salesforce update fails so the remaining safe corrections
+can finish. The command exits with code `1` if any update failed and `0`
+otherwise.
+
+Reruns are safe. The Salesforce query targets legacy `Profile Update Received`
+subjects, while a successfully corrected subject begins with `AISC Profile
+Update`; it will not be changed again. Legacy Cases outside the seven-date
+window remain unchanged.
 
 ## Stage Profile Updates command
 
@@ -176,7 +293,9 @@ phone alone does not cause a warning.
 Case preparation adds `case_id`, `case_number`, `case_status`, and
 `case_match_status`. A row is processable only when its match status is
 `matched`. Missing and ambiguous Case matches are blocking warnings and are
-never guessed.
+never guessed. Case subjects are parsed with the same exact identifier rules as
+daily automation, so the `YY-MM-DD` values in AISC subjects are not mistaken
+for part of a Profile Update identifier.
 
 Key Update metadata is explicit:
 

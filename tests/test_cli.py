@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from aisc_salesforce import app
 from aisc_salesforce.dictionary import ExportField
 from aisc_salesforce.profile_updates import AutomationCounts
+from aisc_salesforce.rename_profile_update_cases import RenameCounts
 
 
 def test_cli_success_uses_custom_output_dir(monkeypatch, tmp_path, capsys):
@@ -303,3 +304,48 @@ def test_process_profile_updates_cli_reports_processing_failure(monkeypatch, cap
         "Process profile updates failed: manual verification failed"
         in capsys.readouterr().err
     )
+
+
+def test_rename_cli_previews_by_default_and_apply_is_explicit(monkeypatch):
+    calls = []
+
+    def run(*, apply, output_fn):
+        calls.append((apply, output_fn))
+        return 0
+
+    monkeypatch.setattr(app, "_run_rename_profile_update_cases", run)
+
+    assert app.main(["rename-profile-update-cases"]) == 0
+    assert app.main(["rename-profile-update-cases", "--apply"]) == 0
+    assert [apply for apply, _ in calls] == [False, True]
+
+
+def test_rename_cli_prints_totals_and_fails_only_for_update_failures(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(app, "_load_dotenv", lambda path: None)
+    monkeypatch.setattr(app, "get_credentials", lambda environment: {"ok": "yes"})
+    monkeypatch.setattr(app, "get_oauth_url", lambda environment: "token-url")
+    monkeypatch.setattr(
+        app,
+        "request_access_token",
+        lambda credentials, oauth_url: "auth",
+    )
+    monkeypatch.setattr(app, "SalesforceClient", lambda auth: "client")
+
+    class Service:
+        def __init__(self, client, *, output_fn):
+            pass
+
+        def run(self, *, apply):
+            assert apply is True
+            return RenameCounts(matched=3, updated=1, skipped=1, failed=1)
+
+    monkeypatch.setattr(app, "RenameProfileUpdateCasesService", Service)
+
+    assert app._run_rename_profile_update_cases(apply=True) == 1
+    output = capsys.readouterr().out
+    assert "matched: 3" in output
+    assert "updated: 1" in output
+    assert "skipped: 1" in output
+    assert "failed: 1" in output
