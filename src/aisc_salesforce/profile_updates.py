@@ -6,6 +6,15 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
 
+from .profile_update_subjects import (
+    ProfileUpdateReference,
+    append_profile_update,
+    build_aisc_profile_update_subject,
+    is_received_profile_update_subject,
+    parse_aisc_profile_update_subject,
+    subject_has_profile_update,
+    validate_subject_length,
+)
 from .salesforce import SalesforceClient, SalesforceError
 
 AUDIT_FIELDS = [
@@ -289,7 +298,7 @@ class ProfileUpdateService:
             f"{audit_date.isoformat()}: Profile Update Expected for {account_name} "
             f"based on {audit_name}"
         )
-        _check_subject_length(subject)
+        validate_subject_length(subject)
         cases = self._profile_cases(account_id)
 
         matching = self._newest(
@@ -304,7 +313,7 @@ class ProfileUpdateService:
         received = self._newest(
             case
             for case in cases
-            if "profile update received" in _clean_text(case.get("Subject")).casefold()
+            if is_received_profile_update_subject(case.get("Subject"))
         )
         if received is not None:
             worked = False
@@ -382,10 +391,17 @@ class ProfileUpdateService:
         summary = build_submission_summary(submission)
         cases = self._profile_cases(account_id)
 
+        if any(
+            parse_aisc_profile_update_subject(case.get("Subject")) is not None
+            and subject_has_profile_update(case.get("Subject"), update_name)
+            for case in cases
+        ):
+            return "skipped"
+
         same_name_cases = [
             case
             for case in cases
-            if _subject_has_name(case.get("Subject"), update_name)
+            if subject_has_profile_update(case.get("Subject"), update_name)
         ]
         for case in sorted(same_name_cases, key=_case_sort_key, reverse=True):
             case_id = _required_text(case, "Id", "Case ID")
@@ -401,24 +417,22 @@ class ProfileUpdateService:
         received = self._newest(
             case
             for case in cases
-            if "profile update received" in _clean_text(case.get("Subject")).casefold()
+            if is_received_profile_update_subject(case.get("Subject"))
         )
         if received is not None:
             case_id = _required_text(received, "Id", "Case ID")
             old_subject = _required_text(received, "Subject", "Case Subject")
-            subject = f"{old_subject} / {update_name}"
-            _check_subject_length(subject)
+            subject = append_profile_update(old_subject, update_name, created_date)
             self.client.update_record("Case", case_id, {"Subject": subject})
             received["Subject"] = subject
             self._post_if_missing(case_id, summary)
             return "reused"
 
         contact_id = self._submission_contact(submission, account_id)
-        subject = (
-            f"{created_date.isoformat()}: Profile Update Received for {account_name} "
-            f"- {update_name}"
+        subject = build_aisc_profile_update_subject(
+            account_name,
+            [ProfileUpdateReference(update_name, created_date)],
         )
-        _check_subject_length(subject)
         payload = self._case_payload(
             subject=subject,
             account_id=account_id,
@@ -523,14 +537,6 @@ def escape_soql_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
-def _subject_has_name(subject: Any, update_name: str) -> bool:
-    text = _clean_text(subject)
-    if " - " not in text:
-        return False
-    names = [name.strip().casefold() for name in text.rsplit(" - ", 1)[1].split("/")]
-    return update_name.strip().casefold() in names
-
-
 def _clean_text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
 
@@ -566,10 +572,3 @@ def _record_date(value: Any) -> date:
 
 def _case_sort_key(record: dict[str, Any]) -> tuple[str, str]:
     return (_clean_text(record.get("CreatedDate")), _clean_text(record.get("Id")))
-
-
-def _check_subject_length(subject: str) -> None:
-    if len(subject) > 255:
-        raise ValueError(
-            f"Case Subject is {len(subject)} characters; Salesforce allows 255."
-        )

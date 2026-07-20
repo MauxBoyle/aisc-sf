@@ -63,6 +63,12 @@ Create/reuse Cases, publish a fresh staging CSV, and review it interactively:
 uv run aisc_salesforce process-profile-updates
 ```
 
+Preview the one-time correction of recent legacy Case subjects:
+
+```bash
+uv run aisc_salesforce rename-profile-update-cases
+```
+
 All commands are also available as a Python module:
 
 ```bash
@@ -72,6 +78,66 @@ uv run python -m aisc_salesforce profile-updates
 `profile-updates` prints `created`, `reused`, `skipped`, and `failed` counts. A
 successful run returns exit code `0`; missing configuration or a Salesforce
 failure returns `1`.
+
+### Profile Update Case subjects
+
+New received Cases use this grammar:
+
+```text
+AISC Profile Update for {Account Name} - {Profile Update} {YY-MM-DD}
+```
+
+For example:
+
+```text
+AISC Profile Update for Acme Steel - PU-100 26-07-20
+```
+
+When another submission is reused on the same AISC Case, its complete
+identifier and own received date are appended:
+
+```text
+AISC Profile Update for Acme Steel - PU-099 26-07-01 / PU-100 26-07-15
+```
+
+Identifiers are compared after trimming and without letter-case sensitivity,
+but only complete identifiers match: `PU-10` does not match `PU-100`. If an
+Account-scoped AISC Case already contains an identifier, automation skips that
+submission without reading or posting Chatter.
+
+Existing `Profile Update Received` subjects remain recognized by Case
+automation and staging. Recurring automation leaves those legacy subjects in
+their old format, which keeps retries compatible and prevents out-of-window
+renames.
+
+### One-time legacy subject correction
+
+`rename-profile-update-cases` is preview-only by default:
+
+```bash
+uv run aisc_salesforce rename-profile-update-cases
+```
+
+Review every printed `old subject -> new subject` proposal. Apply those same
+Subject-only changes explicitly:
+
+```bash
+uv run aisc_salesforce rename-profile-update-cases --apply
+```
+
+The command checks today and the preceding six `America/Chicago` calendar
+dates. Those local midnight boundaries are converted to UTC for Salesforce
+`CreatedDate`, which Salesforce stores in GMT. It accepts dated legacy prefixes
+in the forms `YYYY-MM-DD:`, `YYYY-MM-DD -`, and `YY-MM-DD -`. The date embedded
+in the legacy subject—not the Case creation date—is assigned to every Profile
+Update identifier in that subject.
+
+Subjects without a trustworthy embedded date and corrected subjects over 255
+characters are skipped with an explanation. Apply mode PATCHes only `Subject`,
+continues after an individual failure, and exits nonzero if any write fails.
+Both modes print per-Case results and totals for `matched`, `updated` or
+`would update`, `skipped`, and `failed`. A safe rerun ignores already-corrected
+AISC subjects.
 
 ### Profile Update staging
 
@@ -232,7 +298,9 @@ The automation checks Cases only on the relevant Account. It reuses the newest
 appropriate Expected or Received Case and checks the Case and Audit Chatter
 feeds for the exact automation message before posting. Therefore, rerunning
 after a partial failure fills in missing work without duplicating completed
-comments. New submission names are appended with ` / ` once.
+comments. AISC subjects store every appended submission as an exact
+Profile Update/date pair. Legacy subjects remain unchanged except when the
+dedicated correction command is explicitly run with `--apply`.
 
 Audit Dates from 30 days ago through today are eligible. Blank explanations,
 `None`, and `N/A` are ignored. If adding a Profile Update name would make a

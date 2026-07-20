@@ -577,6 +577,51 @@ def test_staging_records_case_and_key_update_metadata():
     assert "AccountId IN ('account-1')" in case_query[2]
 
 
+def test_staging_matches_aisc_pairs_without_treating_dates_as_update_names():
+    records = [
+        submission(Name="PU-099"),
+        submission(
+            Id="submission-2",
+            Name="PU-100",
+            CreatedDate="2026-07-16T14:30:00.000+0000",
+        ),
+    ]
+    aisc_case = {
+        "Id": "case-1",
+        "CaseNumber": "0001",
+        "Subject": (
+            "AISC Profile Update for Acme Steel - PU-099 26-07-01 / PU-100 26-07-15"
+        ),
+        "Status": "Pending",
+        "CreatedDate": "2026-07-16T15:00:00.000+0000",
+        "AccountId": "account-1",
+    }
+
+    result, _ = stage(records, accounts=[account()], cases=[aisc_case])
+
+    assert result.rows[0]["case_match_status"] == "matched"
+    assert result.rows[0]["case_id"] == "case-1"
+
+
+def test_staging_profile_update_matching_is_exact_not_partial():
+    aisc_case = {
+        "Id": "case-1",
+        "CaseNumber": "0001",
+        "Subject": "AISC Profile Update for Acme Steel - PU-100 26-07-15",
+        "Status": "Pending",
+        "CreatedDate": "2026-07-15T15:00:00.000+0000",
+        "AccountId": "account-1",
+    }
+
+    result, _ = stage(
+        [submission(Name="PU-10")],
+        accounts=[account()],
+        cases=[aisc_case],
+    )
+
+    assert result.rows[0]["case_match_status"] == "missing"
+
+
 def test_missing_or_ambiguous_case_match_is_a_blocking_warning():
     record = submission()
 

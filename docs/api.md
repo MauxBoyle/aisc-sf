@@ -13,6 +13,41 @@
         - is_eligible_audit
         - match_contact
 
+## Profile Update Case subjects
+
+::: aisc_salesforce.profile_update_subjects
+    options:
+      show_root_heading: true
+      members:
+        - ProfileUpdateReference
+        - AiscProfileUpdateSubject
+        - build_aisc_profile_update_subject
+        - parse_aisc_profile_update_subject
+        - parse_legacy_profile_update_subject
+        - is_received_profile_update_subject
+        - subject_has_profile_update
+        - append_profile_update
+        - validate_subject_length
+
+The frozen data classes model an Account name plus ordered Profile Update/date
+pairs. Both recurring automation and staging use these helpers, so identifier
+matching and subject-length validation have one shared implementation.
+
+## Legacy Case subject correction
+
+::: aisc_salesforce.rename_profile_update_cases
+    options:
+      show_root_heading: true
+      members:
+        - RenameCounts
+        - RenameProfileUpdateCasesService
+        - correction_window
+
+`correction_window` converts seven `America/Chicago` local dates to UTC query
+bounds. `RenameProfileUpdateCasesService.run()` defaults to preview mode. Apply
+mode updates only the Case `Subject`, catches individual Salesforce write
+failures, and continues through the queried batch.
+
 ## Salesforce client
 
 ::: aisc_salesforce.salesforce
