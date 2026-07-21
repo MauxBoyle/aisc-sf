@@ -618,6 +618,16 @@ class InteractiveProfileUpdateProcessor:
             f"Submitter: {submitter_name} <{submitter_email}>\n"
             f"Profile Updates: {source_names or '(unnamed)'}"
         )
+        if row.get("has_contact_derived_values") == "true":
+            heading += (
+                "\nNote: contact details were supplemented from available "
+                "contact information."
+            )
+        if row.get("has_no_update_content") == "true":
+            heading += (
+                "\nNote: this combined profile update has no submitted "
+                "update content."
+            )
         self.output_fn(_section_heading(heading, ITEM_SEPARATOR))
         while True:
             answer = self.input_fn(

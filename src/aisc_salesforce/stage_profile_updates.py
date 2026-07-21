@@ -75,6 +75,14 @@ ADDRESS_FIELDS = [
     ("revised_facility_country", "Revised_Facility_Country__c", "BillingCountry"),
 ]
 
+KEY_UPDATE_FIELDS = [
+    "Effective_Date__c",
+    "Revised_Company_Name__c",
+    "Revised_Company_Owner__c",
+    *(api_name for _, api_name, _ in ADDRESS_FIELDS),
+    *(api_name for api_name, _ in KEY_ANSWER_FIELDS),
+]
+
 
 @dataclass(frozen=True)
 class RoleDefinition:
@@ -177,6 +185,8 @@ SHARED_COLUMNS = [
     "submitter_phone",
     "comments",
     "personnel_notes",
+    "has_contact_derived_values",
+    "has_no_update_content",
     "has_warnings",
     "warnings",
 ]
@@ -385,9 +395,13 @@ class ProfileUpdateStagingService:
                 "submitter_name": _clean_text(merged.get("Name__c")),
                 "submitter_email": _clean_text(merged.get("Email__c")),
                 "submitter_phone": _clean_text(merged.get("Phone__c")),
-                "comments": _display_value(merged.get("Comments__c")),
-                "personnel_notes": _display_value(
-                    merged.get("Other_Personnel_Notes__c")
+                "comments": _collect_submitted_values(records, "Comments__c"),
+                "personnel_notes": _collect_submitted_values(
+                    records, "Other_Personnel_Notes__c"
+                ),
+                "has_contact_derived_values": "false",
+                "has_no_update_content": (
+                    "false" if _has_submitted_update_content(records) else "true"
                 ),
                 "effective_date": _display_value(merged.get("Effective_Date__c")),
                 "revised_company_name": _display_value(
@@ -421,8 +435,9 @@ class ProfileUpdateStagingService:
         self._populate_key_answers(row, merged)
 
         merged_roles = _merge_roles(records)
+        has_contact_derived_values = False
         for merged_role in merged_roles:
-            self._populate_role(
+            role_has_derived_values = self._populate_role(
                 row,
                 merged_role,
                 merged_roles,
@@ -431,7 +446,13 @@ class ProfileUpdateStagingService:
                 contacts,
                 warnings,
             )
+            has_contact_derived_values = (
+                has_contact_derived_values or role_has_derived_values
+            )
 
+        row["has_contact_derived_values"] = (
+            "true" if has_contact_derived_values else "false"
+        )
         row["has_warnings"] = "true" if warnings else "false"
         row["warnings"] = "\n".join(warnings)
         return row
@@ -518,16 +539,9 @@ class ProfileUpdateStagingService:
 
     @staticmethod
     def _populate_key_answers(row: dict[str, str], merged: dict[str, Any]) -> None:
-        key_fields = [
-            "Effective_Date__c",
-            "Revised_Company_Name__c",
-            "Revised_Company_Owner__c",
-            *(api_name for _, api_name, _ in ADDRESS_FIELDS),
-            *(api_name for api_name, _ in KEY_ANSWER_FIELDS),
-        ]
         is_key_data = _normalized(merged.get("Type__c")) == "key data"
         if not is_key_data and not any(
-            _has_value(merged.get(api_name)) for api_name in key_fields
+            _has_value(merged.get(api_name)) for api_name in KEY_UPDATE_FIELDS
         ):
             return
         row["key_answers"] = "\n".join(
@@ -544,10 +558,10 @@ class ProfileUpdateStagingService:
         all_accounts_by_id: dict[str, dict[str, Any]],
         contacts: list[dict[str, Any]],
         warnings: list[str],
-    ) -> None:
+    ) -> bool:
         prefix = role.definition.prefix
         if not role.values:
-            return
+            return False
         for suffix, _ in role.definition.submitted_fields:
             row[f"{prefix}_{suffix}"] = role.values.get(suffix, "")
 
@@ -562,7 +576,7 @@ class ProfileUpdateStagingService:
             if suffix == "warning":
                 continue
             row[f"{prefix}_{suffix}"] = resolution.get(suffix, "")
-        _fill_missing_optional_role_fields(
+        has_derived_values = _fill_missing_optional_role_fields(
             row,
             role,
             all_roles,
@@ -572,6 +586,7 @@ class ProfileUpdateStagingService:
         row[f"{prefix}_warning"] = warning
         if warning:
             warnings.append(f"{role.definition.label} role: {warning}")
+        return has_derived_values
 
 
 def _group_submissions(
@@ -595,6 +610,36 @@ def _merge_records(records: list[dict[str, Any]]) -> dict[str, Any]:
             if _has_value(value):
                 merged[key] = value
     return merged
+
+
+def _collect_submitted_values(
+    records: list[dict[str, Any]], field_name: str
+) -> str:
+    """Join every nonblank submitted value in deterministic submission order."""
+    return "\n".join(
+        _display_value(record.get(field_name))
+        for record in records
+        if _has_value(record.get(field_name))
+    )
+
+
+def _has_submitted_update_content(records: list[dict[str, Any]]) -> bool:
+    """Return whether raw submissions contain any reviewable update content."""
+    update_fields = [
+        *KEY_UPDATE_FIELDS,
+        *(
+            api_name
+            for role in ROLE_DEFINITIONS
+            for _, api_name in role.submitted_fields
+        ),
+        "Comments__c",
+        "Other_Personnel_Notes__c",
+    ]
+    return any(
+        _has_value(record.get(field_name))
+        for record in records
+        for field_name in update_fields
+    )
 
 
 def _merge_roles(records: list[dict[str, Any]]) -> list[MergedRole]:
@@ -887,7 +932,7 @@ def _fill_missing_optional_role_fields(
     all_roles: list[MergedRole],
     contacts: list[dict[str, Any]],
     resolution: dict[str, str],
-) -> None:
+) -> bool:
     """Fill missing title and phone from the resolved contact when available."""
     fallback: dict[str, Any] | None = None
     if resolution.get("resolution_source") == "submitted_role":
@@ -914,18 +959,26 @@ def _fill_missing_optional_role_fields(
         )
 
     if fallback is None:
-        return
+        return False
     prefix = role.definition.prefix
+    copied_value = False
     if role.definition.title_field is not None and not row[f"{prefix}_title"]:
-        row[f"{prefix}_title"] = _first_nonblank(
+        fallback_title = _first_nonblank(
             fallback.get("title"),
             fallback.get("Title"),
         )
+        if fallback_title:
+            row[f"{prefix}_title"] = fallback_title
+            copied_value = True
     if not row[f"{prefix}_phone"]:
-        row[f"{prefix}_phone"] = _first_nonblank(
+        fallback_phone = _first_nonblank(
             fallback.get("phone"),
             fallback.get("Phone"),
         )
+        if fallback_phone:
+            row[f"{prefix}_phone"] = fallback_phone
+            copied_value = True
+    return copied_value
 
 
 def write_staged_profile_updates(
@@ -977,16 +1030,7 @@ def _submission_sort_key(record: dict[str, Any]) -> tuple[str, str]:
 
 
 def _is_key_update(record: dict[str, Any]) -> bool:
-    key_fields = [
-        "Effective_Date__c",
-        "Revised_Company_Name__c",
-        "Revised_Company_Owner__c",
-        *(api_name for _, api_name, _ in ADDRESS_FIELDS),
-        *(api_name for api_name, _ in KEY_ANSWER_FIELDS),
-    ]
-    return _normalized(record.get("Type__c")) == "key data" or any(
-        _has_value(record.get(api_name)) for api_name in key_fields
-    )
+    return record.get("Type__c") == "Key Data"
 
 
 def _where_in(field_name: str, values: list[str]) -> str:

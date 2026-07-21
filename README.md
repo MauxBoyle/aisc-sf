@@ -69,6 +69,13 @@ Preview the one-time correction of recent legacy Case subjects:
 uv run aisc_salesforce rename-profile-update-cases
 ```
 
+Consolidate the newest dated iMIS contact export:
+
+```bash
+uv run aisc_salesforce consolidate-imis-contacts \
+  --directory imis_contactbasic
+```
+
 All commands are also available as a Python module:
 
 ```bash
@@ -78,6 +85,43 @@ uv run python -m aisc_salesforce profile-updates
 `profile-updates` prints `created`, `reused`, `skipped`, and `failed` counts. A
 successful run returns exit code `0`; missing configuration or a Salesforce
 failure returns `1`.
+
+### iMIS contact consolidation
+
+Place downloaded exports in `imis_contactbasic/` by default, or select another
+folder with `--directory`. The command discovers dates from filenames rather
+than file modification times:
+
+- Fresh exports use `Full_CSContactBasic_YYMMDD.csv`; `YY` means `20YY`.
+- Combined tables use `Combined_CSContactBasic_YYYYMMDD.csv`.
+
+On the first run, the newest full export creates only a dated combined table.
+On later runs, the newest full export must be newer than the newest combined
+table. The command then publishes a new combined table plus
+`Changed_CSContactBasic_YYYYMMDD.csv` and
+`New_CSContactBasic_YYYYMMDD.csv`. Empty reports still contain the standard
+headers.
+
+Rows match by exact `iMIS Id`. Existing rows keep their position, newer
+matching rows replace them, older-only contacts remain, and new contacts are
+appended in fresh-export order. All 21 fields are compared as exact text, so
+case, whitespace, and blank-value differences count. Identifiers such as
+`iMIS Id`, `Company ID`, and `Major Key` remain strings, preserving leading
+zeroes.
+
+Files may arrange the 21 required headers in any order, but missing or extra
+headers stop the run before output is published. Blank IDs are skipped with
+their CSV row numbers. If one selected file repeats a nonblank ID, every row
+with that ID is omitted from that file and a warning identifies the filename
+and ID. A duplicated ID in the fresh export therefore cannot replace a valid
+older row. Existing outputs are never overwritten, and failed writes clean up
+temporary and partially published files.
+
+> [!WARNING]
+> iMIS contact exports and all three output types contain personal data. Their
+> standard filename patterns are ignored by Git even in a custom directory.
+> Keep them uncommitted, access-controlled, and shared only through approved
+> secure channels.
 
 ### Profile Update Case subjects
 
@@ -156,10 +200,12 @@ uv run aisc_salesforce stage-profile-updates \
 ```
 
 Submissions are grouped by Account ID and the submitter email after trimming
-and case-insensitive comparison. Later nonblank values replace earlier values.
-Different emails stay separate, and every blank-email submission stays
-separate and receives a warning. Each CSV row preserves all source submission
-IDs and names as JSON arrays.
+and case-insensitive comparison. Later nonblank values replace earlier values,
+except that every nonblank Comments and Other Personnel Notes value is
+preserved in submission order and joined with a newline. Different emails stay
+separate, and every blank-email submission stays separate and receives a
+warning. Each CSV row preserves all source submission IDs and names as JSON
+arrays.
 
 The CSV has shared submission and Account columns, Key Data columns, and
 prefixed role columns for `certification_`, `principal_`, `accounting_`,
@@ -171,7 +217,18 @@ filled from that Contact where possible. Repeating the same contact information
 in several roles does not create a warning, but conflicting emails for the same
 submitted name are treated as ambiguous.
 
-Before processing a staged row, inspect both `has_warnings` and `warnings`.
+`has_key_updates` is `true` only when at least one source has the exact
+Salesforce `Type__c` value `"Key Data"`. Populated Key Data fields remain
+visible, but do not set this classification by themselves. The required
+`has_contact_derived_values` column is `true` when a nonblank role title or
+phone was copied from another submitted role or a Salesforce Contact. The
+required `has_no_update_content` column is `true` when the group has no
+submitted Key Data fields, role fields, Comments, or Other Personnel Notes.
+Submitter, Account, and Case metadata, `Type__c`, and fallback-derived values do
+not count as submitted update content.
+
+Before processing a staged row, inspect `has_contact_derived_values`,
+`has_no_update_content`, `has_warnings`, and `warnings`.
 `warnings` is newline-separated and identifies ambiguous contacts, incomplete
 Accounts, missing role lookups, partial addresses that could not be filled, and
 other cases needing human review. An unmatched submitted name uses the
@@ -206,10 +263,12 @@ uv run aisc_salesforce process-profile-updates \
 ```
 
 Before each staged CSV row, the command shows the Account, submitter, and source
-Profile Update names. At the Continue/Quit checkpoint, press Enter, type `C`,
-or type `Continue` to review that row. Type `Q` or `Quit` to stop safely.
-Only this checkpoint has a default; change decisions always require an explicit
-answer.
+Profile Update names. It also notes when contact details were supplemented or
+when the combined update has no submitted update content. At the Continue/Quit
+checkpoint, press Enter, type `C`, or type `Continue` to review that row. Type
+`Q` or `Quit` to stop safely. Only this checkpoint has a default; change
+decisions always require an explicit answer. Published CSV files must include
+both new metadata columns; older staged files fail validation.
 
 Each real field change accepts a shortcut or its complete decision phrase:
 

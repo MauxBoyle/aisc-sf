@@ -1,5 +1,22 @@
 # API Reference
 
+## iMIS contact consolidation
+
+::: aisc_salesforce.imis_contacts
+    options:
+      show_root_heading: true
+      members:
+        - CONTACT_BASIC_COLUMNS
+        - ConsolidationResult
+        - ContactConsolidationError
+        - consolidate_contactbasic
+
+`consolidate_contactbasic()` accepts a directory and optional output function.
+It returns the selected input paths, published output paths, and row counts in
+a frozen `ConsolidationResult`. Discovery and validation failures use the
+workflow-specific `ContactConsolidationError`, which the CLI turns into exit
+code `1` with a readable message.
+
 ## Profile Update service
 
 ::: aisc_salesforce.profile_updates

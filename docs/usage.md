@@ -60,6 +60,69 @@ failed: 0
 Exit code `0` means the run completed without failures. Exit code `1` means
 configuration, Salesforce communication, or one or more records failed.
 
+## Consolidate iMIS contacts command
+
+Put the downloaded CSV files in `imis_contactbasic/` and run:
+
+```bash
+uv run aisc_salesforce consolidate-imis-contacts \
+  --directory imis_contactbasic
+```
+
+`--directory` defaults to `imis_contactbasic`, so it may be omitted. A custom
+secure directory is also supported.
+
+### Dated files and outputs
+
+Dates come from filenames, not modification times. Fresh exports must be named
+`Full_CSContactBasic_YYMMDD.csv`, where `YY` means `20YY`. Previous combined
+tables must be named `Combined_CSContactBasic_YYYYMMDD.csv`.
+
+An initial run writes only the combined table. Once a combined table exists,
+the fresh export date must be later, and the command writes all three files:
+
+```text
+Combined_CSContactBasic_YYYYMMDD.csv
+Changed_CSContactBasic_YYYYMMDD.csv
+New_CSContactBasic_YYYYMMDD.csv
+```
+
+The changed and new files always receive headers, even when they contain no
+rows. An existing target stops the run instead of being overwritten. A failed
+write removes temporary files and any output started by that run.
+
+### CSV and merge rules
+
+Every selected input must contain exactly these columns, in any order:
+
+```text
+City, Company, Full Name, iMIS Id, Member Type, State Province,
+Company ID, Company Member Type, Date Added, Email, Is Company, Is Member,
+Join Date, Major Key, Member Status, Status, Category, Last Updated,
+Full Address, Country, Website
+```
+
+CSV values are kept as text. Leading zeroes in `iMIS Id`, `Company ID`, and
+`Major Key` are not removed. IDs and other fields use exact comparison;
+capitalization, spaces, and blank values are meaningful differences.
+
+The combined file keeps the previous row order. A matching fresh row replaces
+the previous row in place, contacts found only in the previous table remain,
+and new contacts are appended in fresh-export order. Changed and new reports
+also follow fresh-export order and contain complete fresh rows.
+
+Blank or whitespace-only IDs are skipped, and the warning shows the filename
+and CSV row number. When a selected input repeats a nonblank ID, every row with
+that ID is omitted from that input. A duplicated fresh ID leaves a valid row
+from the previous combined table unchanged.
+
+!!! warning
+
+    iMIS input and output files contain personal data. The usual directory and
+    filename patterns are ignored by Git, including in custom directories.
+    Keep these files uncommitted and in an access-controlled location, and
+    share them only through approved secure channels.
+
 ### Case subject grammar and duplicate handling
 
 New received Cases and Expected Cases converted after a submission use:
@@ -233,8 +296,10 @@ with a blank email also stays separate and receives a warning.
 
 Within a group, submissions are ordered by `CreatedDate` and `Id`. Later
 nonblank values replace earlier values, while blank later values do not erase
-earlier information. Source submission IDs and names are retained as JSON
-arrays.
+earlier information. Comments and Other Personnel Notes are the exception:
+every nonblank value is preserved, including repeated identical text, and
+values are joined with `\n` in submission order. Source submission IDs and
+names are retained as JSON arrays.
 
 When at least one revised address component is present, the output contains all
 five components. Missing submitted components are filled from the Account
@@ -248,7 +313,7 @@ Each row contains these groups of columns:
 |---|---|
 | Source and dates | `source_submission_ids`, `source_submission_names`, `earliest_submission_date`, `latest_submission_date` |
 | Account and submitter | `account_id`, `account_name`, `certification_id`, `submitter_name`, `submitter_email`, `submitter_phone` |
-| Notes and review | `comments`, `personnel_notes`, `has_warnings`, `warnings` |
+| Notes and review | `comments`, `personnel_notes`, `has_contact_derived_values`, `has_no_update_content`, `has_warnings`, `warnings` |
 | Key Data | `effective_date`, revised company name/owner, five revised address columns, and `key_answers` |
 | Contact roles | Columns prefixed with `certification_`, `principal_`, `accounting_`, `quality_`, and `new_york_` |
 
@@ -282,13 +347,27 @@ tier are reported as ambiguous. Repeated identical contact information in
 several submitted roles counts as one candidate; the same name paired with
 conflicting emails remains ambiguous. When a Contact is resolved, missing title
 and phone values are filled from that Contact where possible. Missing title or
-phone alone does not cause a warning.
+phone alone does not cause a warning. `has_contact_derived_values` is `true`
+only when a nonblank title or phone was actually copied from another submitted
+role or a Salesforce Contact. Values submitted directly for that role do not
+set the flag.
+
+`has_no_update_content` is `true` when the grouped raw submissions contain no
+Key Data fields, role fields, Comments, or Other Personnel Notes. Account,
+Case, certification, and submitter metadata do not count. `Type__c` also does
+not count, so an exact `"Key Data"` submission with no update fields can have
+both `has_key_updates=true` and `has_no_update_content=true`. Values filled from
+an Account, another role, or a Salesforce Contact cannot turn the empty-content
+flag off.
 
 !!! warning
 
-    The interactive processor inspects `has_warnings` and `warnings` before
-    acting on a row. The `warnings` field is readable, newline-separated text;
-    role warnings are also copied into the matching prefixed `warning` column.
+    The interactive processor requires `has_contact_derived_values` and
+    `has_no_update_content` in addition to the existing CSV columns. Older
+    staged CSV files fail validation. It also inspects `has_warnings` and
+    `warnings` before acting on a row. The `warnings` field is readable,
+    newline-separated text; role warnings are also copied into the matching
+    prefixed `warning` column.
 
 Case preparation adds `case_id`, `case_number`, `case_status`, and
 `case_match_status`. A row is processable only when its match status is
@@ -299,9 +378,13 @@ for part of a Profile Update identifier.
 
 Key Update metadata is explicit:
 
-- `has_key_updates` is `true` when at least one source is marked as Key Data or
-  contains a Key Update field.
+- `has_key_updates` is `true` only when at least one source has the exact
+  Salesforce `Type__c` value `"Key Data"`. Case differences, surrounding
+  spaces, `None`, and populated Key Data fields alone do not set it.
 - `earliest_key_update_date` is the oldest such source `CreatedDate`.
+
+Populated Key Data fields remain visible in their normal CSV columns and in
+`key_answers` even when they do not set `has_key_updates`.
 
 ## Process Profile Updates command
 
@@ -340,7 +423,13 @@ proposals. Effective date and the Key Update answers remain context unless
 they map to one of those real Account fields.
 
 Before every staged CSV row, a heading shows its Account, submitter, and source
-Profile Update names. The next prompt is a checkpoint:
+Profile Update names. When the matching CSV flag is `true`, the heading also
+shows one or both of these lines:
+
+- `Note: contact details were supplemented from available contact information.`
+- `Note: this combined profile update has no submitted update content.`
+
+The next prompt is a checkpoint:
 
 | Checkpoint answer | Result |
 |---|---|
