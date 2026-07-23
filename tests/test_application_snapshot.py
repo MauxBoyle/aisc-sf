@@ -6,6 +6,7 @@ import pytest
 from aisc_salesforce.application_snapshot import (
     APPLICATION_RECORD_TYPE_IDS,
     APPLICATION_STAGES,
+    CASE_CANCELLED_STAGE,
     RECORD_TYPE_ALIASES,
     ApplicationSnapshotError,
     ApplicationSnapshotService,
@@ -80,7 +81,7 @@ def test_record_type_aliases_include_all_supplied_values():
         ({}, True),
         ({"Account": {"Cert_Certification_Status__c": "Certified"}}, False),
         ({"Account": {"Cert_Certification_Status__c": None}}, False),
-        ({"Cert_Stage__c": "Cancelled"}, False),
+        ({"Cert_Stage__c": CASE_CANCELLED_STAGE}, False),
         ({"Cert_Stage__c": None}, True),
         ({"Cert_Is_this_a_scope_change__c": "Yes"}, False),
         ({"Cert_Is_this_a_scope_change__c": None}, True),
@@ -284,7 +285,7 @@ def test_aggregation_counts_each_case_once_and_keeps_all_official_rows():
             AccountId="unexpected-account",
             Cert_Stage__c="Zebra_Review",
         ),
-        case_record(Id="filtered", Cert_Stage__c="Cancelled"),
+        case_record(Id="filtered", Cert_Stage__c=CASE_CANCELLED_STAGE),
     ]
     result = aggregate_application_snapshot(cases, [], today=TODAY)
 
@@ -352,7 +353,7 @@ def test_diagnostics_report_filter_and_audit_matching_counts():
     messages = []
     cases = [
         case_record(Id="kept"),
-        case_record(Id="cancelled", Cert_Stage__c="Cancelled"),
+        case_record(Id="cancelled", Cert_Stage__c=CASE_CANCELLED_STAGE),
     ]
     audits = [
         audit_record(Id="matched"),

@@ -117,7 +117,7 @@ as `-01`. The CSV always contains the six standard rows in this order:
 `domestic_expedited`, and `international_regular`; empty counts are `0`.
 
 A Case qualifies when its Account certification status is exactly `Initials`,
-its stage is not `Cancelled`, Scope Change is not `Yes`, and its record type is
+its stage is not `Cancel`, Scope Change is not `Yes`, and its record type is
 Fabricator Application, Erector Application, or International Application.
 Null Case stage and Scope Change values remain eligible. Each qualifying Case
 is counted once.

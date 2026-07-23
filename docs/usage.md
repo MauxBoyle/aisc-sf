@@ -87,7 +87,7 @@ one non-fatal console warning listing their labels and counts.
 A Case is counted once when all of these rules pass:
 
 - The parent Account's `Cert_Certification_Status__c` is exactly `Initials`.
-- `Cert_Stage__c` is not `Cancelled`; null remains eligible.
+- `Cert_Stage__c` is not `Cancel`; null remains eligible.
 - `Cert_Is_this_a_scope_change__c` is not `Yes`; null remains eligible.
 - The Case record type is Fabricator Application, Erector Application, or
   International Application.

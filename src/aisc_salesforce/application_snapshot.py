@@ -73,6 +73,8 @@ CSV_COLUMNS = (
     "international_regular",
 )
 
+# Keep Salesforce picklist values in one place so query and Python filters agree.
+CASE_CANCELLED_STAGE = "Cancel"
 INVALID_AUDIT_STATUSES = frozenset({"Cancelled", "Withdrawn"})
 INVALID_AUDIT_TYPES = frozenset({"Additional", "Appeal", "SA-NYC", "Preassessment"})
 
@@ -80,7 +82,7 @@ _CASE_WHERE = (
     "RecordTypeId IN "
     "('0125w0000013incAAA', '0125w0000013inhAAA', '0125w0000013inrAAA') "
     "AND Account.Cert_Certification_Status__c = 'Initials' "
-    "AND (Cert_Stage__c != 'Cancelled' OR Cert_Stage__c = NULL) "
+    f"AND (Cert_Stage__c != '{CASE_CANCELLED_STAGE}' OR Cert_Stage__c = NULL) "
     "AND (Cert_Is_this_a_scope_change__c != 'Yes' "
     "OR Cert_Is_this_a_scope_change__c = NULL)"
 )
@@ -146,7 +148,7 @@ def is_qualifying_case(record: Mapping[str, Any]) -> bool:
     return (
         isinstance(account, Mapping)
         and account.get("Cert_Certification_Status__c") == "Initials"
-        and record.get("Cert_Stage__c") != "Cancelled"
+        and record.get("Cert_Stage__c") != CASE_CANCELLED_STAGE
         and record.get("Cert_Is_this_a_scope_change__c") != "Yes"
         and record.get("RecordTypeId") in APPLICATION_RECORD_TYPE_IDS
     )
@@ -248,7 +250,7 @@ def aggregate_application_snapshot(
     stage_cases = [
         case
         for case in account_status_cases
-        if case.get("Cert_Stage__c") != "Cancelled"
+        if case.get("Cert_Stage__c") != CASE_CANCELLED_STAGE
     ]
     _emit(
         output_fn,
