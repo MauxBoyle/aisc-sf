@@ -133,6 +133,7 @@ activemq-data/
 .env.*
 !.env.example
 snapshots/
+application_snapshots/
 staged_profile_updates/
 profile_updates.csv
 review_audit.jsonl

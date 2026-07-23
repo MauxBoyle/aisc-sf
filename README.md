@@ -45,6 +45,12 @@ Create a read-only snapshot:
 uv run aisc_salesforce snapshot
 ```
 
+Create a read-only application-stage count:
+
+```bash
+uv run aisc_salesforce application-snapshot
+```
+
 Process recent audit notes and New company profile submissions:
 
 ```bash
@@ -85,6 +91,69 @@ uv run python -m aisc_salesforce profile-updates
 `profile-updates` prints `created`, `reused`, `skipped`, and `failed` counts. A
 successful run returns exit code `0`; missing configuration or a Salesforce
 failure returns `1`.
+
+### Application snapshot
+
+`application-snapshot` reads Salesforce but does not create or update Salesforce
+records:
+
+```bash
+uv run aisc_salesforce application-snapshot
+uv run aisc_salesforce application-snapshot \
+  --output-dir /secure/application-reports
+```
+
+The default output is:
+
+```text
+application_snapshots/YYYY-MM-DDTHH-MM-SSZ/application_snapshot.csv
+```
+
+If that UTC second already has a report, the new folder receives a suffix such
+as `-01`. The CSV always contains the six standard rows in this order:
+`Initial Review`, `Eligibility Review`, `Doc Audit`,
+`Awaiting Audit Assignment`, `Awaiting Audit`, and
+`Awaiting CRG Decision`. Its count columns are `domestic_regular`,
+`domestic_expedited`, and `international_regular`; empty counts are `0`.
+
+A Case qualifies when its Account certification status is exactly `Initials`,
+its stage is not `Cancel`, Scope Change is not `Yes`, and its record type is
+Fabricator Application, Erector Application, or International Application.
+Null Case stage and Scope Change values remain eligible. Each qualifying Case
+is counted once.
+
+For each qualifying Case, the report uses only the newest valid Audit for its
+Account that was created on or after the Case. Canceled or Withdrawn Audits and
+Additional, Appeal, SA-NYC, or Preassessment Audit types are excluded; null
+status and type values remain valid. `Cert_Audit_Date__c` sets an Audit's
+effective date when present, otherwise the date portion of `CreatedDate` is
+used. Ties use the full `CreatedDate` and then the Audit ID.
+
+United States Accounts are Domestic. Only a Boolean Salesforce value of `true`
+is Expedited; other Domestic Cases are Regular. Every other country, including
+a missing country, is International Regular.
+
+A `Doc_Audit` Case with a related Audit date is overridden by that date: today
+or later becomes `Awaiting Audit`, while a past date becomes `Awaiting CRG
+Decision`. A null or `New Application` Case stage becomes `Initial Review`, and
+the Audit status Pending Acceptance becomes `Awaiting Audit Assignment`.
+Ordinary Case stages have underscores changed to spaces. For
+`Pending_AuditAssignment`, no related Audit, Reschedule in Progress, or a
+missing audit date becomes `Awaiting Audit Assignment`; an audit dated today or
+later becomes `Awaiting Audit`; and a past date becomes `Awaiting CRG Decision`.
+“Today” is the `America/Chicago` calendar date.
+
+Unexpected stage labels are appended alphabetically instead of being combined.
+The command prints one warning with every unexpected label and count, followed
+by the output path and qualifying Case count. Authentication, Salesforce,
+invalid-date, or file failures return exit code `1` and do not publish a
+partial report.
+
+> [!WARNING]
+> Application snapshots may contain sensitive operational counts. Their default
+> directory is ignored by Git. When using `--output-dir`, choose an
+> access-controlled location and do not commit or share reports through
+> unapproved channels.
 
 ### iMIS contact consolidation
 

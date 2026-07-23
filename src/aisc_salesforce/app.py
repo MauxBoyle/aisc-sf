@@ -8,6 +8,11 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
+from .application_snapshot import (
+    ApplicationSnapshotError,
+    ApplicationSnapshotService,
+    write_application_snapshot,
+)
 from .dictionary import DictionaryError, load_export_plan
 from .imis_contacts import ContactConsolidationError, consolidate_contactbasic
 from .process_profile_updates import (
@@ -50,6 +55,16 @@ def main(
         type=Path,
         default=Path("snapshots"),
         help="Directory to contain snapshot folders.",
+    )
+    application_parser = subparsers.add_parser(
+        "application-snapshot",
+        help="Create a read-only CSV count of qualifying certification applications.",
+    )
+    application_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("application_snapshots"),
+        help="Directory to contain application snapshot folders.",
     )
     subparsers.add_parser(
         "profile-updates",
@@ -100,6 +115,15 @@ def main(
             return _run_snapshot(args.output_dir)
         except (DictionaryError, SalesforceError, OSError) as error:
             print(f"Snapshot failed: {error}", file=sys.stderr)
+            return 1
+    if args.command == "application-snapshot":
+        try:
+            return _run_application_snapshot(
+                args.output_dir,
+                output_fn=output_fn,
+            )
+        except (ApplicationSnapshotError, SalesforceError, OSError) as error:
+            print(f"Application snapshot failed: {error}", file=sys.stderr)
             return 1
     if args.command == "profile-updates":
         try:
@@ -162,6 +186,30 @@ def _run_snapshot(output_dir: Path) -> int:
     print(f"Snapshot complete: {snapshot_path}")
     for object_name, object_records in records.items():
         print(f"{object_name}: {len(object_records)} rows")
+    return 0
+
+
+def _run_application_snapshot(
+    output_dir: Path,
+    *,
+    output_fn: Callable[[str], None] = print,
+) -> int:
+    """Connect to Salesforce and publish one application snapshot."""
+    _load_dotenv(Path(".env"))
+    environment = dict(os.environ)
+    credentials = get_credentials(environment)
+    auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
+    result = ApplicationSnapshotService(SalesforceClient(auth)).build()
+    snapshot_path = write_application_snapshot(result, output_dir)
+    if result.unexpected_stages:
+        details = ", ".join(
+            f"{stage} ({count})" for stage, count in result.unexpected_stages.items()
+        )
+        output_fn(f"Warning: unexpected application stages: {details}")
+    output_fn(
+        f"Application snapshot complete: {snapshot_path / 'application_snapshot.csv'}"
+    )
+    output_fn(f"qualifying Cases: {result.qualifying_case_count}")
     return 0
 
 

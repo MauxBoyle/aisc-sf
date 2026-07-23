@@ -1,10 +1,78 @@
 from types import SimpleNamespace
 
+import pytest
+
 from aisc_salesforce import app
+from aisc_salesforce.application_snapshot import (
+    ApplicationSnapshotError,
+    ApplicationSnapshotResult,
+)
 from aisc_salesforce.dictionary import ExportField
 from aisc_salesforce.imis_contacts import ContactConsolidationError
 from aisc_salesforce.profile_updates import AutomationCounts
 from aisc_salesforce.rename_profile_update_cases import RenameCounts
+
+
+def test_application_snapshot_cli_uses_custom_output_and_prints_summary(
+    monkeypatch, tmp_path
+):
+    output = []
+    result = ApplicationSnapshotResult(
+        rows=(),
+        qualifying_case_count=3,
+        unexpected_stages={"Surprise Stage": 2},
+    )
+    monkeypatch.setattr(app, "_load_dotenv", lambda path: None)
+    monkeypatch.setattr(app, "get_credentials", lambda environment: {"ok": "yes"})
+    monkeypatch.setattr(app, "get_oauth_url", lambda environment: "token-url")
+    monkeypatch.setattr(
+        app, "request_access_token", lambda credentials, oauth_url: "auth"
+    )
+    monkeypatch.setattr(app, "SalesforceClient", lambda auth: "client")
+
+    class Service:
+        def __init__(self, client):
+            assert client == "client"
+
+        def build(self):
+            return result
+
+    monkeypatch.setattr(app, "ApplicationSnapshotService", Service)
+    monkeypatch.setattr(
+        app,
+        "write_application_snapshot",
+        lambda report, output_dir: output_dir / "run",
+    )
+
+    assert (
+        app.main(
+            ["application-snapshot", "--output-dir", str(tmp_path)],
+            output_fn=output.append,
+        )
+        == 0
+    )
+    assert output[0] == "Warning: unexpected application stages: Surprise Stage (2)"
+    assert str(tmp_path / "run" / "application_snapshot.csv") in output[1]
+    assert output[2] == "qualifying Cases: 3"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ApplicationSnapshotError("bad date"),
+        app.SalesforceError("unavailable"),
+        OSError("disk full"),
+    ],
+)
+def test_application_snapshot_cli_reports_expected_failures(monkeypatch, capsys, error):
+    monkeypatch.setattr(
+        app,
+        "_run_application_snapshot",
+        lambda output_dir, **kwargs: (_ for _ in ()).throw(error),
+    )
+
+    assert app.main(["application-snapshot"]) == 1
+    assert f"Application snapshot failed: {error}" in capsys.readouterr().err
 
 
 def test_cli_success_uses_custom_output_dir(monkeypatch, tmp_path, capsys):

@@ -34,6 +34,103 @@ uv run aisc_salesforce snapshot
 uv run aisc_salesforce snapshot --output-dir /secure/snapshot-location
 ```
 
+## Application snapshot command
+
+Generate an on-demand, read-only cross-tab of qualifying Application Cases:
+
+```bash
+uv run aisc_salesforce application-snapshot
+uv run aisc_salesforce application-snapshot \
+  --output-dir /secure/application-reports
+```
+
+The command uses Salesforce's
+[REST Query resource](https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/resources_query.htm)
+and [SOQL relationship fields](https://developer.salesforce.com/docs/atlas.en-us.soql_sosl.meta/soql_sosl/sforce_api_calls_soql_relationships.htm)
+to read Case and parent Account values. It separately reads the minimal Audit
+fields and follows every Salesforce query page. It does not write to
+Salesforce.
+
+### Output
+
+The default CSV path is:
+
+```text
+application_snapshots/YYYY-MM-DDTHH-MM-SSZ/application_snapshot.csv
+```
+
+A second run in the same UTC second receives a numeric folder suffix, starting
+with `-01`. Publication is atomic: the complete CSV is written in a temporary
+directory before the report folder appears. A failed run removes the temporary
+data.
+
+The CSV columns are:
+
+```text
+application_stage,domestic_regular,domestic_expedited,international_regular
+```
+
+These six rows always appear first and in order, even when every count is zero:
+
+1. Initial Review
+2. Eligibility Review
+3. Doc Audit
+4. Awaiting Audit Assignment
+5. Awaiting Audit
+6. Awaiting CRG Decision
+
+Unexpected stages remain separate, are appended alphabetically, and produce
+one non-fatal console warning listing their labels and counts.
+
+### Filters and classifications
+
+A Case is counted once when all of these rules pass:
+
+- The parent Account's `Cert_Certification_Status__c` is exactly `Initials`.
+- `Cert_Stage__c` is not `Cancel`; null remains eligible.
+- `Cert_Is_this_a_scope_change__c` is not `Yes`; null remains eligible.
+- The Case record type is Fabricator Application, Erector Application, or
+  International Application.
+
+For each qualifying Case, Canceled or Withdrawn Audits are invalid. An Audit
+must also have been created on or after its Case's `CreatedDate`. Additional,
+Appeal, SA-NYC, and Preassessment Audit types are also invalid. Null Audit
+status and type values remain valid. The newest matching valid Audit is selected
+by `Cert_Audit_Date__c`, falling back to the date portion of `CreatedDate`. A
+tie is resolved by the full `CreatedDate`, then Salesforce Audit ID.
+
+`BillingCountry == "United States"` means Domestic. Only the Boolean value
+`true` makes a Domestic Case Expedited; other Domestic Cases are Regular.
+Every other or missing country is International Regular.
+
+Stage decisions use this order:
+
+1. A Doc Audit Case with a related Audit date becomes `Awaiting Audit` when the
+   date is today or in the future, or `Awaiting CRG Decision` when it is past.
+2. A null or New Application Case stage becomes `Initial Review`.
+3. Audit status Pending Acceptance becomes `Awaiting Audit Assignment`.
+4. An ordinary Case stage has underscores replaced with spaces.
+5. For Pending AuditAssignment, no related Audit, Reschedule in Progress, or a
+   null audit date becomes `Awaiting Audit Assignment`.
+6. A Pending AuditAssignment Audit date today or in the future becomes
+   `Awaiting Audit`.
+7. A past Pending AuditAssignment Audit date becomes `Awaiting CRG Decision`.
+
+Today is evaluated as the current `America/Chicago` calendar date. A malformed
+Salesforce date stops the report with a readable error rather than assigning
+the wrong stage.
+
+Successful runs print the output path and qualifying Case count. Authentication,
+Salesforce, data-validation, and file errors print
+`Application snapshot failed: ...` and return exit code `1`.
+
+!!! warning
+
+    Application snapshots may contain sensitive operational counts. The
+    default directory is ignored by Git. Keep custom output locations
+    access-controlled, and do not commit or share these reports through
+    unapproved channels.
+
 ## Profile Update command
 
 Run one daily processing pass:

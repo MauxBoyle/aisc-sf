@@ -1,5 +1,31 @@
 # API Reference
 
+## Application snapshot
+
+::: aisc_salesforce.application_snapshot
+    options:
+      show_root_heading: true
+      members:
+        - RECORD_TYPE_ALIASES
+        - APPLICATION_RECORD_TYPE_IDS
+        - APPLICATION_STAGES
+        - ApplicationSnapshotError
+        - ApplicationSnapshotResult
+        - ApplicationSnapshotService
+        - is_qualifying_case
+        - is_valid_audit
+        - select_latest_valid_audits
+        - application_stage
+        - classify_application_type
+        - aggregate_application_snapshot
+        - write_application_snapshot
+
+`ApplicationSnapshotService.build()` performs the two paginated Salesforce
+queries and returns a frozen `ApplicationSnapshotResult`. The transformation
+helpers are separate from network and file access, which makes each business
+rule directly testable. `write_application_snapshot()` publishes the CSV
+atomically in a timestamped directory.
+
 ## iMIS contact consolidation
 
 ::: aisc_salesforce.imis_contacts
