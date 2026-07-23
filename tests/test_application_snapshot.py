@@ -29,6 +29,7 @@ def case_record(**changes):
     record = {
         "Id": "case-1",
         "AccountId": "account-1",
+        "CreatedDate": "2026-07-01T00:00:00Z",
         "RecordTypeId": FABRICATOR,
         "Cert_Stage__c": "Doc_Audit",
         "Cert_Is_this_a_scope_change__c": "No",
@@ -107,7 +108,7 @@ def test_each_application_record_type_is_allowed(record_type_id):
     ("changes", "expected"),
     [
         ({}, True),
-        ({"Cert_Audit_Status__c": "Cancelled"}, False),
+        ({"Cert_Audit_Status__c": "Canceled"}, False),
         ({"Cert_Audit_Status__c": "Withdrawn"}, False),
         ({"Cert_Audit_Status__c": None}, True),
         ({"Cert_Audit_Type__c": "Additional"}, False),
@@ -141,7 +142,7 @@ def test_latest_valid_audit_uses_effective_date_created_date_and_id_tiebreakers(
         audit_record(
             Id="ignored",
             Cert_Audit_Date__c="2026-08-01",
-            Cert_Audit_Status__c="Cancelled",
+            Cert_Audit_Status__c="Canceled",
         ),
     ]
     assert select_latest_valid_audits(audits)["account-1"]["Id"] == "undated-b"
@@ -166,18 +167,43 @@ def test_latest_valid_audit_breaks_effective_date_tie_with_created_date():
     [
         (
             "Eligibility_Review",
-            "Pending Assignment",
+            "Pending Acceptance",
             "2026-08-01",
             "Awaiting Audit Assignment",
         ),
         (None, None, None, "Initial Review"),
         ("New_Application", None, None, "Initial Review"),
         ("Eligibility_Review", "Scheduled", "2026-08-01", "Eligibility Review"),
-        ("Doc_Audit", "Reschedule", "2026-08-01", "Awaiting Audit Assignment"),
-        ("Doc_Audit", "Scheduled", None, "Awaiting Audit Assignment"),
-        ("Doc_Audit", "Scheduled", "2026-07-23", "Awaiting Audit"),
+        ("Doc_Audit", "Scheduled", None, "Doc Audit"),
         ("Doc_Audit", "Scheduled", "2026-07-22", "Awaiting CRG Decision"),
-        ("Doc_Audit", "Scheduled", "2026-07-24", "Awaiting Audit"),
+        ("Doc_Audit", "Scheduled", "2026-08-01", "Awaiting Audit"),
+        (
+            "Doc_Audit",
+            "Reschedule in Progress",
+            "2026-08-01",
+            "Awaiting Audit",
+        ),
+        ("Pending_AuditAssignment", None, None, "Awaiting Audit Assignment"),
+        (
+            "Pending_AuditAssignment",
+            "Reschedule in Progress",
+            "2026-08-01",
+            "Awaiting Audit Assignment",
+        ),
+        (
+            "Pending_AuditAssignment",
+            "Scheduled",
+            None,
+            "Awaiting Audit Assignment",
+        ),
+        ("Pending_AuditAssignment", "Scheduled", "2026-07-23", "Awaiting Audit"),
+        (
+            "Pending_AuditAssignment",
+            "Scheduled",
+            "2026-07-22",
+            "Awaiting CRG Decision",
+        ),
+        ("Pending_AuditAssignment", "Scheduled", "2026-07-24", "Awaiting Audit"),
         ("Awaiting_Custom_Step", "Scheduled", "2026-08-01", "Awaiting Custom Step"),
     ],
 )
@@ -199,7 +225,7 @@ def test_application_stage_reproduces_tableau_branches(
 def test_malformed_salesforce_dates_fail_clearly():
     with pytest.raises(ApplicationSnapshotError, match="Cert_Audit_Date__c"):
         application_stage(
-            case_record(),
+            case_record(Cert_Stage__c="Pending_AuditAssignment"),
             audit_record(Cert_Audit_Date__c="not-a-date"),
             today=TODAY,
         )
@@ -231,7 +257,7 @@ def test_origin_and_speed_use_exact_country_and_boolean_rules(
 
 
 def test_invalid_audit_never_influences_application_stage():
-    cases = [case_record(Cert_Stage__c="Doc_Audit")]
+    cases = [case_record(Cert_Stage__c="Pending_AuditAssignment")]
     audits = [
         audit_record(
             Id="valid-past",
@@ -241,7 +267,7 @@ def test_invalid_audit_never_influences_application_stage():
         audit_record(
             Id="invalid-future",
             Cert_Audit_Date__c="2026-08-20",
-            Cert_Audit_Status__c="Cancelled",
+            Cert_Audit_Status__c="Canceled",
         ),
     ]
 
@@ -253,6 +279,65 @@ def test_invalid_audit_never_influences_application_stage():
         if row["application_stage"] == "Awaiting CRG Decision"
     )
     assert crg_row["domestic_regular"] == 1
+
+
+def test_audit_must_be_created_on_or_after_its_application_case():
+    cases = [
+        case_record(
+            Id="earlier-case",
+            CreatedDate="2026-07-01T00:00:00Z",
+            Cert_Stage__c="Pending_AuditAssignment",
+        ),
+        case_record(
+            Id="later-case",
+            CreatedDate="2026-07-02T00:00:00Z",
+            Cert_Stage__c="Pending_AuditAssignment",
+        ),
+    ]
+    audits = [
+        audit_record(
+            Id="between-cases",
+            CreatedDate="2026-07-01T12:00:00Z",
+            Cert_Audit_Date__c="2026-07-20",
+        ),
+        audit_record(
+            Id="same-time-as-later-case",
+            CreatedDate="2026-07-02T00:00:00Z",
+            Cert_Audit_Date__c="2026-07-24",
+        ),
+    ]
+
+    result = aggregate_application_snapshot(cases, audits, today=TODAY)
+
+    awaiting_audit = next(
+        row for row in result.rows if row["application_stage"] == "Awaiting Audit"
+    )
+    assert awaiting_audit["domestic_regular"] == 2
+
+
+def test_audit_created_before_its_only_application_case_is_not_matched():
+    result = aggregate_application_snapshot(
+        [
+            case_record(
+                CreatedDate="2026-07-02T00:00:00Z",
+                Cert_Stage__c="Pending_AuditAssignment",
+            )
+        ],
+        [
+            audit_record(
+                CreatedDate="2026-07-01T23:59:59Z",
+                Cert_Audit_Date__c="2026-07-24",
+            )
+        ],
+        today=TODAY,
+    )
+
+    awaiting_audit_assignment = next(
+        row
+        for row in result.rows
+        if row["application_stage"] == "Awaiting Audit Assignment"
+    )
+    assert awaiting_audit_assignment["domestic_regular"] == 1
 
 
 def test_aggregation_counts_each_case_once_and_keeps_all_official_rows():
@@ -342,51 +427,6 @@ def test_service_queries_relationship_case_fields_and_minimal_audit_fields():
     assert "Cert_Account__c" in audit_call[1]
     assert "Cert_Audit_Date__c" in audit_call[1]
     assert len(calls) == 2
-
-    messages = []
-    ApplicationSnapshotService(Client(), today=TODAY).build(output_fn=messages.append)
-    assert "queried Cases: 0" in messages[0]
-    assert "queried Audits: 0" in messages[1]
-
-
-def test_diagnostics_report_filter_and_audit_matching_counts():
-    messages = []
-    cases = [
-        case_record(Id="kept"),
-        case_record(Id="cancelled", Cert_Stage__c=CASE_CANCELLED_STAGE),
-    ]
-    audits = [
-        audit_record(Id="matched"),
-        audit_record(Id="invalid", Cert_Audit_Status__c="Withdrawn"),
-    ]
-
-    aggregate_application_snapshot(
-        cases,
-        audits,
-        today=TODAY,
-        output_fn=messages.append,
-    )
-
-    expected_messages = [
-        "Cases received: 2",
-        "Cases after Account certification status filter: 2",
-        "Cases after Case stage filter: 1",
-        "Cases after Scope Change filter: 1",
-        "Cases after Application record type filter: 1",
-        "unique qualifying Cases: 1",
-        "Audits after status filter: 1",
-        "Audits after type filter: 1",
-        "valid Audits: 1",
-        "valid Audits matched to qualifying Accounts: 1",
-        "latest Audits selected: 1",
-        "Cases matched to a latest Audit: 1",
-        "Cases without a matching latest Audit: 0",
-        "Cases classified: 1",
-    ]
-    assert all(
-        any(expected in message for message in messages)
-        for expected in expected_messages
-    )
 
 
 def test_writer_publishes_csv_atomically_and_suffixes_same_second(tmp_path):

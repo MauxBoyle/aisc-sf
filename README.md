@@ -122,33 +122,32 @@ Fabricator Application, Erector Application, or International Application.
 Null Case stage and Scope Change values remain eligible. Each qualifying Case
 is counted once.
 
-For every Account, the report uses only the newest valid Audit. Cancelled or
-Withdrawn Audits and Additional, Appeal, SA-NYC, or Preassessment Audit types
-are excluded; null status and type values remain valid. `Cert_Audit_Date__c`
-sets an Audit's effective date when present, otherwise the date portion of
-`CreatedDate` is used. Ties use the full `CreatedDate` and then the Audit ID.
+For each qualifying Case, the report uses only the newest valid Audit for its
+Account that was created on or after the Case. Canceled or Withdrawn Audits and
+Additional, Appeal, SA-NYC, or Preassessment Audit types are excluded; null
+status and type values remain valid. `Cert_Audit_Date__c` sets an Audit's
+effective date when present, otherwise the date portion of `CreatedDate` is
+used. Ties use the full `CreatedDate` and then the Audit ID.
 
 United States Accounts are Domestic. Only a Boolean Salesforce value of `true`
 is Expedited; other Domestic Cases are Regular. Every other country, including
 a missing country, is International Regular.
 
-The stage rules check Pending Assignment first. A null or `New Application`
-Case stage becomes `Initial Review`, while ordinary Case stages have
-underscores changed to spaces. For `Doc_Audit`, Reschedule or a missing audit
-date becomes `Awaiting Audit Assignment`; an audit dated today or later becomes
-`Awaiting Audit`; and a past date becomes `Awaiting CRG Decision`. “Today” is
-the `America/Chicago` calendar date.
+A `Doc_Audit` Case with a related Audit date is overridden by that date: today
+or later becomes `Awaiting Audit`, while a past date becomes `Awaiting CRG
+Decision`. A null or `New Application` Case stage becomes `Initial Review`, and
+the Audit status Pending Acceptance becomes `Awaiting Audit Assignment`.
+Ordinary Case stages have underscores changed to spaces. For
+`Pending_AuditAssignment`, no related Audit, Reschedule in Progress, or a
+missing audit date becomes `Awaiting Audit Assignment`; an audit dated today or
+later becomes `Awaiting Audit`; and a past date becomes `Awaiting CRG Decision`.
+“Today” is the `America/Chicago` calendar date.
 
 Unexpected stage labels are appended alphabetically instead of being combined.
 The command prints one warning with every unexpected label and count, followed
 by the output path and qualifying Case count. Authentication, Salesforce,
 invalid-date, or file failures return exit code `1` and do not publish a
 partial report.
-
-The command also prints diagnostic counts for the queried records, every Case
-and Audit filter, Account-to-Audit matching, latest-Audit selection, and final
-stage/origin classifications. These messages are intended to make differences
-between Salesforce data and the report easy to investigate.
 
 > [!WARNING]
 > Application snapshots may contain sensitive operational counts. Their default

@@ -199,9 +199,7 @@ def _run_application_snapshot(
     environment = dict(os.environ)
     credentials = get_credentials(environment)
     auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
-    result = ApplicationSnapshotService(SalesforceClient(auth)).build(
-        output_fn=output_fn
-    )
+    result = ApplicationSnapshotService(SalesforceClient(auth)).build()
     snapshot_path = write_application_snapshot(result, output_dir)
     if result.unexpected_stages:
         details = ", ".join(

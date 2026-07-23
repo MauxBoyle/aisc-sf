@@ -6,7 +6,7 @@ import csv
 import os
 import shutil
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -40,6 +40,7 @@ APPLICATION_RECORD_TYPE_IDS = frozenset(
 CASE_FIELDS = (
     "Id",
     "AccountId",
+    "CreatedDate",
     "RecordTypeId",
     "Cert_Stage__c",
     "Cert_Is_this_a_scope_change__c",
@@ -75,7 +76,7 @@ CSV_COLUMNS = (
 
 # Keep Salesforce picklist values in one place so query and Python filters agree.
 CASE_CANCELLED_STAGE = "Cancel"
-INVALID_AUDIT_STATUSES = frozenset({"Cancelled", "Withdrawn"})
+INVALID_AUDIT_STATUSES = frozenset({"Canceled", "Withdrawn"})
 INVALID_AUDIT_TYPES = frozenset({"Additional", "Appeal", "SA-NYC", "Preassessment"})
 
 _CASE_WHERE = (
@@ -88,7 +89,7 @@ _CASE_WHERE = (
 )
 
 _AUDIT_WHERE = (
-    "(Cert_Audit_Status__c NOT IN ('Cancelled', 'Withdrawn') "
+    "(Cert_Audit_Status__c NOT IN ('Canceled', 'Withdrawn') "
     "OR Cert_Audit_Status__c = NULL) "
     "AND (Cert_Audit_Type__c NOT IN "
     "('Additional', 'Appeal', 'SA-NYC', 'Preassessment') "
@@ -116,29 +117,22 @@ class ApplicationSnapshotService:
         self.client = client
         self.today = today or datetime.now(ZoneInfo("America/Chicago")).date()
 
-    def build(
-        self,
-        *,
-        output_fn: Callable[[str], None] | None = None,
-    ) -> ApplicationSnapshotResult:
+    def build(self) -> ApplicationSnapshotResult:
         """Query Cases and Audits through the paginated Salesforce client."""
         cases = self.client.query_records(
             "Case",
             list(CASE_FIELDS),
             where=_CASE_WHERE,
         )
-        _emit(output_fn, f"Application snapshot: queried Cases: {len(cases)}")
         audits = self.client.query_records(
             "Cert_Audit__c",
             list(AUDIT_FIELDS),
             where=_AUDIT_WHERE,
         )
-        _emit(output_fn, f"Application snapshot: queried Audits: {len(audits)}")
         return aggregate_application_snapshot(
             cases,
             audits,
             today=self.today,
-            output_fn=output_fn,
         )
 
 
@@ -192,26 +186,28 @@ def application_stage(
     audit_date_value = audit.get("Cert_Audit_Date__c") if audit else None
     case_stage = case.get("Cert_Stage__c")
 
-    if audit_status == "Pending Assignment":
-        return "Awaiting Audit Assignment"
     if case_stage is None:
         return "Initial Review"
 
     normalized_stage = str(case_stage).replace("_", " ")
     if normalized_stage == "New Application":
         return "Initial Review"
-    if case_stage != "Doc_Audit":
+    if case_stage == "Doc_Audit" and audit_date_value is not None:
+        return _stage_for_audit_date(audit_date_value, today=today)
+    if audit_status == "Pending Acceptance":
+        return "Awaiting Audit Assignment"
+    if case_stage != "Pending_AuditAssignment":
         return normalized_stage
-    if audit_status == "Reschedule" or audit_date_value is None:
+    if audit_status == "Reschedule in Progress" or audit_date_value is None:
         return "Awaiting Audit Assignment"
 
-    audit_date = _salesforce_date(
-        audit_date_value,
-        field_name="Cert_Audit_Date__c",
-    )
-    if audit_date >= today:
-        return "Awaiting Audit"
-    return "Awaiting CRG Decision"
+    return _stage_for_audit_date(audit_date_value, today=today)
+
+
+def _stage_for_audit_date(audit_date_value: Any, *, today: date) -> str:
+    """Return the application stage determined by an Audit's date."""
+    audit_date = _salesforce_date(audit_date_value, field_name="Cert_Audit_Date__c")
+    return "Awaiting Audit" if audit_date >= today else "Awaiting CRG Decision"
 
 
 def classify_application_type(case: Mapping[str, Any]) -> str:
@@ -232,49 +228,8 @@ def aggregate_application_snapshot(
     audits: Sequence[Mapping[str, Any]],
     *,
     today: date,
-    output_fn: Callable[[str], None] | None = None,
 ) -> ApplicationSnapshotResult:
     """Filter and count Cases into the fixed application snapshot cross-tab."""
-    _emit(output_fn, f"Application snapshot: Cases received: {len(cases)}")
-    account_status_cases = [
-        case
-        for case in cases
-        if isinstance(case.get("Account"), Mapping)
-        and case["Account"].get("Cert_Certification_Status__c") == "Initials"
-    ]
-    _emit(
-        output_fn,
-        "Application snapshot: Cases after Account certification status "
-        f"filter: {len(account_status_cases)}",
-    )
-    stage_cases = [
-        case
-        for case in account_status_cases
-        if case.get("Cert_Stage__c") != CASE_CANCELLED_STAGE
-    ]
-    _emit(
-        output_fn,
-        f"Application snapshot: Cases after Case stage filter: {len(stage_cases)}",
-    )
-    scope_cases = [
-        case
-        for case in stage_cases
-        if case.get("Cert_Is_this_a_scope_change__c") != "Yes"
-    ]
-    _emit(
-        output_fn,
-        f"Application snapshot: Cases after Scope Change filter: {len(scope_cases)}",
-    )
-    record_type_cases = [
-        case
-        for case in scope_cases
-        if case.get("RecordTypeId") in APPLICATION_RECORD_TYPE_IDS
-    ]
-    _emit(
-        output_fn,
-        "Application snapshot: Cases after Application record type filter: "
-        f"{len(record_type_cases)}",
-    )
 
     qualifying_cases: list[Mapping[str, Any]] = []
     seen_case_ids: set[str] = set()
@@ -296,75 +251,31 @@ def aggregate_application_snapshot(
         account_ids.add(account_id)
         qualifying_cases.append(case)
 
-    _emit(
-        output_fn,
-        f"Application snapshot: unique qualifying Cases: {len(qualifying_cases)}",
-    )
     status_audits = [
         audit
         for audit in audits
         if audit.get("Cert_Audit_Status__c") not in INVALID_AUDIT_STATUSES
     ]
-    _emit(
-        output_fn,
-        f"Application snapshot: Audits after status filter: {len(status_audits)}",
-    )
     valid_audits = [
         audit
         for audit in status_audits
         if audit.get("Cert_Audit_Type__c") not in INVALID_AUDIT_TYPES
     ]
-    _emit(
-        output_fn,
-        f"Application snapshot: Audits after type filter: {len(valid_audits)}",
-    )
-    _emit(output_fn, f"Application snapshot: valid Audits: {len(valid_audits)}")
     relevant_audits = [
         audit for audit in valid_audits if audit.get("Cert_Account__c") in account_ids
     ]
-    _emit(
-        output_fn,
-        "Application snapshot: valid Audits matched to qualifying Accounts: "
-        f"{len(relevant_audits)}",
-    )
-    audits_by_account = select_latest_valid_audits(relevant_audits)
-    _emit(
-        output_fn,
-        f"Application snapshot: latest Audits selected: {len(audits_by_account)}",
-    )
-    matched_cases = sum(
-        case["AccountId"] in audits_by_account for case in qualifying_cases
-    )
-    _emit(
-        output_fn,
-        f"Application snapshot: Cases matched to a latest Audit: {matched_cases}",
-    )
-    _emit(
-        output_fn,
-        "Application snapshot: Cases without a matching latest Audit: "
-        f"{len(qualifying_cases) - matched_cases}",
+    audits_by_case = _select_latest_valid_audits_by_case(
+        qualifying_cases,
+        relevant_audits,
     )
     counts: dict[str, Counter[str]] = {}
     for case in qualifying_cases:
         stage = application_stage(
             case,
-            audits_by_account.get(case["AccountId"]),
+            audits_by_case[case["Id"]],
             today=today,
         )
         counts.setdefault(stage, Counter())[classify_application_type(case)] += 1
-
-    _emit(output_fn, f"Application snapshot: Cases classified: {len(qualifying_cases)}")
-    for column in CSV_COLUMNS[1:]:
-        _emit(
-            output_fn,
-            f"Application snapshot: {column} classifications: "
-            f"{sum(stage_counts[column] for stage_counts in counts.values())}",
-        )
-    for stage, stage_counts in sorted(counts.items()):
-        _emit(
-            output_fn,
-            f"Application snapshot: stage '{stage}' count: {sum(stage_counts.values())}",
-        )
 
     unexpected_labels = sorted(set(counts) - set(APPLICATION_STAGES))
     stage_labels = [*APPLICATION_STAGES, *unexpected_labels]
@@ -387,6 +298,39 @@ def aggregate_application_snapshot(
         qualifying_case_count=len(qualifying_cases),
         unexpected_stages=unexpected_stages,
     )
+
+
+def _select_latest_valid_audits_by_case(
+    cases: Sequence[Mapping[str, Any]],
+    audits: Sequence[Mapping[str, Any]],
+) -> dict[str, Mapping[str, Any] | None]:
+    """Select each Case's newest Audit created on or after the Case."""
+    audits_by_account: dict[str, list[Mapping[str, Any]]] = {}
+    for audit in audits:
+        account_id = audit.get("Cert_Account__c")
+        if isinstance(account_id, str) and account_id:
+            audits_by_account.setdefault(account_id, []).append(audit)
+
+    selected: dict[str, Mapping[str, Any] | None] = {}
+    for case in cases:
+        case_id = case["Id"]
+        case_created = _salesforce_datetime(
+            case.get("CreatedDate"),
+            field_name="Case CreatedDate",
+        )
+        matching_audits = [
+            audit
+            for audit in audits_by_account.get(case["AccountId"], [])
+            if _salesforce_datetime(
+                audit.get("CreatedDate"),
+                field_name="Audit CreatedDate",
+            )
+            >= case_created
+        ]
+        selected[case_id] = select_latest_valid_audits(matching_audits).get(
+            case["AccountId"]
+        )
+    return selected
 
 
 def write_application_snapshot(
@@ -481,8 +425,3 @@ def _write_application_csv(
         writer = csv.DictWriter(output, fieldnames=CSV_COLUMNS)
         writer.writeheader()
         writer.writerows(rows)
-
-
-def _emit(output_fn: Callable[[str], None] | None, message: str) -> None:
-    if output_fn is not None:
-        output_fn(message)

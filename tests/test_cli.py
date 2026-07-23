@@ -34,8 +34,7 @@ def test_application_snapshot_cli_uses_custom_output_and_prints_summary(
         def __init__(self, client):
             assert client == "client"
 
-        def build(self, *, output_fn):
-            output_fn("diagnostic")
+        def build(self):
             return result
 
     monkeypatch.setattr(app, "ApplicationSnapshotService", Service)
@@ -52,10 +51,9 @@ def test_application_snapshot_cli_uses_custom_output_and_prints_summary(
         )
         == 0
     )
-    assert output[0] == "diagnostic"
-    assert output[1] == "Warning: unexpected application stages: Surprise Stage (2)"
-    assert str(tmp_path / "run" / "application_snapshot.csv") in output[2]
-    assert output[3] == "qualifying Cases: 3"
+    assert output[0] == "Warning: unexpected application stages: Surprise Stage (2)"
+    assert str(tmp_path / "run" / "application_snapshot.csv") in output[1]
+    assert output[2] == "qualifying Cases: 3"
 
 
 @pytest.mark.parametrize(
