@@ -121,6 +121,11 @@ Successful runs print the output path and qualifying Case count. Authentication,
 Salesforce, data-validation, and file errors print
 `Application snapshot failed: ...` and return exit code `1`.
 
+The command also prints diagnostic counts after each Case and Audit filter,
+when Audits match qualifying Accounts, how many latest Audits are selected, and
+how Cases are classified by origin and stage. These messages are intended for
+troubleshooting differences between Salesforce and the CSV.
+
 !!! warning
 
     Application snapshots may contain sensitive operational counts. The

@@ -145,6 +145,11 @@ by the output path and qualifying Case count. Authentication, Salesforce,
 invalid-date, or file failures return exit code `1` and do not publish a
 partial report.
 
+The command also prints diagnostic counts for the queried records, every Case
+and Audit filter, Account-to-Audit matching, latest-Audit selection, and final
+stage/origin classifications. These messages are intended to make differences
+between Salesforce data and the report easy to investigate.
+
 > [!WARNING]
 > Application snapshots may contain sensitive operational counts. Their default
 > directory is ignored by Git. When using `--output-dir`, choose an

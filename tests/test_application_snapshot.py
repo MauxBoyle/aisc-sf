@@ -342,6 +342,51 @@ def test_service_queries_relationship_case_fields_and_minimal_audit_fields():
     assert "Cert_Audit_Date__c" in audit_call[1]
     assert len(calls) == 2
 
+    messages = []
+    ApplicationSnapshotService(Client(), today=TODAY).build(output_fn=messages.append)
+    assert "queried Cases: 0" in messages[0]
+    assert "queried Audits: 0" in messages[1]
+
+
+def test_diagnostics_report_filter_and_audit_matching_counts():
+    messages = []
+    cases = [
+        case_record(Id="kept"),
+        case_record(Id="cancelled", Cert_Stage__c="Cancelled"),
+    ]
+    audits = [
+        audit_record(Id="matched"),
+        audit_record(Id="invalid", Cert_Audit_Status__c="Withdrawn"),
+    ]
+
+    aggregate_application_snapshot(
+        cases,
+        audits,
+        today=TODAY,
+        output_fn=messages.append,
+    )
+
+    expected_messages = [
+        "Cases received: 2",
+        "Cases after Account certification status filter: 2",
+        "Cases after Case stage filter: 1",
+        "Cases after Scope Change filter: 1",
+        "Cases after Application record type filter: 1",
+        "unique qualifying Cases: 1",
+        "Audits after status filter: 1",
+        "Audits after type filter: 1",
+        "valid Audits: 1",
+        "valid Audits matched to qualifying Accounts: 1",
+        "latest Audits selected: 1",
+        "Cases matched to a latest Audit: 1",
+        "Cases without a matching latest Audit: 0",
+        "Cases classified: 1",
+    ]
+    assert all(
+        any(expected in message for message in messages)
+        for expected in expected_messages
+    )
+
 
 def test_writer_publishes_csv_atomically_and_suffixes_same_second(tmp_path):
     result = aggregate_application_snapshot([], [], today=TODAY)

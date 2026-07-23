@@ -6,7 +6,7 @@ import csv
 import os
 import shutil
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -68,8 +68,8 @@ APPLICATION_STAGES = (
 
 CSV_COLUMNS = (
     "application_stage",
-    "domestic_regular",
     "domestic_expedited",
+    "domestic_regular",
     "international_regular",
 )
 
@@ -114,19 +114,30 @@ class ApplicationSnapshotService:
         self.client = client
         self.today = today or datetime.now(ZoneInfo("America/Chicago")).date()
 
-    def build(self) -> ApplicationSnapshotResult:
+    def build(
+        self,
+        *,
+        output_fn: Callable[[str], None] | None = None,
+    ) -> ApplicationSnapshotResult:
         """Query Cases and Audits through the paginated Salesforce client."""
         cases = self.client.query_records(
             "Case",
             list(CASE_FIELDS),
             where=_CASE_WHERE,
         )
+        _emit(output_fn, f"Application snapshot: queried Cases: {len(cases)}")
         audits = self.client.query_records(
             "Cert_Audit__c",
             list(AUDIT_FIELDS),
             where=_AUDIT_WHERE,
         )
-        return aggregate_application_snapshot(cases, audits, today=self.today)
+        _emit(output_fn, f"Application snapshot: queried Audits: {len(audits)}")
+        return aggregate_application_snapshot(
+            cases,
+            audits,
+            today=self.today,
+            output_fn=output_fn,
+        )
 
 
 def is_qualifying_case(record: Mapping[str, Any]) -> bool:
@@ -219,8 +230,50 @@ def aggregate_application_snapshot(
     audits: Sequence[Mapping[str, Any]],
     *,
     today: date,
+    output_fn: Callable[[str], None] | None = None,
 ) -> ApplicationSnapshotResult:
     """Filter and count Cases into the fixed application snapshot cross-tab."""
+    _emit(output_fn, f"Application snapshot: Cases received: {len(cases)}")
+    account_status_cases = [
+        case
+        for case in cases
+        if isinstance(case.get("Account"), Mapping)
+        and case["Account"].get("Cert_Certification_Status__c") == "Initials"
+    ]
+    _emit(
+        output_fn,
+        "Application snapshot: Cases after Account certification status "
+        f"filter: {len(account_status_cases)}",
+    )
+    stage_cases = [
+        case
+        for case in account_status_cases
+        if case.get("Cert_Stage__c") != "Cancelled"
+    ]
+    _emit(
+        output_fn,
+        f"Application snapshot: Cases after Case stage filter: {len(stage_cases)}",
+    )
+    scope_cases = [
+        case
+        for case in stage_cases
+        if case.get("Cert_Is_this_a_scope_change__c") != "Yes"
+    ]
+    _emit(
+        output_fn,
+        f"Application snapshot: Cases after Scope Change filter: {len(scope_cases)}",
+    )
+    record_type_cases = [
+        case
+        for case in scope_cases
+        if case.get("RecordTypeId") in APPLICATION_RECORD_TYPE_IDS
+    ]
+    _emit(
+        output_fn,
+        "Application snapshot: Cases after Application record type filter: "
+        f"{len(record_type_cases)}",
+    )
+
     qualifying_cases: list[Mapping[str, Any]] = []
     seen_case_ids: set[str] = set()
     account_ids: set[str] = set()
@@ -241,10 +294,54 @@ def aggregate_application_snapshot(
         account_ids.add(account_id)
         qualifying_cases.append(case)
 
-    relevant_audits = [
-        audit for audit in audits if audit.get("Cert_Account__c") in account_ids
+    _emit(
+        output_fn,
+        f"Application snapshot: unique qualifying Cases: {len(qualifying_cases)}",
+    )
+    status_audits = [
+        audit
+        for audit in audits
+        if audit.get("Cert_Audit_Status__c") not in INVALID_AUDIT_STATUSES
     ]
+    _emit(
+        output_fn,
+        f"Application snapshot: Audits after status filter: {len(status_audits)}",
+    )
+    valid_audits = [
+        audit
+        for audit in status_audits
+        if audit.get("Cert_Audit_Type__c") not in INVALID_AUDIT_TYPES
+    ]
+    _emit(
+        output_fn,
+        f"Application snapshot: Audits after type filter: {len(valid_audits)}",
+    )
+    _emit(output_fn, f"Application snapshot: valid Audits: {len(valid_audits)}")
+    relevant_audits = [
+        audit for audit in valid_audits if audit.get("Cert_Account__c") in account_ids
+    ]
+    _emit(
+        output_fn,
+        "Application snapshot: valid Audits matched to qualifying Accounts: "
+        f"{len(relevant_audits)}",
+    )
     audits_by_account = select_latest_valid_audits(relevant_audits)
+    _emit(
+        output_fn,
+        f"Application snapshot: latest Audits selected: {len(audits_by_account)}",
+    )
+    matched_cases = sum(
+        case["AccountId"] in audits_by_account for case in qualifying_cases
+    )
+    _emit(
+        output_fn,
+        f"Application snapshot: Cases matched to a latest Audit: {matched_cases}",
+    )
+    _emit(
+        output_fn,
+        "Application snapshot: Cases without a matching latest Audit: "
+        f"{len(qualifying_cases) - matched_cases}",
+    )
     counts: dict[str, Counter[str]] = {}
     for case in qualifying_cases:
         stage = application_stage(
@@ -253,6 +350,19 @@ def aggregate_application_snapshot(
             today=today,
         )
         counts.setdefault(stage, Counter())[classify_application_type(case)] += 1
+
+    _emit(output_fn, f"Application snapshot: Cases classified: {len(qualifying_cases)}")
+    for column in CSV_COLUMNS[1:]:
+        _emit(
+            output_fn,
+            f"Application snapshot: {column} classifications: "
+            f"{sum(stage_counts[column] for stage_counts in counts.values())}",
+        )
+    for stage, stage_counts in sorted(counts.items()):
+        _emit(
+            output_fn,
+            f"Application snapshot: stage '{stage}' count: {sum(stage_counts.values())}",
+        )
 
     unexpected_labels = sorted(set(counts) - set(APPLICATION_STAGES))
     stage_labels = [*APPLICATION_STAGES, *unexpected_labels]
@@ -369,3 +479,8 @@ def _write_application_csv(
         writer = csv.DictWriter(output, fieldnames=CSV_COLUMNS)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _emit(output_fn: Callable[[str], None] | None, message: str) -> None:
+    if output_fn is not None:
+        output_fn(message)
