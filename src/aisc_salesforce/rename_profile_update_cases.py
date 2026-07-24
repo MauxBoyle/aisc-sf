@@ -12,10 +12,10 @@ from .profile_update_subjects import (
     build_aisc_profile_update_subject,
     parse_legacy_profile_update_subject,
 )
+from .queried_fields import RENAME_CASE_FIELDS
 from .salesforce import SalesforceClient, SalesforceError
 
 CHICAGO = ZoneInfo("America/Chicago")
-RENAME_CASE_FIELDS = ["Id", "CaseNumber", "Subject", "CreatedDate"]
 
 
 @dataclass

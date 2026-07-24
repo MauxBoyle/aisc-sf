@@ -13,8 +13,14 @@ from pathlib import Path
 from typing import Any, TextIO
 from zoneinfo import ZoneInfo
 
-from .profile_updates import SUBMISSION_FIELDS, AutomationCounts, escape_soql_string
+from .profile_updates import AutomationCounts, escape_soql_string
+from .queried_fields import (
+    ACCOUNT_HISTORY_FIELDS,
+    CONTACT_REVIEW_FIELDS,
+    SUBMISSION_FIELDS,
+)
 from .salesforce import SalesforceClient, SalesforceError
+from .salesforce_enums import CaseStatus, ProfileChangeStatus
 from .stage_profile_updates import (
     CSV_COLUMNS,
     ROLE_DEFINITIONS,
@@ -26,37 +32,6 @@ from .stage_profile_updates import (
 CHICAGO = ZoneInfo("America/Chicago")
 STAGE_SEPARATOR = "=" * 72
 ITEM_SEPARATOR = "-" * 72
-
-ACCOUNT_REVIEW_FIELDS = [
-    "Id",
-    "Name",
-    "Company_Owner__c",
-    "BillingStreet",
-    "BillingCity",
-    "BillingState",
-    "BillingPostalCode",
-    "BillingCountry",
-    *(role.account_lookup for role in ROLE_DEFINITIONS),
-]
-
-CONTACT_REVIEW_FIELDS = [
-    "Id",
-    "AccountId",
-    "FirstName",
-    "LastName",
-    "Title",
-    "Email",
-    "Phone",
-]
-
-ACCOUNT_HISTORY_FIELDS = [
-    "Id",
-    "AccountId",
-    "Field",
-    "OldValue",
-    "NewValue",
-    "CreatedDate",
-]
 
 ACCOUNT_PROPOSALS = [
     ("revised_company_name", "Revised_Company_Name__c", "Name", "Company Name"),
@@ -534,7 +509,7 @@ class InteractiveProfileUpdateProcessor:
             batch.case_id,
             "Case",
             "Status",
-            "Pending",
+            CaseStatus.PENDING,
             action="prepare batch",
         )
         fresh_by_id = self._fresh_case_submissions(batch)
@@ -589,9 +564,9 @@ class InteractiveProfileUpdateProcessor:
                 source_id,
                 "Company_Profile_Change__c",
                 "Status__c",
-                "Closed",
+                ProfileChangeStatus.CLOSED,
             )
-        case_status = "Closed" if all_sent else "Pending"
+        case_status = CaseStatus.CLOSED if all_sent else CaseStatus.PENDING
         self._update_status_with_audit(
             batch,
             batch.case_id,
@@ -1486,10 +1461,12 @@ class InteractiveProfileUpdateProcessor:
             field_name="Status",
             label="Case Status",
             original_value="",
-            proposed_value="Pending",
+            proposed_value=CaseStatus.PENDING,
         )
         try:
-            self.client.update_record("Case", batch.case_id, {"Status": "Pending"})
+            self.client.update_record(
+                "Case", batch.case_id, {"Status": CaseStatus.PENDING}
+            )
         except SalesforceError as error:
             self._append_audit(
                 ActionResult(

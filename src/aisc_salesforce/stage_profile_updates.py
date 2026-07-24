@@ -13,45 +13,17 @@ from typing import Any
 from uuid import uuid4
 
 from .profile_update_subjects import subject_has_profile_update
-from .profile_updates import SUBMISSION_FIELDS, escape_soql_string
+from .profile_updates import escape_soql_string
+from .queried_fields import (
+    ACCOUNT_FIELDS,
+    CONTACT_FIELDS,
+    SUBMISSION_FIELDS,
+)
+from .queried_fields import (
+    STAGING_CASE_FIELDS as PROFILE_CASE_FIELDS,
+)
 from .salesforce import SalesforceClient
-
-ACCOUNT_FIELDS = [
-    "Id",
-    "Name",
-    "Certification_ID__c",
-    "Company_Owner__c",
-    "BillingStreet",
-    "BillingCity",
-    "BillingState",
-    "BillingPostalCode",
-    "BillingCountry",
-    "ParentId",
-    "Cert_Certification_Contact__c",
-    "Cert_Principal_Contact__c",
-    "Cert_Accounting_Contact__c",
-    "Cert_Marketing_Contact__c",
-    "Cert_Safety_Contact__c",
-]
-
-CONTACT_FIELDS = [
-    "Id",
-    "AccountId",
-    "FirstName",
-    "LastName",
-    "Title",
-    "Email",
-    "Phone",
-]
-
-PROFILE_CASE_FIELDS = [
-    "Id",
-    "CaseNumber",
-    "Subject",
-    "Status",
-    "CreatedDate",
-    "AccountId",
-]
+from .salesforce_enums import ProfileChangeStatus, ProfileChangeType
 
 KEY_ANSWER_FIELDS = [
     ("Did_the_Cert_contact_change__c", "Certification contact changed"),
@@ -256,7 +228,7 @@ class ProfileUpdateStagingService:
         submissions = self.client.query_records(
             "Company_Profile_Change__c",
             SUBMISSION_FIELDS,
-            where="Status__c = 'New'",
+            where=f"Status__c = '{ProfileChangeStatus.NEW}'",
             order_by="CreatedDate ASC, Id ASC",
         )
         submissions = sorted(submissions, key=_submission_sort_key)
@@ -539,7 +511,9 @@ class ProfileUpdateStagingService:
 
     @staticmethod
     def _populate_key_answers(row: dict[str, str], merged: dict[str, Any]) -> None:
-        is_key_data = _normalized(merged.get("Type__c")) == "key data"
+        is_key_data = _normalized(merged.get("Type__c")) == _normalized(
+            ProfileChangeType.KEY_DATA
+        )
         if not is_key_data and not any(
             _has_value(merged.get(api_name)) for api_name in KEY_UPDATE_FIELDS
         ):
@@ -1030,7 +1004,7 @@ def _submission_sort_key(record: dict[str, Any]) -> tuple[str, str]:
 
 
 def _is_key_update(record: dict[str, Any]) -> bool:
-    return record.get("Type__c") == "Key Data"
+    return record.get("Type__c") == ProfileChangeType.KEY_DATA
 
 
 def _where_in(field_name: str, values: list[str]) -> str:

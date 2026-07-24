@@ -164,6 +164,57 @@ def test_filtered_query_supports_sorting_and_pagination():
     assert session.calls[1][1][0] == "https://example/next-page"
 
 
+def test_describe_object_uses_v60_and_returns_field_types():
+    session = Session(
+        [
+            Response(
+                {
+                    "fields": [
+                        {"name": "Status", "type": "picklist"},
+                        {"name": "Tags__c", "type": "multipicklist"},
+                        {"name": "Subject", "type": "string"},
+                    ]
+                }
+            )
+        ]
+    )
+    client = SalesforceClient(SalesforceSession("https://example", "token"), session)
+
+    assert client.describe_object("Case") == {
+        "Status": "picklist",
+        "Tags__c": "multipicklist",
+        "Subject": "string",
+    }
+    assert session.calls[0][1][0] == (
+        "https://example/services/data/v60.0/sobjects/Case/describe"
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"fields": "not a list"},
+        {"fields": [{"name": "Status"}]},
+        {"fields": [{"name": "", "type": "picklist"}]},
+        {
+            "fields": [
+                {"name": "Status", "type": "picklist"},
+                {"name": "Status", "type": "string"},
+            ]
+        },
+    ],
+)
+def test_describe_object_rejects_malformed_metadata(payload):
+    client = SalesforceClient(
+        SalesforceSession("https://example", "token"),
+        Session([Response(payload)]),
+    )
+
+    with pytest.raises(SalesforceError, match="Describe response for Case"):
+        client.describe_object("Case")
+
+
 def test_record_create_update_and_retrieve_use_salesforce_rest_api():
     session = Session(
         [

@@ -45,6 +45,13 @@ Create a read-only snapshot:
 uv run aisc_salesforce snapshot
 ```
 
+Audit recently stored Salesforce picklist values against the Python enum
+catalog:
+
+```bash
+uv run aisc_salesforce audit-picklist-enums
+```
+
 Create a read-only application-stage count:
 
 ```bash
@@ -91,6 +98,14 @@ uv run python -m aisc_salesforce profile-updates
 `profile-updates` prints `created`, `reused`, `skipped`, and `failed` counts. A
 successful run returns exit code `0`; missing configuration or a Salesforce
 failure returns `1`.
+
+`audit-picklist-enums` reads Describe metadata and ordinary records modified
+during the rolling two-calendar-year window. Salesforce `*History` objects use
+their history entry's `CreatedDate` because those objects do not have
+`LastModifiedDate`. Missing enum values (including every observed value for an
+uncataloged queried picklist) are informational and return `0`. Authentication,
+metadata, or query failures return `1`. The command writes no files and makes
+no Salesforce changes.
 
 ### Application snapshot
 

@@ -146,6 +146,39 @@ class SalesforceClient:
             params = None
         return records
 
+    def describe_object(self, object_name: str) -> dict[str, str]:
+        """Return the API name and Salesforce type of every object field."""
+        url = (
+            f"{self.auth.instance_url}/services/data/{API_VERSION}"
+            f"/sobjects/{object_name}/describe"
+        )
+        response = self._request("get", url, action=f"describe {object_name}")
+        try:
+            payload = response.json()
+            raw_fields = payload["fields"]
+            if not isinstance(raw_fields, list):
+                raise TypeError
+            field_types: dict[str, str] = {}
+            for raw_field in raw_fields:
+                if not isinstance(raw_field, dict):
+                    raise TypeError
+                name = raw_field["name"]
+                field_type = raw_field["type"]
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or not isinstance(field_type, str)
+                    or not field_type
+                    or name in field_types
+                ):
+                    raise TypeError
+                field_types[name] = field_type
+        except (ValueError, KeyError, TypeError, AttributeError) as error:
+            raise SalesforceError(
+                f"Invalid Salesforce Describe response for {object_name}."
+            ) from error
+        return field_types
+
     def create_record(self, object_name: str, values: dict[str, Any]) -> str:
         """Create one Salesforce record and return its new record ID."""
         url = (

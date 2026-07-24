@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -9,8 +10,79 @@ from aisc_salesforce.application_snapshot import (
 )
 from aisc_salesforce.dictionary import ExportField
 from aisc_salesforce.imis_contacts import ContactConsolidationError
+from aisc_salesforce.picklist_audit import (
+    PicklistAuditFinding,
+    PicklistAuditResult,
+)
 from aisc_salesforce.profile_updates import AutomationCounts
 from aisc_salesforce.rename_profile_update_cases import RenameCounts
+
+
+def test_picklist_audit_cli_prints_grouped_informational_findings(monkeypatch):
+    output = []
+    result = PicklistAuditResult(
+        cutoff=datetime(2024, 7, 24, tzinfo=UTC),
+        findings=(
+            PicklistAuditFinding("Case", "Status", ("Unexpected",), True),
+            PicklistAuditFinding(
+                "Case",
+                "Uncataloged__c",
+                ("Alpha", "Zebra"),
+                False,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "_run_audit_picklist_enums",
+        lambda *, output_fn: (
+            app._print_picklist_audit(result, output_fn=output_fn),
+            0,
+        )[1],
+    )
+
+    assert app.main(["audit-picklist-enums"], output_fn=output.append) == 0
+    assert "Case:" in output
+    assert "  Status:" in output
+    assert "  Uncataloged__c [no enum catalog]:" in output
+    assert "    - Alpha" in output
+    assert "    - Zebra" in output
+    assert any("informational" in line for line in output)
+
+
+def test_picklist_audit_cli_prints_clear_success(monkeypatch):
+    output = []
+    result = PicklistAuditResult(
+        cutoff=datetime(2024, 7, 24, tzinfo=UTC),
+        findings=(),
+    )
+    monkeypatch.setattr(
+        app,
+        "_run_audit_picklist_enums",
+        lambda *, output_fn: (
+            app._print_picklist_audit(result, output_fn=output_fn),
+            0,
+        )[1],
+    )
+
+    assert app.main(["audit-picklist-enums"], output_fn=output.append) == 0
+    assert output == [
+        "Picklist enum audit complete: no missing values found in the audit "
+        "window starting 2024-07-24T00:00:00Z."
+    ]
+
+
+def test_picklist_audit_cli_salesforce_failure_is_nonzero(monkeypatch, capsys):
+    monkeypatch.setattr(
+        app,
+        "_run_audit_picklist_enums",
+        lambda **kwargs: (_ for _ in ()).throw(
+            app.SalesforceError("describe Case failed")
+        ),
+    )
+
+    assert app.main(["audit-picklist-enums"]) == 1
+    assert "Picklist enum audit failed: describe Case failed" in capsys.readouterr().err
 
 
 def test_application_snapshot_cli_uses_custom_output_and_prints_summary(

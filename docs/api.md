@@ -26,6 +26,24 @@ helpers are separate from network and file access, which makes each business
 rule directly testable. `write_application_snapshot()` publishes the CSV
 atomically in a timestamped directory.
 
+## Picklist enum audit
+
+::: aisc_salesforce.picklist_audit
+    options:
+      show_root_heading: true
+      members:
+        - PicklistAuditError
+        - PicklistAuditFinding
+        - PicklistAuditResult
+        - PicklistEnumAuditService
+        - audit_date_field
+        - two_year_cutoff
+
+`PicklistEnumAuditService` describes inventoried Salesforce fields, reads
+recently stored picklist values, and compares them with the Python enum
+catalog. The audit is read-only; its `PicklistAuditResult` contains the cutoff
+and any missing or uncataloged values.
+
 ## iMIS contact consolidation
 
 ::: aisc_salesforce.imis_contacts

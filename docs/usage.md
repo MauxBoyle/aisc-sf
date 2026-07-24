@@ -27,6 +27,58 @@ cp .env.example .env
 The CLI loads `.env` without replacing environment variables that are already
 set.
 
+## Picklist enum audit command
+
+Run the manual, read-only audit with the standard Salesforce credentials:
+
+```bash
+uv run aisc_salesforce audit-picklist-enums
+```
+
+No additional configuration is required. The command combines fields selected
+by the schema dictionary with fields read by the application, Profile Update,
+staging, processing, and Case-rename workflows. It uses Salesforce REST
+Describe metadata to keep only fields whose type is `picklist` or
+`multipicklist`. Relationship fields are checked on the object that owns them;
+for example, `Account.Cert_Certification_Status__c` is audited as an Account
+field.
+
+For each matching field, the command reads ordinary records whose
+`LastModifiedDate` is at or after the current UTC instant moved back two
+calendar years. Salesforce field-history objects, such as `AccountHistory` and
+custom `__History` objects, do not have `LastModifiedDate`, so their immutable
+entries use `CreatedDate` instead. The month, day, and time are preserved. A
+February 29 cutoff becomes February 28 when the target year is not a leap year.
+Multi-select values are split on Salesforce's semicolon separator, and all
+values are compared to Python enum values exactly, including capitalization.
+
+Example findings:
+
+```text
+Picklist enum audit (audit window starts 2024-07-24T15:30:00Z):
+Case:
+  Status:
+    - Unexpected Status
+  Custom_Field__c [no enum catalog]:
+    - Existing Value
+Audit complete. Missing and uncataloged values are informational; no Salesforce data was changed.
+```
+
+A normal field heading means the listed values are missing from that field's
+Python enum. `[no enum catalog]` means the project has no enum for the field, so
+all nonempty values observed in the two-year window are listed. Null and empty
+values are ignored. A clean audit prints a clear `no missing values found`
+message.
+
+Missing or uncataloged values are informational, so the command returns exit
+code `0`. Authentication, Describe metadata, and Salesforce query failures
+print `Picklist enum audit failed: ...` and return exit code `1`. The command
+does not create a report file and never creates or updates Salesforce records.
+REST Describe is used because this audit checks values actually stored in
+recent records, rather than all record-type-specific choices an administrator
+may currently offer. Salesforce describes the distinction in its
+[Object Metadata reference](https://developer.salesforce.com/docs/platform/graphql/guide/query-objectinfo.html).
+
 ## Snapshot command
 
 ```bash

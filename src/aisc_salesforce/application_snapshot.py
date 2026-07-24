@@ -14,6 +14,20 @@ from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from .queried_fields import (
+    APPLICATION_AUDIT_FIELDS as AUDIT_FIELDS,
+)
+from .queried_fields import (
+    APPLICATION_CASE_FIELDS as CASE_FIELDS,
+)
+from .salesforce_enums import (
+    AccountCertificationStatus,
+    AuditStatus,
+    AuditType,
+    CaseCertificationStage,
+    ScopeChangeAnswer,
+)
+
 RECORD_TYPE_ALIASES = {
     "0125w000000BaAdAAK": "Scope Change",
     "0125w000000BVTTAA4": "Web Question",
@@ -37,27 +51,6 @@ APPLICATION_RECORD_TYPE_IDS = frozenset(
     }
 )
 
-CASE_FIELDS = (
-    "Id",
-    "AccountId",
-    "CreatedDate",
-    "RecordTypeId",
-    "Cert_Stage__c",
-    "Cert_Is_this_a_scope_change__c",
-    "Cert_Expedited_Application__c",
-    "Account.BillingCountry",
-    "Account.Cert_Certification_Status__c",
-)
-
-AUDIT_FIELDS = (
-    "Id",
-    "Cert_Account__c",
-    "Cert_Audit_Date__c",
-    "CreatedDate",
-    "Cert_Audit_Status__c",
-    "Cert_Audit_Type__c",
-)
-
 APPLICATION_STAGES = (
     "Initial Review",
     "Eligibility Review",
@@ -75,24 +68,34 @@ CSV_COLUMNS = (
 )
 
 # Keep Salesforce picklist values in one place so query and Python filters agree.
-CASE_CANCELLED_STAGE = "Cancel"
-INVALID_AUDIT_STATUSES = frozenset({"Canceled", "Withdrawn"})
-INVALID_AUDIT_TYPES = frozenset({"Additional", "Appeal", "SA-NYC", "Preassessment"})
+CASE_CANCELLED_STAGE = CaseCertificationStage.CANCEL
+INVALID_AUDIT_STATUSES = frozenset({AuditStatus.CANCELED, AuditStatus.WITHDRAWN})
+INVALID_AUDIT_TYPES = frozenset(
+    {
+        AuditType.ADDITIONAL,
+        AuditType.APPEAL,
+        AuditType.SA_NYC,
+        AuditType.PREASSESSMENT,
+    }
+)
 
 _CASE_WHERE = (
     "RecordTypeId IN "
     "('0125w0000013incAAA', '0125w0000013inhAAA', '0125w0000013inrAAA') "
-    "AND Account.Cert_Certification_Status__c = 'Initials' "
+    f"AND Account.Cert_Certification_Status__c = "
+    f"'{AccountCertificationStatus.INITIALS}' "
     f"AND (Cert_Stage__c != '{CASE_CANCELLED_STAGE}' OR Cert_Stage__c = NULL) "
-    "AND (Cert_Is_this_a_scope_change__c != 'Yes' "
+    f"AND (Cert_Is_this_a_scope_change__c != '{ScopeChangeAnswer.YES}' "
     "OR Cert_Is_this_a_scope_change__c = NULL)"
 )
 
 _AUDIT_WHERE = (
-    "(Cert_Audit_Status__c NOT IN ('Canceled', 'Withdrawn') "
+    f"(Cert_Audit_Status__c NOT IN "
+    f"('{AuditStatus.CANCELED}', '{AuditStatus.WITHDRAWN}') "
     "OR Cert_Audit_Status__c = NULL) "
     "AND (Cert_Audit_Type__c NOT IN "
-    "('Additional', 'Appeal', 'SA-NYC', 'Preassessment') "
+    f"('{AuditType.ADDITIONAL}', '{AuditType.APPEAL}', "
+    f"'{AuditType.SA_NYC}', '{AuditType.PREASSESSMENT}') "
     "OR Cert_Audit_Type__c = NULL)"
 )
 
@@ -141,9 +144,10 @@ def is_qualifying_case(record: Mapping[str, Any]) -> bool:
     account = record.get("Account")
     return (
         isinstance(account, Mapping)
-        and account.get("Cert_Certification_Status__c") == "Initials"
+        and account.get("Cert_Certification_Status__c")
+        == AccountCertificationStatus.INITIALS
         and record.get("Cert_Stage__c") != CASE_CANCELLED_STAGE
-        and record.get("Cert_Is_this_a_scope_change__c") != "Yes"
+        and record.get("Cert_Is_this_a_scope_change__c") != ScopeChangeAnswer.YES
         and record.get("RecordTypeId") in APPLICATION_RECORD_TYPE_IDS
     )
 
@@ -190,15 +194,17 @@ def application_stage(
         return "Initial Review"
 
     normalized_stage = str(case_stage).replace("_", " ")
-    if normalized_stage == "New Application":
+    if normalized_stage == CaseCertificationStage.NEW_APPLICATION.value.replace(
+        "_", " "
+    ):
         return "Initial Review"
-    if case_stage == "Doc_Audit" and audit_date_value is not None:
+    if case_stage == CaseCertificationStage.DOC_AUDIT and audit_date_value is not None:
         return _stage_for_audit_date(audit_date_value, today=today)
-    if audit_status == "Pending Acceptance":
+    if audit_status == AuditStatus.PENDING_ACCEPTANCE:
         return "Awaiting Audit Assignment"
-    if case_stage != "Pending_AuditAssignment":
+    if case_stage != CaseCertificationStage.PENDING_AUDIT_ASSIGNMENT:
         return normalized_stage
-    if audit_status == "Reschedule in Progress" or audit_date_value is None:
+    if audit_status == AuditStatus.RESCHEDULE_IN_PROGRESS or audit_date_value is None:
         return "Awaiting Audit Assignment"
 
     return _stage_for_audit_date(audit_date_value, today=today)

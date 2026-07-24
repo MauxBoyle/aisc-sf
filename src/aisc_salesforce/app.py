@@ -15,12 +15,18 @@ from .application_snapshot import (
 )
 from .dictionary import DictionaryError, load_export_plan
 from .imis_contacts import ContactConsolidationError, consolidate_contactbasic
+from .picklist_audit import (
+    PicklistAuditError,
+    PicklistAuditResult,
+    PicklistEnumAuditService,
+)
 from .process_profile_updates import (
     InteractiveProfileUpdateProcessor,
     ProcessingError,
     ProfileUpdateProcessingWorkflow,
 )
 from .profile_updates import ProfileUpdateService
+from .queried_fields import FieldInventoryError, build_queried_field_inventory
 from .rename_profile_update_cases import RenameProfileUpdateCasesService
 from .salesforce import (
     SalesforceClient,
@@ -109,6 +115,10 @@ def main(
         default=Path("imis_contactbasic"),
         help="Directory containing dated CSContactBasic CSV files.",
     )
+    subparsers.add_parser(
+        "audit-picklist-enums",
+        help="Report recently stored picklist values missing from Python enums.",
+    )
     args = parser.parse_args(argv)
     if args.command == "snapshot":
         try:
@@ -165,6 +175,18 @@ def main(
         except ContactConsolidationError as error:
             print(f"iMIS contact consolidation failed: {error}", file=sys.stderr)
             return 1
+    if args.command == "audit-picklist-enums":
+        try:
+            return _run_audit_picklist_enums(output_fn=output_fn)
+        except (
+            DictionaryError,
+            FieldInventoryError,
+            PicklistAuditError,
+            SalesforceError,
+            OSError,
+        ) as error:
+            print(f"Picklist enum audit failed: {error}", file=sys.stderr)
+            return 1
     return 1
 
 
@@ -187,6 +209,53 @@ def _run_snapshot(output_dir: Path) -> int:
     for object_name, object_records in records.items():
         print(f"{object_name}: {len(object_records)} rows")
     return 0
+
+
+def _run_audit_picklist_enums(*, output_fn: Callable[[str], None] = print) -> int:
+    """Connect to Salesforce and run the read-only picklist enum audit."""
+    _load_dotenv(Path(".env"))
+    dictionary_path = (
+        Path(__file__).with_name("data") / "salesforce_schema_dictionary.csv"
+    )
+    export_plan = load_export_plan(dictionary_path)
+    environment = dict(os.environ)
+    credentials = get_credentials(environment)
+    auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
+    result = PicklistEnumAuditService(SalesforceClient(auth)).audit(
+        build_queried_field_inventory(export_plan)
+    )
+    _print_picklist_audit(result, output_fn=output_fn)
+    return 0
+
+
+def _print_picklist_audit(
+    result: PicklistAuditResult,
+    *,
+    output_fn: Callable[[str], None] = print,
+) -> None:
+    """Print stable, grouped audit findings without creating a report file."""
+    cutoff = result.cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if not result.findings:
+        output_fn(
+            "Picklist enum audit complete: no missing values found "
+            f"in the audit window starting {cutoff}."
+        )
+        return
+
+    output_fn(f"Picklist enum audit (audit window starts {cutoff}):")
+    current_object = ""
+    for finding in result.findings:
+        if finding.object_name != current_object:
+            current_object = finding.object_name
+            output_fn(f"{current_object}:")
+        marker = "" if finding.has_enum else " [no enum catalog]"
+        output_fn(f"  {finding.field_name}{marker}:")
+        for value in finding.values:
+            output_fn(f"    - {value}")
+    output_fn(
+        "Audit complete. Missing and uncataloged values are informational; "
+        "no Salesforce data was changed."
+    )
 
 
 def _run_application_snapshot(

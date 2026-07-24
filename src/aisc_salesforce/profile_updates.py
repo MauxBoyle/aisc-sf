@@ -15,89 +15,24 @@ from .profile_update_subjects import (
     subject_has_profile_update,
     validate_subject_length,
 )
+from .queried_fields import (
+    CONTACT_MATCH_FIELDS,
+    SUBMISSION_FIELDS,
+)
+from .queried_fields import (
+    PROFILE_AUDIT_FIELDS as AUDIT_FIELDS,
+)
+from .queried_fields import (
+    PROFILE_CASE_FIELDS as CASE_FIELDS,
+)
 from .salesforce import SalesforceClient, SalesforceError
-
-AUDIT_FIELDS = [
-    "Id",
-    "Name",
-    "Cert_Audit_Date__c",
-    "Company_Profile_Change_Form__c",
-    "Explanation_for_Profile_Change_Form__c",
-    "Cert_Account__c",
-    "Cert_Account__r.Name",
-    "Cert_Contact__c",
-]
-
-SUBMISSION_FIELDS = [
-    "Id",
-    "Name",
-    "CreatedDate",
-    "Status__c",
-    "Account__c",
-    "Account__r.Name",
-    "Email__c",
-    "Name__c",
-    "Phone__c",
-    "Certification_ID__c",
-    "Effective_Date__c",
-    "Type__c",
-    "Revised_Company_Name__c",
-    "Revised_Company_Owner__c",
-    "Revised_Facility_Street__c",
-    "Revised_Facility_City__c",
-    "Revised_Facility_State__c",
-    "Revised_Facility_Zip__c",
-    "Revised_Facility_Country__c",
-    "Did_the_Cert_contact_change__c",
-    "Did_the_executive_manager_change__c",
-    "Will_you_change_personnel__c",
-    "Will_QMS_or_documentation_change__c",
-    "Existing_equipment_moved_to_new_facility__c",
-    "Will_new_equipment_be_purchased__c",
-    "Will_old_equipment_be_removed__c",
-    "Will_software_change__c",
-    "AP_First_Name__c",
-    "AP_Last_Name__c",
-    "AP_Title__c",
-    "AP_Email__c",
-    "AP_Phone__c",
-    "Cert_First_Name__c",
-    "Cert_Last_Name__c",
-    "Cert_Title__c",
-    "Cert_Email__c",
-    "Cert_Phone__c",
-    "Principal_First_Name__c",
-    "Principal_Last_Name__c",
-    "Principal_Title__c",
-    "Principal_Email__c",
-    "Principal_Phone__c",
-    "Quality_First_Name__c",
-    "Quality_Last_Name__c",
-    "QC_Title__c",
-    "Quality_Email__c",
-    "Quality_Phone__c",
-    "NY_First_Name__c",
-    "NY_Last_Name__c",
-    "NY_Email__c",
-    "NY_Phone__c",
-    "Other_Personnel_Notes__c",
-    "Comments__c",
-]
-
-CASE_FIELDS = [
-    "Id",
-    "CaseNumber",
-    "Subject",
-    "Status",
-    "IsClosed",
-    "CreatedDate",
-    "AccountId",
-    "ContactId",
-    "Origin",
-    "Label_new__c",
-    "Sub_Label__c",
-    "Description",
-]
+from .salesforce_enums import (
+    CaseLabel,
+    CaseOrigin,
+    CaseStatus,
+    CaseSubLabel,
+    ProfileChangeStatus,
+)
 
 SUMMARY_FIELDS = [
     ("Name__c", "Submitted By"),
@@ -256,7 +191,7 @@ class ProfileUpdateService:
         submissions = self.client.query_records(
             "Company_Profile_Change__c",
             SUBMISSION_FIELDS,
-            where="Status__c = 'New'",
+            where=f"Status__c = '{ProfileChangeStatus.NEW}'",
             order_by="CreatedDate ASC, Id ASC",
         )
 
@@ -321,9 +256,9 @@ class ProfileUpdateService:
                 self.client.update_record(
                     "Case",
                     _required_text(received, "Id", "Case ID"),
-                    {"Status": "Pending"},
+                    {"Status": CaseStatus.PENDING},
                 )
-                received["Status"] = "Pending"
+                received["Status"] = CaseStatus.PENDING
                 received["IsClosed"] = False
                 worked = True
             return (
@@ -342,8 +277,8 @@ class ProfileUpdateService:
             subject=subject,
             account_id=account_id,
             contact_id=audit.get("Cert_Contact__c"),
-            origin="Web",
-            label="Auditing",
+            origin=CaseOrigin.WEB,
+            label=CaseLabel.AUDITING,
         )
         case_id = self.client.create_record("Case", payload)
         created = self.client.get_record("Case", case_id, ["Id", "CaseNumber"])
@@ -437,8 +372,8 @@ class ProfileUpdateService:
             subject=subject,
             account_id=account_id,
             contact_id=contact_id,
-            origin="Participant Portal",
-            label="Participant Portal",
+            origin=CaseOrigin.PARTICIPANT_PORTAL,
+            label=CaseLabel.PARTICIPANT_PORTAL,
         )
         expected = self._newest(
             case
@@ -470,8 +405,8 @@ class ProfileUpdateService:
         subject: str,
         account_id: str,
         contact_id: Any,
-        origin: str,
-        label: str,
+        origin: CaseOrigin,
+        label: CaseLabel,
     ) -> dict[str, Any]:
         return {
             "Subject": subject,
@@ -479,10 +414,10 @@ class ProfileUpdateService:
             "Primary_Responder__c": self.primary_responder_id,
             "ContactId": contact_id,
             "AccountId": account_id,
-            "Status": "Pending",
+            "Status": CaseStatus.PENDING,
             "Origin": origin,
             "Label_new__c": label,
-            "Sub_Label__c": "Profile Change",
+            "Sub_Label__c": CaseSubLabel.PROFILE_CHANGE,
             "Description": "",
         }
 
@@ -508,7 +443,7 @@ class ProfileUpdateService:
             return None
         contacts = self.client.query_records(
             "Contact",
-            ["Id", "AccountId", "Email"],
+            list(CONTACT_MATCH_FIELDS),
             where=f"Email = '{escape_soql_string(email)}'",
             order_by="Id ASC",
         )
