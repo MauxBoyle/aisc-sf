@@ -107,6 +107,15 @@ uncataloged queried picklist) are informational and return `0`. Authentication,
 metadata, or query failures return `1`. The command writes no files and makes
 no Salesforce changes.
 
+### Salesforce picklist values in code
+
+When changing a Salesforce picklist value in Python, use the matching enum from
+`aisc_salesforce.salesforce_enums` rather than repeating the quoted value.
+New picklist fields must be added to both their enum and `SALESFORCE_ENUMS`,
+then covered by a focused test. See the [developer enum-catalog
+rule](docs/usage.md#developer-rule-use-the-salesforce-enum-catalog) for the
+complete workflow.
+
 ### Application snapshot
 
 `application-snapshot` reads Salesforce but does not create or update Salesforce

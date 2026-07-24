@@ -27,6 +27,38 @@ cp .env.example .env
 The CLI loads `.env` without replacing environment variables that are already
 set.
 
+## Developer rule: use the Salesforce enum catalog
+
+When adding or changing code that uses a Salesforce **picklist** value, use
+the matching `StrEnum` from `aisc_salesforce.salesforce_enums` instead of
+putting the value in quotes in the script. This applies to values used in
+SOQL filters, Python comparisons, and payloads sent to Salesforce.
+
+```python
+from .salesforce_enums import CaseStatus
+
+# Good: one named, reusable definition of the Salesforce value.
+where = f"Status = '{CaseStatus.PENDING}'"
+payload = {"Status": CaseStatus.CLOSED}
+
+# Avoid: a second, easy-to-mistype copy of the Salesforce value.
+where = "Status = 'Pending'"
+```
+
+If Salesforce has a picklist field that is not yet cataloged:
+
+1. Add a clearly named member to the appropriate enum in
+   `src/aisc_salesforce/salesforce_enums.py`.
+2. Add the `(object_name, field_name)` entry to `SALESFORCE_ENUMS` so the
+   audit can check it.
+3. Use that enum member in the workflow and add or update a focused test.
+4. Run `uv run pytest` and, when Salesforce credentials are available,
+   `uv run aisc_salesforce audit-picklist-enums`.
+
+This rule is for Salesforce picklist values, such as `"Pending"` or
+`"Participant Portal"`. Field API names (such as `"Status"`) and ordinary
+display text are not picklist values, so they do not belong in this catalog.
+
 ## Picklist enum audit command
 
 Run the manual, read-only audit with the standard Salesforce credentials:
