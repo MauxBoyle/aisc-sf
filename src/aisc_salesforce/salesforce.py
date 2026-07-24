@@ -21,6 +21,17 @@ REQUIRED_CREDENTIALS = (
 class SalesforceError(RuntimeError):
     """Salesforce rejected a request or could not be reached."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str | None = None,
+        salesforce_message: str | None = None,
+    ):
+        super().__init__(message)
+        self.error_code = error_code
+        self.salesforce_message = salesforce_message
+
 
 @dataclass(frozen=True)
 class SalesforceSession:
@@ -304,8 +315,11 @@ class SalesforceClient:
         except requests.RequestException as error:
             raise SalesforceError(f"Could not {action}: {error}") from error
         if not response.ok:
+            details, error_code, salesforce_message = _response_error(response)
             raise SalesforceError(
-                f"Salesforce failed to {action}: {_response_details(response)}"
+                f"Salesforce failed to {action}: {details}",
+                error_code=error_code,
+                salesforce_message=salesforce_message,
             )
         return response
 
@@ -318,14 +332,23 @@ class SalesforceClient:
 
 
 def _response_details(response: Any) -> str:
+    return _response_error(response)[0]
+
+
+def _response_error(response: Any) -> tuple[str, str | None, str | None]:
+    """Return readable and structured details from a Salesforce error response."""
     try:
         details = response.json()
     except ValueError:
-        return response.text or f"HTTP {response.status_code}"
+        return response.text or f"HTTP {response.status_code}", None, None
     if isinstance(details, list) and details:
         details = details[0]
     if isinstance(details, dict):
-        return str(
-            details.get("message") or details.get("error_description") or details
+        salesforce_message = details.get("message") or details.get("error_description")
+        error_code = details.get("errorCode") or details.get("error")
+        return (
+            str(salesforce_message or details),
+            str(error_code) if error_code else None,
+            str(salesforce_message) if salesforce_message else None,
         )
-    return str(details)
+    return str(details), None, None

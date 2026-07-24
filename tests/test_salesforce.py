@@ -303,3 +303,26 @@ def test_write_and_feed_http_errors_are_wrapped():
     )
     with pytest.raises(SalesforceError, match="post Chatter.*server broke"):
         feed_client.post_feed_message("500-case", "Test")
+
+
+def test_salesforce_error_preserves_duplicate_rule_details():
+    session = Session(
+        [
+            Response(
+                [
+                    {
+                        "message": "Use one of these records?",
+                        "errorCode": "DUPLICATES_DETECTED",
+                    }
+                ],
+                ok=False,
+            )
+        ]
+    )
+    client = SalesforceClient(SalesforceSession("https://example", "token"), session)
+
+    with pytest.raises(SalesforceError, match="Use one of these") as caught:
+        client.create_record("Contact", {"LastName": "Smith"})
+
+    assert caught.value.error_code == "DUPLICATES_DETECTED"
+    assert caught.value.salesforce_message == "Use one of these records?"

@@ -4,6 +4,11 @@ from datetime import UTC, datetime
 
 import pytest
 
+from aisc_salesforce.contact_resolution import (
+    ContactResolution,
+    ContactResolutionClassification,
+    ContactSource,
+)
 from aisc_salesforce.process_profile_updates import (
     ActionResult,
     ActionStatus,
@@ -46,6 +51,31 @@ def staged_row(**changes):
     )
     row.update(changes)
     return row
+
+
+def staged_resolution(
+    *,
+    email="sam@example.com",
+    sources=None,
+    submitted=None,
+    classification=ContactResolutionClassification.CREATE_NEW,
+    candidates=None,
+    selected=None,
+):
+    normalized = email.strip().casefold()
+    local, domain = normalized.rsplit("@", 1)
+    resolution = ContactResolution(
+        classification,
+        normalized,
+        f"{local.replace('.', '')}@{domain}",
+        sources=list(sources or []),
+        candidates=list(candidates or []),
+        selected_contact=selected,
+        reason="test resolution",
+        confidence="test",
+        submitted=dict(submitted or {}),
+    )
+    return json.dumps([resolution.as_dict()])
 
 
 def source_record(**changes):
@@ -133,6 +163,7 @@ class FakeClient:
         self.created = []
         self.updated = []
         self.fail_update = None
+        self.fail_create = None
 
     def query_records(self, object_name, fields, *, where=None, order_by=None):
         self.queries.append((object_name, fields, where, order_by))
@@ -158,6 +189,10 @@ class FakeClient:
         return dict(self.records[key])
 
     def create_record(self, object_name, values):
+        if self.fail_create is not None:
+            error = self.fail_create
+            self.fail_create = None
+            raise error
         record_id = f"created-{len(self.created) + 1}"
         self.created.append((object_name, dict(values)))
         self.records[(object_name, record_id)] = {"Id": record_id, **values}
@@ -256,9 +291,7 @@ def test_workflow_creates_cases_then_stages_and_reads_the_published_csv(tmp_path
     "missing_column",
     ["has_contact_derived_values", "has_no_update_content"],
 )
-def test_published_csv_requires_new_staging_metadata_columns(
-    tmp_path, missing_column
-):
+def test_published_csv_requires_new_staging_metadata_columns(tmp_path, missing_column):
     columns = [column for column in CSV_COLUMNS if column != missing_column]
     csv_path = tmp_path / "profile_updates.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as output:
@@ -403,10 +436,7 @@ def test_each_staged_row_has_a_continue_checkpoint_and_heading(tmp_path, answer)
                     "Note: contact details were supplemented from available "
                     "contact information."
                 ),
-                (
-                    "Note: this combined profile update has no submitted "
-                    "update content."
-                ),
+                ("Note: this combined profile update has no submitted update content."),
             ],
         ),
         ({}, []),
@@ -858,6 +888,151 @@ def test_valid_contact_creation_precedes_field_and_role_decisions(tmp_path):
         "Email: new.person@example.com\n"
         "Phone: (blank)"
     ) in "\n".join(output)
+
+
+def test_new_contract_reuses_submitter_role_contact_and_assigns_case(tmp_path):
+    client = FakeClient()
+    feeder = Feeder(["apply automatically", "apply automatically", "yes"])
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=feeder,
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+    sources = [
+        ContactSource("submitter", submission_id="submission-1"),
+        ContactSource("role", role="certification", submission_id="submission-1"),
+    ]
+    submitted = {
+        "first_name": "Sam",
+        "last_name": "Submitter",
+        "email": "sam@example.com",
+        "phone": "312-555-0101",
+    }
+    row = staged_row(
+        certification_first_name="Sam",
+        certification_last_name="Submitter",
+        certification_email="sam@example.com",
+        certification_phone="312-555-0101",
+        contact_resolutions=staged_resolution(
+            sources=sources,
+            submitted=submitted,
+        ),
+    )
+
+    result = processor.review([row], tmp_path)
+
+    assert client.created == [
+        (
+            "Contact",
+            {
+                "AccountId": "account-1",
+                "FirstName": "Sam",
+                "LastName": "Submitter",
+                "Email": "sam@example.com",
+                "Phone": "312-555-0101",
+            },
+        )
+    ]
+    assert ("Case", "case-1", {"ContactId": "created-1"}) in client.updated
+    assert (
+        "Account",
+        "account-1",
+        {"Cert_Certification_Contact__c": "created-1"},
+    ) in client.updated
+    entries = [
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    contact_create = next(
+        entry for entry in entries if entry["action"] == "create Contact"
+    )
+    case_assignment = next(
+        entry
+        for entry in entries
+        if entry["action"] == "assign created submitter Contact to Case"
+    )
+    role_assignment = next(
+        entry for entry in entries if entry["field"] == "Cert_Certification_Contact__c"
+    )
+    assert contact_create["comparison_key"] == "sam@example.com"
+    assert case_assignment["target_record_id"] == "case-1"
+    assert role_assignment["selected_contact"]["Id"] == "created-1"
+
+
+def test_duplicate_create_can_recover_with_an_alternate_email_contact(tmp_path):
+    alternate = {
+        "Id": "alternate-contact",
+        "AccountId": "different-account",
+        "FirstName": "Existing",
+        "LastName": "Person",
+        "Title": "",
+        "Email": "other@example.com",
+        "Phone": "",
+    }
+    client = FakeClient(contacts=[alternate])
+    client.fail_create = SalesforceError(
+        "Salesforce failed to create Contact: Use one of these records?",
+        error_code="DUPLICATES_DETECTED",
+        salesforce_message="Use one of these records?",
+    )
+    feeder = Feeder(
+        [
+            "apply automatically",
+            "3",
+            "other@example.com",
+            "apply automatically",
+            "yes",
+        ]
+    )
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=feeder,
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+    row = staged_row(
+        certification_first_name="New",
+        certification_last_name="Person",
+        certification_email="new.person@example.com",
+        contact_resolutions=staged_resolution(
+            email="new.person@example.com",
+            sources=[
+                ContactSource(
+                    "role",
+                    role="certification",
+                    submission_id="submission-1",
+                )
+            ],
+            submitted={
+                "first_name": "New",
+                "last_name": "Person",
+                "email": "new.person@example.com",
+            },
+        ),
+    )
+
+    result = processor.review([row], tmp_path)
+
+    assert (
+        "Account",
+        "account-1",
+        {"Cert_Certification_Contact__c": "alternate-contact"},
+    ) in client.updated
+    entries = [
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(
+        entry["action"] == "Salesforce duplicate rule blocked Contact create"
+        for entry in entries
+    )
+    recovered = next(
+        entry
+        for entry in entries
+        if entry["action"] == "use alternate-email Contact after duplicate failure"
+    )
+    assert recovered["selected_contact"]["Id"] == "alternate-contact"
 
 
 def test_duplicate_exact_email_matches_are_audited_and_keep_case_retryable(tmp_path):

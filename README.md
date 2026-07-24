@@ -292,8 +292,11 @@ uv run aisc_salesforce stage-profile-updates \
   --output-dir /secure/staged-profile-updates
 ```
 
-Submissions are grouped by Account ID and the submitter email after trimming
-and case-insensitive comparison. Later nonblank values replace earlier values,
+Submissions are grouped by Account ID and a normalized submitter-email
+comparison key. Email values are trimmed and lowercased, then dots are removed
+from the local-part for comparison on every domain. Invalid basic email
+structures are preserved for review and produce a warning. Later nonblank
+values replace earlier values,
 except that every nonblank Comments and Other Personnel Notes value is
 preserved in submission order and joined with a newline. Different emails stay
 separate, and every blank-email submission stays separate and receives a
@@ -304,11 +307,28 @@ The CSV has shared submission and Account columns, Key Data columns, and
 prefixed role columns for `certification_`, `principal_`, `accounting_`,
 `quality_`, and `new_york_`. Role columns preserve submitted values and record
 the proposed resolution action, Contact ID, resolution source, source
-submission/role, and any role-specific warning. New York does not have a title
-column. When an existing Contact is resolved, a missing title or phone is
+submission/role, and any role-specific warning. These readable columns remain
+for compatibility. The authoritative `contact_resolutions` column is a JSON
+list with one entry per distinct comparison key. Each entry records its
+`classification` (`use_existing`, `create_new`, `likely_typo`, or `ambiguous`),
+normalized email, comparison key, submitter/role sources, candidate and
+selected Contacts, reason, confidence, warnings, and submitted details.
+New York does not have a title column. When an existing Contact is resolved, a
+missing title or phone is
 filled from that Contact where possible. Repeating the same contact information
 in several roles does not create a warning, but conflicting emails for the same
 submitted name are treated as ambiguous.
+
+Contact searches prefer the Account's **family accounts**: the target Account,
+its parent Account, and its **sibling accounts** that have the same parent. A
+root Account with no parent has only itself in its family. Exact normalized and
+unique dot-insensitive email matches are safe. Name-derived local-parts use
+normalized first/last names and initials. Differing domains, generic mailboxes,
+multiple candidates, external Contacts, and other weak evidence require an
+operator choice. Only one insertion, deletion, substitution, or adjacent
+transposition is presented as a likely typo, and it still requires
+confirmation. A trailing square-bracket suffix on a Salesforce Contact name is
+ignored only while comparing; the original value remains visible and audited.
 
 `has_key_updates` is `true` only when at least one source has the exact
 Salesforce `Type__c` value `"Key Data"`. Populated Key Data fields remain
@@ -361,7 +381,8 @@ when the combined update has no submitted update content. At the Continue/Quit
 checkpoint, press Enter, type `C`, or type `Continue` to review that row. Type
 `Q` or `Quit` to stop safely. Only this checkpoint has a default; change
 decisions always require an explicit answer. Published CSV files must include
-both new metadata columns; older staged files fail validation.
+the complete current contract, including `contact_resolutions`; older staged
+files fail validation.
 
 Each real field change accepts a shortcut or its complete decision phrase:
 
@@ -373,21 +394,36 @@ Each real field change accepts a shortcut or its complete decision phrase:
 Shortcuts and phrases are case-insensitive. Audit entries always store the
 complete phrase.
 
-Already-current values are recorded as no-ops and do not prompt. For each
-submitted Contact role, the command searches all Salesforce Contacts for the
-exact submitted email address. One match is fetched and each mismatched
-submitted field is reviewed separately. No match leads to an explicit Contact
-creation decision. In both cases, assigning the resolved Contact to the
-Account role is a separate decision. Potential-contact lists are never shown.
-More than one exact-email match is audited as an error; the Case stays Pending
-and its source submissions remain open for a safe retry. A Contact without the
-Salesforce-required Last Name cannot be created automatically.
+All staged-row checkpoints are completed before Salesforce changes begin.
+Every distinct submitter or role email is then resolved once for the whole Case
+batch. Ambiguous matches show candidates and allow the reviewer to select one,
+create a new Contact, or ignore only that email. Likely typos show the suggested
+Contact and comparison key and require confirmation. Approved Contact creates
+and field updates finish first, non-role Account changes follow, and Account
+role assignments happen last. Several rows or roles with the same comparison
+key reuse the same result. A role without an email keeps its current
+Account-role Contact and cannot create one automatically.
+
+When a submitter email is also used by a role, the richer role details are used
+for Contact work. Otherwise the submitter name is split at its final space.
+Creating a submitter Contact still requires the normal explicit decision. A
+Contact created by that decision is assigned to `Case.ContactId` and both
+writes are audited separately. Merely matching an existing submitter Contact
+does not change `Case.ContactId`.
 
 Before individual fields are reviewed, an existing Contact's name, title,
 email, and phone are shown together. The submitted values are shown together
 before a new-Contact decision. Account-role proposals show current and proposed
 Contact names and emails; Salesforce Contact IDs remain internal to writes and
 the audit trail instead of appearing in decision prompts.
+
+If a Contact create is blocked by Salesforce with `DUPLICATES_DETECTED`, the
+structured error is retained and the reviewer can create manually, update an
+existing Contact manually, use a Contact with another email, or ignore that
+entry. Manual recovery is verified by querying the normalized submitted email;
+the alternate-email choice queries the entered email. Multiple results always
+require an explicit candidate selection. Unrelated Salesforce errors remain
+fatal and leave the Case retryable.
 
 Comments, Other Personnel notes, Key Update answers, effective dates, warnings,
 and same-day Account History are shown once at the beginning of each Case
@@ -403,6 +439,10 @@ response_emails.txt
 ```
 
 The JSON Lines audit is flushed after every decision and Salesforce result.
+Contact events include classification, comparison key, candidates, selected
+Contact, reason, confidence, and warnings. Operator selections, duplicate
+recovery, ignored entries, Contact writes, Case Contact assignment, and role
+assignments are separate events.
 The response file contains one generated paragraph per submitter email.
 Account-information changes keep the `ITEM: NEW INFORMATION` and
 `Replaces OLD INFORMATION` format. Each submitted Contact role is consolidated
