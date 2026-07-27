@@ -143,6 +143,26 @@ the resulting rows atomically in a timestamped directory. Rows include
 blocking-safe Case match fields plus Key Update presence and earliest-date
 metadata.
 
+## Contact resolution
+
+::: aisc_salesforce.contact_resolution
+    options:
+      show_root_heading: true
+      members:
+        - ContactResolutionClassification
+        - ContactSource
+        - ContactResolution
+        - normalize_email
+        - family_account_ids
+        - name_local_part_patterns
+        - is_single_edit_or_transposition
+        - resolve_contact
+
+The Contact-resolution helpers contain the deterministic matching rules used
+by both staging and interactive review. They do not access Salesforce directly,
+which keeps normalization, family matching, and likely-typo behavior easy to
+test.
+
 ## Interactive Profile Update processing
 
 ::: aisc_salesforce.process_profile_updates

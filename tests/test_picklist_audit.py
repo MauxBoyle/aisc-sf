@@ -133,7 +133,7 @@ def test_history_objects_filter_on_created_date(object_name):
             self, queried_object, fields, *, where, order_by
         ):
             self.query = (queried_object, fields, where, order_by)
-            return [{"Field": "BillingCountry"}]
+            return [{"Field": "UnknownHistoryField"}]
 
     client = HistoryClient()
     result = PicklistEnumAuditService(
@@ -147,7 +147,7 @@ def test_history_objects_filter_on_created_date(object_name):
         "CreatedDate >= 2024-07-24T15:30:00Z",
         "Id ASC",
     )
-    assert result.findings[0].values == ("BillingCountry",)
+    assert result.findings[0].values == ("UnknownHistoryField",)
 
 
 def test_non_history_objects_filter_on_last_modified_date():

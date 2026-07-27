@@ -12,6 +12,14 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .contact_resolution import (
+    ContactResolution,
+    ContactSource,
+    family_account_ids,
+    merge_resolution,
+    normalize_email,
+    resolve_contact,
+)
 from .profile_update_subjects import subject_has_profile_update
 from .profile_updates import escape_soql_string
 from .queried_fields import (
@@ -155,6 +163,7 @@ SHARED_COLUMNS = [
     "submitter_name",
     "submitter_email",
     "submitter_phone",
+    "contact_resolutions",
     "comments",
     "personnel_notes",
     "has_contact_derived_values",
@@ -246,12 +255,13 @@ class ProfileUpdateStagingService:
         parent_ids = _unique_text_values(
             account.get("ParentId") for account in accounts
         )
+        parents = self._query_accounts("Id", parent_ids)
         siblings = self._query_accounts("ParentId", parent_ids)
         all_accounts_by_id = dict(accounts_by_id)
-        for sibling in siblings:
-            sibling_id = _clean_text(sibling.get("Id"))
-            if sibling_id:
-                all_accounts_by_id.setdefault(sibling_id, sibling)
+        for family_account in [*parents, *siblings]:
+            family_account_id = _clean_text(family_account.get("Id"))
+            if family_account_id:
+                all_accounts_by_id.setdefault(family_account_id, family_account)
 
         contacts = self._query_contacts(list(all_accounts_by_id.values()))
         cases = self._query_cases(requested_account_ids)
@@ -422,6 +432,14 @@ class ProfileUpdateStagingService:
                 has_contact_derived_values or role_has_derived_values
             )
 
+        row["contact_resolutions"] = _build_contact_resolutions(
+            row,
+            merged_roles,
+            account,
+            list(all_accounts_by_id.values()),
+            contacts,
+            warnings,
+        )
         row["has_contact_derived_values"] = (
             "true" if has_contact_derived_values else "false"
         )
@@ -563,13 +581,99 @@ class ProfileUpdateStagingService:
         return has_derived_values
 
 
+def _build_contact_resolutions(
+    row: dict[str, str],
+    roles: list[MergedRole],
+    account: dict[str, Any] | None,
+    family_accounts: list[dict[str, Any]],
+    contacts: list[dict[str, Any]],
+    row_warnings: list[str],
+) -> str:
+    """Build the authoritative email-keyed Contact-resolution staging value."""
+    account_ids = family_account_ids(account, family_accounts)
+    source_ids = json.loads(row["source_submission_ids"])
+    entries: list[tuple[str, ContactSource, dict[str, str]]] = []
+
+    submitter_first, submitter_last = _split_person_name(row["submitter_name"])
+    if row["submitter_email"]:
+        entries.append(
+            (
+                row["submitter_email"],
+                ContactSource(
+                    "submitter",
+                    submission_id=_clean_text(source_ids[-1] if source_ids else ""),
+                ),
+                {
+                    "first_name": submitter_first,
+                    "last_name": submitter_last,
+                    "email": row["submitter_email"],
+                    "phone": row["submitter_phone"],
+                },
+            )
+        )
+
+    for role in roles:
+        email = role.values.get("email", "")
+        if not email:
+            continue
+        entries.append(
+            (
+                email,
+                ContactSource(
+                    "role",
+                    role=role.definition.prefix,
+                    submission_id=role.source_submission_id,
+                ),
+                dict(role.values),
+            )
+        )
+
+    resolutions: dict[str, ContactResolution] = {}
+    invalid_index = 0
+    for email, source, submitted in entries:
+        normalized, comparison_key, _ = normalize_email(email)
+        resolution = resolve_contact(
+            normalized,
+            contacts,
+            account_ids,
+            sources=[source],
+            submitted=submitted,
+        )
+        row_warnings.extend(
+            warning for warning in resolution.warnings if warning not in row_warnings
+        )
+        key = comparison_key
+        if not key:
+            invalid_index += 1
+            key = f"invalid:{invalid_index}:{normalized}"
+        if key in resolutions:
+            merge_resolution(resolutions[key], resolution)
+            if source.kind == "role":
+                resolutions[key].submitted.update(
+                    {
+                        field_name: value
+                        for field_name, value in submitted.items()
+                        if value
+                    }
+                )
+        else:
+            resolutions[key] = resolution
+
+    return json.dumps(
+        [resolution.as_dict() for resolution in resolutions.values()],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
 def _group_submissions(
     submissions: list[dict[str, Any]],
 ) -> list[list[dict[str, Any]]]:
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for index, record in enumerate(submissions):
         account_id = _clean_text(record.get("Account__c"))
-        email = _normalized(record.get("Email__c"))
+        normalized_email, comparison_key, _ = normalize_email(record.get("Email__c"))
+        email = comparison_key or normalized_email
         record_id = _clean_text(record.get("Id")) or str(index)
         account_key = account_id or f"blank-account:{record_id}"
         email_key = email or f"blank-email:{record_id}"
@@ -586,9 +690,7 @@ def _merge_records(records: list[dict[str, Any]]) -> dict[str, Any]:
     return merged
 
 
-def _collect_submitted_values(
-    records: list[dict[str, Any]], field_name: str
-) -> str:
+def _collect_submitted_values(records: list[dict[str, Any]], field_name: str) -> str:
     """Join every nonblank submitted value in deterministic submission order."""
     return "\n".join(
         _display_value(record.get(field_name))
@@ -1048,6 +1150,16 @@ def _display_value(value: Any) -> str:
 
 def _clean_text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+def _split_person_name(value: Any) -> tuple[str, str]:
+    """Split a submitter name at the final space."""
+    parts = _clean_text(value).rsplit(maxsplit=1)
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    if parts:
+        return "", parts[0]
+    return "", ""
 
 
 def _normalized(value: Any) -> str:

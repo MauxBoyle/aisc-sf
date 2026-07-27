@@ -27,6 +27,38 @@ cp .env.example .env
 The CLI loads `.env` without replacing environment variables that are already
 set.
 
+## Developer rule: use the Salesforce enum catalog
+
+When adding or changing code that uses a Salesforce **picklist** value, use
+the matching `StrEnum` from `aisc_salesforce.salesforce_enums` instead of
+putting the value in quotes in the script. This applies to values used in
+SOQL filters, Python comparisons, and payloads sent to Salesforce.
+
+```python
+from .salesforce_enums import CaseStatus
+
+# Good: one named, reusable definition of the Salesforce value.
+where = f"Status = '{CaseStatus.PENDING}'"
+payload = {"Status": CaseStatus.CLOSED}
+
+# Avoid: a second, easy-to-mistype copy of the Salesforce value.
+where = "Status = 'Pending'"
+```
+
+If Salesforce has a picklist field that is not yet cataloged:
+
+1. Add a clearly named member to the appropriate enum in
+   `src/aisc_salesforce/salesforce_enums.py`.
+2. Add the `(object_name, field_name)` entry to `SALESFORCE_ENUMS` so the
+   audit can check it.
+3. Use that enum member in the workflow and add or update a focused test.
+4. Run `uv run pytest` and, when Salesforce credentials are available,
+   `uv run aisc_salesforce audit-picklist-enums`.
+
+This rule is for Salesforce picklist values, such as `"Pending"` or
+`"Participant Portal"`. Field API names (such as `"Status"`) and ordinary
+display text are not picklist values, so they do not belong in this catalog.
+
 ## Picklist enum audit command
 
 Run the manual, read-only audit with the standard Salesforce credentials:
@@ -439,9 +471,13 @@ failed. A failed write leaves no partially published snapshot.
 
 ### Merge rules
 
-Rows are grouped by Account ID plus a trimmed, case-insensitive submitter email.
-Submissions with different Account IDs or emails stay separate. Each submission
-with a blank email also stays separate and receives a warning.
+Rows are grouped by Account ID plus a submitter-email comparison key. Email
+values are trimmed and lowercased, and dots are removed from the local-part for
+comparison on every domain. For example, `a.smith@example.com` and
+`asmith@example.com` share a key. Submissions with different Account IDs or
+comparison keys stay separate. Each submission with a blank email also stays
+separate and receives a warning. A nonblank value that fails the basic email
+structure check is preserved and warned about instead of being silently fixed.
 
 Within a group, submissions are ordered by `CreatedDate` and `Id`. Later
 nonblank values replace earlier values, while blank later values do not erase
@@ -462,6 +498,7 @@ Each row contains these groups of columns:
 |---|---|
 | Source and dates | `source_submission_ids`, `source_submission_names`, `earliest_submission_date`, `latest_submission_date` |
 | Account and submitter | `account_id`, `account_name`, `certification_id`, `submitter_name`, `submitter_email`, `submitter_phone` |
+| Contact resolution | `contact_resolutions` JSON list |
 | Notes and review | `comments`, `personnel_notes`, `has_contact_derived_values`, `has_no_update_content`, `has_warnings`, `warnings` |
 | Key Data | `effective_date`, revised company name/owner, five revised address columns, and `key_answers` |
 | Contact roles | Columns prefixed with `certification_`, `principal_`, `accounting_`, `quality_`, and `new_york_` |
@@ -477,7 +514,19 @@ contains its submitted name, title, email, and phone fields, followed by:
 - `warning`
 
 New York has no submitted title field. Completely blank roles have completely
-blank role columns.
+blank role columns. The prefixed resolution columns are readable projections
+kept for compatibility; `contact_resolutions` is the authoritative contract.
+
+Each JSON entry represents one distinct comparison key shared by any submitter
+and role occurrences. It contains:
+
+- `classification`: `use_existing`, `create_new`, `likely_typo`, or
+  `ambiguous`
+- `normalized_email` and `comparison_key`
+- `sources`, identifying submitter and role occurrences
+- `candidates` and `selected_contact`
+- `reason`, `confidence`, and `warnings`
+- `submitted`, containing the best available Contact details
 
 Resolution actions are `update_contact` for an exact match or a title/phone
 update, `change_email` for a new email applied to the Account's current role
@@ -488,18 +537,23 @@ warning for human review. Resolution sources show whether the match came from
 another submitted role, submitted data for a new Contact, an Account Contact, a
 sibling Account Contact, or the Account's current role lookup.
 
-Contact text is compared after trimming and case folding. The resolver does not
-guess nicknames. Name searches stop at the first tier containing candidates:
-other submitted roles, the current Account's Contacts, then Contacts belonging
-to sibling Accounts with the same Parent. Multiple candidates at that first
-tier are reported as ambiguous. Repeated identical contact information in
-several submitted roles counts as one candidate; the same name paired with
-conflicting emails remains ambiguous. When a Contact is resolved, missing title
-and phone values are filled from that Contact where possible. Missing title or
-phone alone does not cause a warning. `has_contact_derived_values` is `true`
-only when a nonblank title or phone was actually copied from another submitted
-role or a Salesforce Contact. Values submitted directly for that role do not
-set the flag.
+The target Account's **family accounts** are the target itself, its parent, and
+its **sibling accounts** with the same parent. A root Account without a parent
+has a family containing only itself. Contacts from this family are preferred.
+One exact normalized or dot-insensitive family match can resolve directly.
+Ties, matches mixed with external Accounts, generic/shared mailbox names,
+differing domains, and weaker name-only evidence require operator review.
+
+Name-derived local-parts use normalized first and last names and initials. A
+trailing square-bracket suffix on a Salesforce Contact name is removed only
+for comparison; the original Salesforce text stays in displays and audit
+events. The only likely-typo rule is one insertion, deletion, substitution, or
+adjacent transposition. Even that classification requires confirmation; the
+resolver does not guess nicknames or use a broad fuzzy-score threshold.
+Repeated occurrences with the same comparison key resolve once. When a Contact
+is resolved, missing title and phone values are filled where possible.
+`has_contact_derived_values` is `true` only when a nonblank title or phone was
+actually copied from another submitted role or a Salesforce Contact.
 
 `has_no_update_content` is `true` when the grouped raw submissions contain no
 Key Data fields, role fields, Comments, or Other Personnel Notes. Account,
@@ -511,12 +565,11 @@ flag off.
 
 !!! warning
 
-    The interactive processor requires `has_contact_derived_values` and
-    `has_no_update_content` in addition to the existing CSV columns. Older
-    staged CSV files fail validation. It also inspects `has_warnings` and
-    `warnings` before acting on a row. The `warnings` field is readable,
-    newline-separated text; role warnings are also copied into the matching
-    prefixed `warning` column.
+    The interactive processor validates the complete current CSV contract,
+    including `contact_resolutions`, `has_contact_derived_values`, and
+    `has_no_update_content`. It also inspects `has_warnings` and `warnings`
+    before acting on a row. Generate a fresh CSV for each processing run rather
+    than migrating an older staged file.
 
 Case preparation adds `case_id`, `case_number`, `case_status`, and
 `case_match_status`. A row is processable only when its match status is
@@ -600,21 +653,28 @@ audit always stores the complete phrase.
 An already-current value is an audited no-op. It does not prompt and does not
 appear in response-email text.
 
-For every submitted Contact role with an email address, the command searches
-all Salesforce Contacts using that exact email:
+All row checkpoints are shown before the first Salesforce write. Processing
+then uses these ordered phases:
 
-- With one match, it fetches that Contact and compares every submitted
-  nonblank field. Each mismatch is a separate three-decision proposal.
-- With no match, it asks for one explicit decision about creating a Contact
-  under the Account. Automatic creation requires a Last Name; incomplete data
-  must be completed manually or declined.
-- With more than one match, it does not guess. The ambiguity is written as a
-  failed audit entry, processing for the Case stops, the Case stays Pending,
-  and the source Profile Updates stay open.
+1. Resolve every distinct submitter and role comparison key for the Case.
+2. Show ambiguous candidates and collect all operator choices. A reviewer may
+   select one, create a Contact, or ignore only that email. A likely typo shows
+   its suggested Contact and corrected comparison and requires confirmation.
+3. Finish all approved Contact creates and field updates.
+4. Process non-role Account changes.
+5. Assign resolved Contacts to Account roles.
 
-No candidate list or Contact-selection prompt is shown. After a Contact is
-created or an exact match is reviewed, assigning that Contact to the Account
-role is always handled as a separate proposal.
+The same resolved Contact is reused when several roles or rows share a key.
+Roles without email keep their current Account-role Contact; they cannot create
+a new Contact automatically. Ignoring an email skips only its resolutions and
+roles.
+
+When submitter and role email keys match, richer role details take precedence.
+Otherwise `Name__c` is split at the final space for possible Contact creation.
+Creation still requires an explicit decision. If that decision creates the
+submitter Contact, its ID is assigned to `Case.ContactId`; the Contact create
+and Case update are audited separately. Matching an existing submitter Contact
+alone never changes `Case.ContactId`.
 
 For an exact match, the Contact's current name, title, email, and phone are
 displayed together before its individual fields. For a new Contact, all
@@ -622,6 +682,26 @@ submitted details are displayed together before the creation decision.
 Account-role proposals use friendly Contact names and emails for the current
 and proposed values. Salesforce IDs remain available internally for record
 writes and audit entries, but are not exposed in decision prompts.
+
+### Duplicate-create recovery
+
+Salesforce [duplicate rules](https://help.salesforce.com/s/articleView?id=sales.duplicate_rules_overview.htm&language=en_US&type=5)
+can block an API create with `DUPLICATES_DETECTED`. The error code and
+Salesforce message are retained.
+Instead of ending the Case immediately, the reviewer chooses one of four
+actions:
+
+1. Create the Contact manually.
+2. Update an existing Contact manually.
+3. Use a Contact with another email.
+4. Ignore this entry.
+
+Manual create and update choices are verified by querying the normalized
+submitted email. The alternate-email choice queries the entered email.
+Multiple matches show candidates and require an explicit selection. The
+verified Contact can continue to later role assignment. Ignore affects only
+the shared email key. Other Salesforce errors are still fatal and leave the
+Case and source submissions retryable.
 
 ### Output and finalization
 
@@ -655,7 +735,12 @@ After a resolved batch, source Profile Updates are set to `Closed`. Answering
 so the Case is also set to `Closed`. If a response is not sent, the source
 records are closed and the Case stays `Pending`.
 
-On interruption, a Salesforce failure, or a manual value that does not verify,
+Contact audit objects include classification, comparison key, candidates,
+selected Contact, reason, confidence, and warnings. Operator selections,
+duplicate recovery, ignored entries, Contact writes, Case Contact assignment,
+and later Account-role assignments are separate, immediately flushed events.
+
+On interruption, an unrelated Salesforce failure, or a manual value that does not verify,
 the audit is flushed, unfinalized source Profile Updates stay open, the Case is
 kept Pending, and the command exits nonzero. Retrying restages open records.
 Values applied before the interruption are fetched again and recorded as

@@ -144,6 +144,44 @@ def test_merges_same_account_and_email_with_later_nonblank_values():
     assert contact_query[1] == CONTACT_FIELDS
 
 
+def test_staging_publishes_deduplicated_contact_resolution_contract():
+    record = submission(
+        Email__c=" Alex.Smith@Example.com ",
+        Name__c="Submitter Name",
+        Cert_First_Name__c="Alex",
+        Cert_Last_Name__c="Smith",
+        Cert_Email__c="alexsmith@example.com",
+        Principal_Email__c="ALEX.SMITH@example.com",
+    )
+
+    result, _ = stage([record], accounts=[account(ParentId="")])
+
+    resolutions = json.loads(result.rows[0]["contact_resolutions"])
+    assert len(resolutions) == 1
+    resolution = resolutions[0]
+    assert resolution["normalized_email"] == "alex.smith@example.com"
+    assert resolution["comparison_key"] == "alexsmith@example.com"
+    assert resolution["classification"] == "create_new"
+    assert {source["kind"] for source in resolution["sources"]} == {
+        "submitter",
+        "role",
+    }
+    assert {source["role"] for source in resolution["sources"]} >= {
+        "certification",
+        "principal",
+    }
+    assert resolution["submitted"]["first_name"] == "Alex"
+    assert resolution["submitted"]["last_name"] == "Smith"
+
+
+def test_staging_queries_the_parent_account_as_part_of_the_family():
+    _, client = stage([submission()], accounts=[account()])
+
+    account_queries = [query for query in client.queries if query[0] == "Account"]
+    assert any(query[2] == "Id IN ('parent-1')" for query in account_queries)
+    assert any(query[2] == "ParentId IN ('parent-1')" for query in account_queries)
+
+
 def test_merges_all_nonblank_notes_in_submission_order():
     records = [
         submission(
@@ -215,6 +253,22 @@ def test_keeps_different_emails_separate_and_blank_emails_independent():
     assert len(blank_rows) == 2
     assert all(row["has_warnings"] == "true" for row in blank_rows)
     assert all("blank submitter email" in row["warnings"].lower() for row in blank_rows)
+
+
+def test_submitter_emails_that_only_differ_by_dots_share_one_group():
+    records = [
+        submission(Id="one", Email__c="alex.smith@example.com"),
+        submission(
+            Id="two",
+            CreatedDate="2026-07-16T14:30:00.000+0000",
+            Email__c="ALEXSMITH@example.com",
+        ),
+    ]
+
+    result, _ = stage(records, accounts=[account(ParentId="")])
+
+    assert len(result.rows) == 1
+    assert json.loads(result.rows[0]["source_submission_ids"]) == ["one", "two"]
 
 
 def test_different_accounts_stay_separate_and_merged_row_can_have_key_and_role_data():
