@@ -410,15 +410,42 @@ Each real field change accepts a shortcut or its complete decision phrase:
 Shortcuts and phrases are case-insensitive. Audit entries always store the
 complete phrase.
 
-All staged-row checkpoints are completed before Salesforce changes begin.
-Every distinct submitter or role email is then resolved once for the whole Case
-batch. Ambiguous matches show candidates and allow the reviewer to select one,
-create a new Contact, or ignore only that email. Likely typos show the suggested
-Contact and comparison key and require confirmation. Approved Contact creates
-and field updates finish first, non-role Account changes follow, and Account
-role assignments happen last. Several rows or roles with the same comparison
-key reuse the same result. A role without an email keeps its current
-Account-role Contact and cannot create one automatically.
+All staged-row checkpoints are completed before Salesforce changes begin. The
+review then prints three explicit sections in order: `Contact Updates`,
+`Account Updates`, and `Role Links`.
+
+The Contact section reloads every source Profile Update from Salesforce and
+collects only nonblank Contact values that were explicitly submitted for the
+submitter or a role. Staging fallbacks and old Salesforce values can help
+identify a Contact, but they are never treated as proposed changes. Salesforce
+Contact IDs are the primary identity, including the current Account-role
+lookup for partial or changed-email submissions. When no ID identifies the
+person, the existing conservative email matching rules still decide whether an
+exact Contact can be used, a new Contact can be created, or an operator choice
+is required.
+
+All values for the same Contact are reconciled together. Repeated normalized
+values collapse into one proposal with all of their sources. Distinct nonblank
+values are a conflict—even when two submissions supplied them for the same
+role. The reviewer sees every candidate value and its submission/role sources
+side by side, then must choose a candidate or `current` for each conflicting
+field. Choosing `current` removes that field from the eventual Salesforce
+write. Every conflict is resolved before the first Contact write.
+
+After reconciliation, one Contact-level table shows each current value,
+reconciled value, and source. One `A`, `M`, or `N` decision applies to the
+complete Contact. An automatic decision makes at most one Contact
+`update_record` call, or creates a shared new Contact once. A manual decision
+verifies all proposed fields together. A rejected Contact is unchanged.
+Source-to-Contact mappings are preserved after creation and email changes, so
+the final role section can reuse the same resolved Contact safely.
+
+Non-role Account changes run after every Contact is complete. The `Role Links`
+section runs last and may update only Account lookup fields; it never creates
+or updates a Contact. Several rows or roles that describe the same Contact
+reuse its one result. A partial role without an email uses its current
+Account-role Contact when available and cannot create a new Contact
+automatically without safe identity evidence.
 
 When a submitter email is also used by a role, the richer role details are used
 for Contact work. Otherwise the submitter name is split at its final space.
@@ -427,11 +454,9 @@ Contact created by that decision is assigned to `Case.ContactId` and both
 writes are audited separately. Merely matching an existing submitter Contact
 does not change `Case.ContactId`.
 
-Before individual fields are reviewed, an existing Contact's name, title,
-email, and phone are shown together. The submitted values are shown together
-before a new-Contact decision. Account-role proposals show current and proposed
-Contact names and emails; Salesforce Contact IDs remain internal to writes and
-the audit trail instead of appearing in decision prompts.
+Account-role proposals show current and proposed Contact names and emails;
+Salesforce Contact IDs remain internal to writes and the audit trail instead of
+appearing in decision prompts.
 
 If a Contact create is blocked by Salesforce with `DUPLICATES_DETECTED`, the
 structured error is retained and the reviewer can create manually, update an
@@ -456,9 +481,12 @@ response_emails.txt
 
 The JSON Lines audit is flushed after every decision and Salesforce result.
 Contact events include classification, comparison key, candidates, selected
-Contact, reason, confidence, and warnings. Operator selections, duplicate
-recovery, ignored entries, Contact writes, Case Contact assignment, and role
-assignments are separate events.
+Contact, reason, confidence, and warnings. Each conflict choice is an explicit
+event containing its candidate values and sources. Each reconciled Contact has
+one aggregate create/update event containing the final field dictionary and
+all source submission IDs. Operator identity selections, duplicate recovery,
+ignored entries, Case Contact assignment, and role assignments remain separate
+events.
 The response file contains one generated paragraph per submitter email.
 Account-information changes keep the `ITEM: NEW INFORMATION` and
 `Replaces OLD INFORMATION` format. Each submitted Contact role is consolidated

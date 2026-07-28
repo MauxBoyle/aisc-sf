@@ -560,6 +560,8 @@ def test_decision_shortcuts_are_case_insensitive_but_audit_full_phrases(
     if shortcut.casefold() == "m":
         client.get_sequences[("Account", "account-1")] = [
             account_record(),
+            account_record(),
+            account_record(),
             account_record(Name="Acme Steel LLC"),
         ]
         answers.extend(["", "yes"])
@@ -680,6 +682,8 @@ def test_manual_change_is_refetched_and_must_match(tmp_path):
     client = FakeClient()
     client.get_sequences[("Account", "account-1")] = [
         account_record(),
+        account_record(),
+        account_record(),
         account_record(Name="Acme Steel LLC"),
     ]
     feeder = Feeder(["make manually", "", "yes"])
@@ -732,11 +736,18 @@ def test_exact_email_match_is_global_and_each_mismatch_precedes_role_decision(
         "Phone": "312-555-0100",
     }
     client = FakeClient(contacts=[contact])
+    client.records[("Company_Profile_Change__c", "submission-1")].update(
+        {
+            "Cert_First_Name__c": "Alexa",
+            "Cert_Last_Name__c": "Jones",
+            "Cert_Title__c": "Director",
+            "Cert_Email__c": "old@example.com",
+            "Cert_Phone__c": "312-555-0199",
+        }
+    )
     feeder = Feeder(
         [
-            "apply automatically",
-            "apply automatically",
-            "apply automatically",
+            "1",
             "apply automatically",
             "will not be made",
             "yes",
@@ -755,8 +766,6 @@ def test_exact_email_match_is_global_and_each_mismatch_precedes_role_decision(
         certification_title="Director",
         certification_email="old@example.com",
         certification_phone="312-555-0199",
-        certification_salesforce_contact_id="contact-1",
-        certification_resolution_action="update_contact",
     )
 
     result = processor.review([row], tmp_path)
@@ -764,17 +773,18 @@ def test_exact_email_match_is_global_and_each_mismatch_precedes_role_decision(
     contact_query = next(query for query in client.queries if query[0] == "Contact")
     assert contact_query[2] == "Email = 'old@example.com'"
     assert "AccountId" not in contact_query[2]
-    assert "candidates" not in "\n".join(output).casefold()
-    assert not any("Contact choice" in prompt for prompt in feeder.prompts)
-    assert sum(prompt.startswith("Decision [") for prompt in feeder.prompts) == 5
+    assert any("Contact choice" in prompt for prompt in feeder.prompts)
+    assert sum(prompt.startswith("Decision [") for prompt in feeder.prompts) == 2
     assert (
         "Contact",
         "contact-1",
-        {"FirstName": "Alexa"},
+        {
+            "FirstName": "Alexa",
+            "LastName": "Jones",
+            "Title": "Director",
+            "Phone": "312.555.0199",
+        },
     ) in client.updated
-    assert ("Contact", "contact-1", {"LastName": "Jones"}) in client.updated
-    assert ("Contact", "contact-1", {"Title": "Director"}) in client.updated
-    assert ("Contact", "contact-1", {"Phone": "312-555-0199"}) in client.updated
     assert not any(
         item[0] == "Account" and "Cert_Certification_Contact__c" in item[2]
         for item in client.updated
@@ -784,7 +794,10 @@ def test_exact_email_match_is_global_and_each_mismatch_precedes_role_decision(
         for line in result.audit_path.read_text(encoding="utf-8").splitlines()
     ]
     assert any(
-        item["field"] == "FirstName" and item["result"] == "applied" for item in entries
+        item["field"] == "Contact"
+        and item["action"] == "update Contact from reconciled proposals"
+        and item["result"] == "applied"
+        for item in entries
     )
     assert any(
         item["field"] == "Cert_Certification_Contact__c"
@@ -792,12 +805,10 @@ def test_exact_email_match_is_global_and_each_mismatch_precedes_role_decision(
         for item in entries
     )
     displayed = "\n".join(output)
+    assert "Reconciled Certification Contact" in displayed
+    assert ("First Name | Alex | Alexa | submission-1 / Certification") in displayed
     assert (
-        "Current Certification Contact:\n"
-        "Name: Alex Smith\n"
-        "Title: Manager\n"
-        "Email: old@example.com\n"
-        "Phone: 312-555-0100"
+        "Phone | 312-555-0100 | 312.555.0199 | submission-1 / Certification"
     ) in displayed
     assert (
         "Certification Account Role\n"
@@ -810,6 +821,9 @@ def test_exact_email_match_is_global_and_each_mismatch_precedes_role_decision(
 
 def test_incomplete_contact_is_not_automatically_created(tmp_path):
     client = FakeClient()
+    client.records[("Company_Profile_Change__c", "submission-1")][
+        "Cert_First_Name__c"
+    ] = "Only"
     feeder = Feeder(["will not be made", "yes"])
     output = []
     processor = InteractiveProfileUpdateProcessor(
@@ -835,6 +849,13 @@ def test_incomplete_contact_is_not_automatically_created(tmp_path):
 
 def test_valid_contact_creation_precedes_field_and_role_decisions(tmp_path):
     client = FakeClient()
+    client.records[("Company_Profile_Change__c", "submission-1")].update(
+        {
+            "Cert_First_Name__c": "New",
+            "Cert_Last_Name__c": "Person",
+            "Cert_Email__c": "new.person@example.com",
+        }
+    )
     feeder = Feeder(
         [
             "apply automatically",
@@ -881,17 +902,24 @@ def test_valid_contact_creation_precedes_field_and_role_decisions(tmp_path):
         "account-1",
         {"Cert_Certification_Contact__c": "created-1"},
     ) in client.updated
+    displayed = "\n".join(output)
+    assert "Reconciled Certification Contact" in displayed
+    assert "First Name | (blank) | New | submission-1 / Certification" in displayed
     assert (
-        "Submitted Certification Contact:\n"
-        "Name: New Person\n"
-        "Title: (blank)\n"
-        "Email: new.person@example.com\n"
-        "Phone: (blank)"
-    ) in "\n".join(output)
+        "Email | (blank) | new.person@example.com | submission-1 / Certification"
+    ) in displayed
 
 
 def test_new_contract_reuses_submitter_role_contact_and_assigns_case(tmp_path):
     client = FakeClient()
+    client.records[("Company_Profile_Change__c", "submission-1")].update(
+        {
+            "Cert_First_Name__c": "Sam",
+            "Cert_Last_Name__c": "Submitter",
+            "Cert_Email__c": "sam@example.com",
+            "Cert_Phone__c": "312-555-0101",
+        }
+    )
     feeder = Feeder(["apply automatically", "apply automatically", "yes"])
     processor = InteractiveProfileUpdateProcessor(
         client,
@@ -960,7 +988,7 @@ def test_new_contract_reuses_submitter_role_contact_and_assigns_case(tmp_path):
     assert role_assignment["selected_contact"]["Id"] == "created-1"
 
 
-def test_fresh_contact_resolution_normalizes_values_before_comparison():
+def test_fresh_contact_collection_normalizes_values_before_comparison():
     client = FakeClient(
         source=source_record(
             Name__c="  jane mcdonald ",
@@ -983,21 +1011,22 @@ def test_fresh_contact_resolution_normalizes_values_before_comparison():
     )
     batch = build_case_batches([row], now=NOW)[0]
 
-    resolutions = processor._fresh_batch_resolutions(
+    items, _ = processor._collect_contact_work(
         batch,
         {"submission-1": client.records[("Company_Profile_Change__c", "submission-1")]},
     )
 
-    resolution = resolutions["jane@example.com"]
-    assert resolution.submitted == {
-        "first_name": "Jane",
-        "last_name": "McDonald",
-        "email": "jane@example.com",
-        "phone": "312.555.0100 x123",
+    assert len(items) == 1
+    item = items[0]
+    assert {
+        field_name: set(values) for field_name, values in item.proposals.items()
+    } == {
+        "first_name": {"Jane"},
+        "last_name": {"McDonald"},
+        "email": {"jane@example.com"},
+        "phone": {"312.555.0100 x123"},
     }
-    assert any(
-        query[2] == "Email = 'jane@example.com'" for query in client.queries
-    )
+    assert any(query[2] == "Email = 'jane@example.com'" for query in client.queries)
 
 
 def test_fresh_role_without_email_is_normalized_before_review(tmp_path):
@@ -1030,13 +1059,720 @@ def test_fresh_role_without_email_is_normalized_before_review(tmp_path):
     assert (
         "Contact",
         "contact-quality",
-        {"Title": "Chief QA Officer"},
+        {
+            "Title": "Chief QA Officer",
+            "Phone": "312.555.0104 x0007",
+        },
+    ) in client.updated
+
+
+def test_contact_phase_combines_roles_into_one_write_before_account_and_role_links(
+    tmp_path,
+):
+    contact = {
+        "Id": "contact-1",
+        "AccountId": "account-1",
+        "FirstName": "Alex",
+        "LastName": "Smith",
+        "Title": "Old Title",
+        "Email": "alex@example.com",
+        "Phone": "312.555.0100",
+    }
+    client = FakeClient(contacts=[contact])
+    source = client.records[("Company_Profile_Change__c", "submission-1")]
+    source.update(
+        {
+            "Cert_First_Name__c": "Alex",
+            "Cert_Last_Name__c": "Smith",
+            "Cert_Email__c": "alex@example.com",
+            "Cert_Phone__c": "312-555-0199",
+            "Principal_First_Name__c": "Alex",
+            "Principal_Last_Name__c": "Smith",
+            "Principal_Title__c": "Director",
+            "Principal_Email__c": "alex@example.com",
+            "Revised_Company_Name__c": "Acme Steel LLC",
+        }
+    )
+    sources = [
+        ContactSource("role", role="certification", submission_id="submission-1"),
+        ContactSource("role", role="principal", submission_id="submission-1"),
+    ]
+    feeder = Feeder(
+        [
+            "apply automatically",
+            "apply automatically",
+            "apply automatically",
+            "apply automatically",
+            "yes",
+        ]
+    )
+    output = []
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=feeder,
+        output_fn=output.append,
+        now=NOW,
+    )
+    row = staged_row(
+        revised_company_name="stale staging value",
+        certification_first_name="fallback",
+        certification_email="alex@example.com",
+        principal_first_name="fallback",
+        principal_email="alex@example.com",
+        contact_resolutions=staged_resolution(
+            email="alex@example.com",
+            sources=sources,
+            submitted={"title": "stale fallback"},
+        ),
+    )
+
+    result = processor.review([row], tmp_path)
+
+    contact_writes = [
+        item
+        for item in client.updated
+        if item[0] == "Contact" and item[1] == "contact-1"
+    ]
+    assert contact_writes == [
+        (
+            "Contact",
+            "contact-1",
+            {"Title": "Director", "Phone": "312.555.0199"},
+        )
+    ]
+    contact_index = client.updated.index(contact_writes[0])
+    account_index = next(
+        index
+        for index, item in enumerate(client.updated)
+        if item[:2] == ("Account", "account-1") and "Name" in item[2]
+    )
+    role_index = next(
+        index
+        for index, item in enumerate(client.updated)
+        if item[:2] == ("Account", "account-1")
+        and "Cert_Certification_Contact__c" in item[2]
+    )
+    assert contact_index < account_index < role_index
+    displayed = "\n".join(output)
+    assert displayed.index("Contact Updates") < displayed.index("Account Updates")
+    assert displayed.index("Account Updates") < displayed.index("Role Links")
+
+    entries = [
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    aggregate = next(
+        entry
+        for entry in entries
+        if entry["action"] == "update Contact from reconciled proposals"
+    )
+    assert aggregate["proposed_value"] == {
+        "Phone": "312.555.0199",
+        "Title": "Director",
+    }
+    assert aggregate["source_submission_ids"] == ["submission-1"]
+
+
+def test_conflicting_contact_values_are_resolved_before_any_contact_write(tmp_path):
+    contact = {
+        "Id": "contact-1",
+        "AccountId": "account-1",
+        "FirstName": "Alex",
+        "LastName": "Smith",
+        "Title": "Current Title",
+        "Email": "alex@example.com",
+        "Phone": "",
+    }
+    client = FakeClient(
+        account=account_record(Cert_Certification_Contact__c="contact-1"),
+        contacts=[contact],
+    )
+    first = client.records[("Company_Profile_Change__c", "submission-1")]
+    first.update(
+        {
+            "Cert_First_Name__c": "Alex",
+            "Cert_Last_Name__c": "Smith",
+            "Cert_Title__c": "Manager",
+            "Cert_Email__c": "alex@example.com",
+        }
+    )
+    second = source_record(
+        Id="submission-2",
+        Name="PU-101",
+        Cert_First_Name__c="Alex",
+        Cert_Last_Name__c="Smith",
+        Cert_Title__c="Director",
+        Cert_Email__c="alex@example.com",
+    )
+    client.records[("Company_Profile_Change__c", "submission-2")] = second
+    sources = [
+        ContactSource("role", role="certification", submission_id="submission-1"),
+        ContactSource("role", role="certification", submission_id="submission-2"),
+    ]
+    writes_seen_at_conflict = []
+
+    def answer(prompt):
+        if prompt.startswith("Continue with this staged row"):
+            return ""
+        if prompt.startswith("Choose reconciled Title"):
+            writes_seen_at_conflict.append(
+                [item for item in client.updated if item[0] == "Contact"]
+            )
+            return "current"
+        if prompt.startswith("Was the response email"):
+            return "yes"
+        raise AssertionError(prompt)
+
+    output = []
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=answer,
+        output_fn=output.append,
+        now=NOW,
+    )
+    row = staged_row(
+        source_submission_ids=json.dumps(["submission-1", "submission-2"]),
+        source_submission_names=json.dumps(["PU-100", "PU-101"]),
+        contact_resolutions=staged_resolution(
+            email="alex@example.com",
+            sources=sources,
+            submitted={"title": "stale fallback"},
+        ),
+    )
+
+    result = processor.review([row], tmp_path)
+
+    assert writes_seen_at_conflict == [[]]
+    assert not any(item[0] == "Contact" for item in client.updated)
+    displayed = "\n".join(output)
+    assert "Manager" in displayed
+    assert "Director" in displayed
+    assert "submission-1 / Certification" in displayed
+    assert "submission-2 / Certification" in displayed
+    entries = [
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    conflict = next(
+        entry
+        for entry in entries
+        if entry["action"] == "resolve Contact field conflict"
+    )
+    assert conflict["field"] == "Title"
+    assert conflict["proposed_value"] == "Current Title"
+    assert conflict["result"] == "verified manually"
+
+
+def test_interruption_during_contact_conflict_is_audited_before_any_write(tmp_path):
+    contact = {
+        "Id": "contact-1",
+        "AccountId": "account-1",
+        "FirstName": "Alex",
+        "LastName": "Smith",
+        "Title": "Current Title",
+        "Email": "alex@example.com",
+        "Phone": "",
+    }
+    client = FakeClient(
+        account=account_record(Cert_Certification_Contact__c="contact-1"),
+        contacts=[contact],
+    )
+    first = client.records[("Company_Profile_Change__c", "submission-1")]
+    first.update(
+        {
+            "Cert_Title__c": "Manager",
+            "Cert_Email__c": "alex@example.com",
+        }
+    )
+    client.records[("Company_Profile_Change__c", "submission-2")] = source_record(
+        Id="submission-2",
+        Name="PU-101",
+        Cert_Title__c="Director",
+        Cert_Email__c="alex@example.com",
+    )
+
+    def interrupt(prompt):
+        if prompt.startswith("Continue with this staged row"):
+            return ""
+        if prompt.startswith("Choose reconciled Title"):
+            raise KeyboardInterrupt
+        raise AssertionError(prompt)
+
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=interrupt,
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+    row = staged_row(
+        source_submission_ids=json.dumps(["submission-1", "submission-2"]),
+        source_submission_names=json.dumps(["PU-100", "PU-101"]),
+        contact_resolutions="[]",
+    )
+
+    with pytest.raises(ProcessingInterrupted):
+        processor.review([row], tmp_path)
+
+    assert not any(item[0] == "Contact" for item in client.updated)
+    entries = [
+        json.loads(line)
+        for line in (tmp_path / "review_audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert any(
+        entry["action"] == "resolve Contact field conflict"
+        and entry["result"] == "interrupted"
+        for entry in entries
+    )
+    assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
+
+
+def test_changed_email_uses_current_role_contact_id_and_updates_once(tmp_path):
+    contact = {
+        "Id": "contact-1",
+        "AccountId": "account-1",
+        "FirstName": "Alex",
+        "LastName": "Smith",
+        "Title": "",
+        "Email": "old@example.com",
+        "Phone": "",
+    }
+    client = FakeClient(
+        account=account_record(Cert_Certification_Contact__c="contact-1"),
+        contacts=[contact],
+    )
+    client.records[("Company_Profile_Change__c", "submission-1")].update(
+        {
+            "Cert_First_Name__c": "Alex",
+            "Cert_Last_Name__c": "Smith",
+            "Cert_Email__c": "new@example.com",
+        }
+    )
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["apply automatically", "yes"]),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+    row = staged_row(
+        certification_resolution_action="change_email",
+        certification_salesforce_contact_id="contact-1",
+        contact_resolutions=staged_resolution(
+            email="new@example.com",
+            sources=[
+                ContactSource(
+                    "role",
+                    role="certification",
+                    submission_id="submission-1",
+                )
+            ],
+            submitted={"email": "stale@example.com"},
+        ),
+    )
+
+    processor.review([row], tmp_path)
+
+    assert client.created == []
+    assert [item for item in client.updated if item[0] == "Contact"] == [
+        ("Contact", "contact-1", {"Email": "new@example.com"})
+    ]
+
+
+def test_shared_new_contact_is_created_once_and_reused_for_both_roles(tmp_path):
+    client = FakeClient()
+    client.records[("Company_Profile_Change__c", "submission-1")].update(
+        {
+            "Cert_First_Name__c": "New",
+            "Cert_Last_Name__c": "Person",
+            "Cert_Email__c": "new@example.com",
+            "Principal_First_Name__c": "New",
+            "Principal_Last_Name__c": "Person",
+            "Principal_Email__c": "new@example.com",
+        }
+    )
+    sources = [
+        ContactSource("role", role="certification", submission_id="submission-1"),
+        ContactSource("role", role="principal", submission_id="submission-1"),
+    ]
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(
+            [
+                "apply automatically",
+                "apply automatically",
+                "apply automatically",
+                "yes",
+            ]
+        ),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    processor.review(
+        [
+            staged_row(
+                contact_resolutions=staged_resolution(
+                    email="new@example.com",
+                    sources=sources,
+                    submitted={"email": "stale@example.com"},
+                )
+            )
+        ],
+        tmp_path,
+    )
+
+    assert client.created == [
+        (
+            "Contact",
+            {
+                "AccountId": "account-1",
+                "FirstName": "New",
+                "LastName": "Person",
+                "Email": "new@example.com",
+            },
+        )
+    ]
+    assert (
+        "Account",
+        "account-1",
+        {"Cert_Certification_Contact__c": "created-1"},
     ) in client.updated
     assert (
-        "Contact",
-        "contact-quality",
-        {"Phone": "312.555.0104 x0007"},
+        "Account",
+        "account-1",
+        {"Cert_Principal_Contact__c": "created-1"},
     ) in client.updated
+
+
+def test_distinct_emails_from_two_submissions_for_one_role_are_one_conflict(
+    tmp_path,
+):
+    client = FakeClient()
+    first = client.records[("Company_Profile_Change__c", "submission-1")]
+    first.update(
+        {
+            "Cert_First_Name__c": "New",
+            "Cert_Last_Name__c": "Person",
+            "Cert_Email__c": "first@example.com",
+        }
+    )
+    second = source_record(
+        Id="submission-2",
+        Name="PU-101",
+        Cert_First_Name__c="New",
+        Cert_Last_Name__c="Person",
+        Cert_Email__c="second@example.com",
+    )
+    client.records[("Company_Profile_Change__c", "submission-2")] = second
+    sources = [
+        ContactSource("role", role="certification", submission_id="submission-1"),
+        ContactSource("role", role="certification", submission_id="submission-2"),
+    ]
+    feeder = Feeder(
+        [
+            "2",
+            "apply automatically",
+            "apply automatically",
+            "yes",
+        ]
+    )
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=feeder,
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    result = processor.review(
+        [
+            staged_row(
+                source_submission_ids=json.dumps(["submission-1", "submission-2"]),
+                source_submission_names=json.dumps(["PU-100", "PU-101"]),
+                certification_resolution_action="create_contact",
+                contact_resolutions=staged_resolution(
+                    email="second@example.com",
+                    sources=sources,
+                    submitted={"email": "flattened@example.com"},
+                ),
+            )
+        ],
+        tmp_path,
+    )
+
+    assert client.created == [
+        (
+            "Contact",
+            {
+                "AccountId": "account-1",
+                "FirstName": "New",
+                "LastName": "Person",
+                "Email": "second@example.com",
+            },
+        )
+    ]
+    entries = [
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    email_conflict = next(
+        entry
+        for entry in entries
+        if entry["action"] == "resolve Contact field conflict"
+        and entry["field"] == "Email"
+    )
+    assert email_conflict["source_submission_ids"] == [
+        "submission-1",
+        "submission-2",
+    ]
+
+
+def test_every_fresh_submitter_submission_contributes_to_reconciliation(tmp_path):
+    client = FakeClient(
+        source=source_record(
+            Name__c="Sam First",
+            Email__c="sam@example.com",
+        )
+    )
+    second = source_record(
+        Id="submission-2",
+        Name="PU-101",
+        Name__c="Sam Second",
+        Email__c="sam@example.com",
+    )
+    client.records[("Company_Profile_Change__c", "submission-2")] = second
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["2", "apply automatically"]),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+    row = staged_row(
+        source_submission_ids=json.dumps(["submission-1", "submission-2"]),
+        source_submission_names=json.dumps(["PU-100", "PU-101"]),
+        contact_resolutions=staged_resolution(
+            sources=[ContactSource("submitter", submission_id="submission-2")],
+            submitted={
+                "first_name": "flattened",
+                "last_name": "fallback",
+                "email": "sam@example.com",
+            },
+        ),
+    )
+
+    result = processor.review([row], tmp_path)
+
+    assert client.created == [
+        (
+            "Contact",
+            {
+                "AccountId": "account-1",
+                "FirstName": "Sam",
+                "LastName": "Second",
+                "Email": "sam@example.com",
+            },
+        )
+    ]
+    conflicts = [
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+        if '"action": "resolve Contact field conflict"' in line
+    ]
+    assert len(conflicts) == 1
+    assert conflicts[0]["field"] == "LastName"
+    assert conflicts[0]["source_submission_ids"] == [
+        "submission-1",
+        "submission-2",
+    ]
+
+
+def test_rejected_reconciled_contact_has_no_contact_write(tmp_path):
+    contact = {
+        "Id": "contact-1",
+        "AccountId": "account-1",
+        "FirstName": "Alex",
+        "LastName": "Smith",
+        "Title": "Old Title",
+        "Email": "alex@example.com",
+        "Phone": "",
+    }
+    client = FakeClient(
+        account=account_record(Cert_Certification_Contact__c="contact-1"),
+        contacts=[contact],
+    )
+    client.records[("Company_Profile_Change__c", "submission-1")].update(
+        {
+            "Cert_First_Name__c": "Alex",
+            "Cert_Last_Name__c": "Smith",
+            "Cert_Title__c": "Director",
+            "Cert_Email__c": "alex@example.com",
+        }
+    )
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["will not be made", "yes"]),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    result = processor.review([staged_row(contact_resolutions="[]")], tmp_path)
+
+    assert not any(item[0] == "Contact" for item in client.updated)
+    entries = [
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    rejected = next(entry for entry in entries if entry["action"] == "no Contact write")
+    assert rejected["decision"] == "will not be made"
+    assert rejected["proposed_value"] == {"Title": "Director"}
+
+
+def test_manual_contact_decision_verifies_all_fields_together(tmp_path):
+    contact = {
+        "Id": "contact-1",
+        "AccountId": "account-1",
+        "FirstName": "Alex",
+        "LastName": "Smith",
+        "Title": "Old Title",
+        "Email": "alex@example.com",
+        "Phone": "312.555.0100",
+    }
+    client = FakeClient(
+        account=account_record(Cert_Certification_Contact__c="contact-1"),
+        contacts=[contact],
+    )
+    client.records[("Company_Profile_Change__c", "submission-1")].update(
+        {
+            "Cert_First_Name__c": "Alex",
+            "Cert_Last_Name__c": "Smith",
+            "Cert_Title__c": "Director",
+            "Cert_Email__c": "alex@example.com",
+            "Cert_Phone__c": "312-555-0199",
+        }
+    )
+
+    def answer(prompt):
+        if prompt.startswith("Continue with this staged row"):
+            return ""
+        if prompt.startswith("Decision ["):
+            return "make manually"
+        if prompt.startswith("Make the complete Contact change"):
+            client.records[("Contact", "contact-1")].update(
+                {"Title": "Director", "Phone": "312.555.0199"}
+            )
+            return ""
+        if prompt.startswith("Was the response email"):
+            return "yes"
+        raise AssertionError(prompt)
+
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=answer,
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    result = processor.review([staged_row(contact_resolutions="[]")], tmp_path)
+
+    assert not any(item[0] == "Contact" for item in client.updated)
+    entries = [
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    verified = next(
+        entry
+        for entry in entries
+        if entry["action"] == "verify reconciled Contact manually"
+    )
+    assert verified["result"] == "verified manually"
+    assert verified["proposed_value"] == {
+        "Phone": "312.555.0199",
+        "Title": "Director",
+    }
+
+
+def test_contact_failure_is_audited_and_same_input_retries_then_becomes_noop(
+    tmp_path,
+):
+    contact = {
+        "Id": "contact-1",
+        "AccountId": "account-1",
+        "FirstName": "Alex",
+        "LastName": "Smith",
+        "Title": "Old Title",
+        "Email": "alex@example.com",
+        "Phone": "",
+    }
+    client = FakeClient(
+        account=account_record(Cert_Certification_Contact__c="contact-1"),
+        contacts=[contact],
+    )
+    client.records[("Company_Profile_Change__c", "submission-1")].update(
+        {
+            "Cert_First_Name__c": "Alex",
+            "Cert_Last_Name__c": "Smith",
+            "Cert_Title__c": "Director",
+            "Cert_Email__c": "alex@example.com",
+        }
+    )
+    row = staged_row(contact_resolutions="[]")
+    client.fail_update = ("Contact", "contact-1")
+    failed_processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["apply automatically"]),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    with pytest.raises(ProcessingError, match="write failed"):
+        failed_processor.review([row], tmp_path / "failed")
+
+    failed_entries = [
+        json.loads(line)
+        for line in (tmp_path / "failed" / "review_audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert any(
+        entry["action"] == "update Contact from reconciled proposals"
+        and entry["result"] == "failed"
+        for entry in failed_entries
+    )
+    assert not any(item[0] == "Company_Profile_Change__c" for item in client.updated)
+
+    client.fail_update = None
+    retry_processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["apply automatically", "yes"]),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+    retry_processor.review([row], tmp_path / "retry")
+    successful_contact_writes = [
+        item for item in client.updated if item[0] == "Contact"
+    ]
+    assert successful_contact_writes == [
+        ("Contact", "contact-1", {"Title": "Director"})
+    ]
+
+    noop_processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["yes"]),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+    noop_result = noop_processor.review([row], tmp_path / "noop")
+    assert [
+        item for item in client.updated if item[0] == "Contact"
+    ] == successful_contact_writes
+    noop_entries = [
+        json.loads(line)
+        for line in noop_result.audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(
+        entry["action"] == "reconciled Contact already current"
+        for entry in noop_entries
+    )
 
 
 def test_compatibility_review_normalizes_fresh_role_values(tmp_path):
@@ -1051,9 +1787,7 @@ def test_compatibility_review_normalizes_fresh_role_values(tmp_path):
     )
     processor = InteractiveProfileUpdateProcessor(
         client,
-        input_fn=Feeder(
-            ["apply automatically", "apply automatically", "yes"]
-        ),
+        input_fn=Feeder(["apply automatically", "apply automatically", "yes"]),
         output_fn=lambda message: None,
         now=NOW,
     )
@@ -1098,6 +1832,13 @@ def test_duplicate_create_can_recover_with_an_alternate_email_contact(tmp_path):
         "Phone": "",
     }
     client = FakeClient(contacts=[alternate])
+    client.records[("Company_Profile_Change__c", "submission-1")].update(
+        {
+            "Cert_First_Name__c": "New",
+            "Cert_Last_Name__c": "Person",
+            "Cert_Email__c": "new.person@example.com",
+        }
+    )
     client.fail_create = SalesforceError(
         "Salesforce failed to create Contact: Use one of these records?",
         error_code="DUPLICATES_DETECTED",
@@ -1184,6 +1925,13 @@ def test_duplicate_exact_email_matches_are_audited_and_keep_case_retryable(tmp_p
         },
     ]
     client = FakeClient(contacts=contacts)
+    client.records[("Company_Profile_Change__c", "submission-1")].update(
+        {
+            "Cert_First_Name__c": "Alex",
+            "Cert_Last_Name__c": "Smith",
+            "Cert_Email__c": "shared@example.com",
+        }
+    )
     feeder = Feeder([])
     output = []
     processor = InteractiveProfileUpdateProcessor(
@@ -1211,17 +1959,14 @@ def test_duplicate_exact_email_matches_are_audited_and_keep_case_retryable(tmp_p
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    failure = next(
-        item for item in entries if item["action"] == "match Contact by exact email"
-    )
-    assert failure["field"] == "Email"
+    failure = next(item for item in entries if item["result"] == "failed")
+    assert failure["field"] == "resolution"
     assert failure["proposed_value"] == "shared@example.com"
     assert failure["result"] == "failed"
-    assert "contact-1" in failure["original_value"]
-    assert "contact-2" in failure["original_value"]
     assert not any(prompt.startswith("Decision [") for prompt in feeder.prompts)
-    assert not any("Contact choice" in prompt for prompt in feeder.prompts)
-    assert "candidates" not in "\n".join(output).casefold()
+    assert any("Contact choice" in prompt for prompt in feeder.prompts)
+    assert "Candidate 1" in "\n".join(output)
+    assert "Candidate 2" in "\n".join(output)
     assert not any(item[0] == "Company_Profile_Change__c" for item in client.updated)
     assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
 
@@ -1296,7 +2041,7 @@ def test_role_response_is_consolidated_and_marks_unchanged_roles(tmp_path):
             "LastName": "Jones",
             "Title": "President",
             "Email": "pat@example.com",
-            "Phone": "312-555-0200",
+            "Phone": "312.555.0200",
         },
     ]
     client = FakeClient(
@@ -1305,6 +2050,20 @@ def test_role_response_is_consolidated_and_marks_unchanged_roles(tmp_path):
             Cert_Principal_Contact__c="contact-2",
         ),
         contacts=contacts,
+    )
+    client.records[("Company_Profile_Change__c", "submission-1")].update(
+        {
+            "Cert_First_Name__c": "Alex",
+            "Cert_Last_Name__c": "Smith",
+            "Cert_Title__c": "Safety Director",
+            "Cert_Email__c": "alex@example.com",
+            "Cert_Phone__c": "312-555-0199",
+            "Principal_First_Name__c": "Pat",
+            "Principal_Last_Name__c": "Jones",
+            "Principal_Title__c": "President",
+            "Principal_Email__c": "pat@example.com",
+            "Principal_Phone__c": "312-555-0200",
+        }
     )
     feeder = Feeder(["apply automatically", "yes"])
     processor = InteractiveProfileUpdateProcessor(
@@ -1336,14 +2095,14 @@ def test_role_response_is_consolidated_and_marks_unchanged_roles(tmp_path):
     assert response.count("Certification Contact:") == 1
     assert (
         "Certification Contact: Alex Smith, Safety Director, "
-        "alex@example.com, 312-555-0199"
+        "alex@example.com, 312.555.0199"
     ) in response
     assert (
         "Replaces Alex Smith, Safety Director, alex@example.com, 312-555-0100"
     ) in response
     assert (
         "Principal Contact: Pat Jones, President, "
-        "pat@example.com, 312-555-0200 - no change"
+        "pat@example.com, 312.555.0200 - no change"
     ) in response
     assert response.count("Replaces ") == 1
     assert "Certification Contact Phone:" not in response

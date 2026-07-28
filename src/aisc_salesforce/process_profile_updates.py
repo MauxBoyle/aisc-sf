@@ -20,7 +20,6 @@ from .contact_resolution import (
     ContactSource,
     contact_snapshot,
     family_account_ids,
-    merge_resolution,
     normalize_email,
     resolve_contact,
 )
@@ -227,6 +226,46 @@ class _ResolvedContact:
     contact_id: str = ""
     ignored: bool = False
     contact_results: list[ActionResult] | None = None
+
+
+@dataclass
+class _ContactWorkItem:
+    """Fresh proposals that resolve to one Salesforce Contact."""
+
+    key: str
+    resolution: ContactResolution
+    row: dict[str, str]
+    proposals: dict[str, dict[str, list[ContactSource]]]
+    source_keys: set[tuple[str, str, str]]
+    contact_id: str = ""
+    ignored: bool = False
+    original_contact: dict[str, Any] | None = None
+    current_contact: dict[str, Any] | None = None
+    reconciled: dict[str, str] | None = None
+    write_values: dict[str, str] | None = None
+    decision: ReviewDecision | None = None
+    result: ActionResult | None = None
+
+    @property
+    def sources(self) -> list[ContactSource]:
+        """Return every source once, preserving collection order."""
+        unique: dict[tuple[str, str, str], ContactSource] = {}
+        for values in self.proposals.values():
+            for proposal_sources in values.values():
+                for source in proposal_sources:
+                    unique.setdefault(
+                        (source.kind, source.role, source.submission_id), source
+                    )
+        return list(unique.values())
+
+    @property
+    def source_submission_ids(self) -> tuple[str, ...]:
+        """Return submission IDs represented by this Contact."""
+        return tuple(
+            dict.fromkeys(
+                source.submission_id for source in self.sources if source.submission_id
+            )
+        )
 
 
 class ProfileUpdateProcessingWorkflow:
@@ -543,103 +582,12 @@ class InteractiveProfileUpdateProcessor:
         )
 
     def _review_batch(self, batch: CaseBatch, response_writer: _ResponseWriter) -> bool:
-        if any(row.get("contact_resolutions", "").strip() for row in batch.rows):
-            return self._review_resilient_batch(batch, response_writer)
-        return self._review_legacy_batch(batch, response_writer)
-
-    def _review_legacy_batch(
-        self, batch: CaseBatch, response_writer: _ResponseWriter
-    ) -> bool:
-        """Process staging files from before the Contact-resolution contract."""
-        account_name = next(
-            (
-                row.get("account_name", "").strip()
-                for row in batch.rows
-                if row.get("account_name", "").strip()
-            ),
-            batch.account_id,
-        )
-        self.output_fn(
-            _section_heading(
-                f"Case {batch.case_number or batch.case_id}: {account_name}"
-            )
-        )
-        self._update_status_with_audit(
-            batch,
-            batch.case_id,
-            "Case",
-            "Status",
-            CaseStatus.PENDING,
-            action="prepare batch",
-        )
-        fresh_by_id = self._fresh_case_submissions(batch)
-        self._show_case_context(batch, fresh_by_id)
-        self._show_account_history(batch, list(fresh_by_id.values()))
-
-        results: list[ActionResult] = []
-        account_results: list[ActionResult] = []
-        role_responses: list[_RoleResponse] = []
-        for row in batch.rows:
-            self._checkpoint_row(row)
-            fresh_submissions = [
-                fresh_by_id[source_id]
-                for source_id in _json_string_list(row["source_submission_ids"])
-            ]
-            reviewed_account = self._review_account_proposals(
-                batch, row, fresh_submissions
-            )
-            account_results.extend(reviewed_account)
-            results.extend(reviewed_account)
-            reviewed_roles, responses = self._review_roles(
-                batch, row, fresh_submissions
-            )
-            results.extend(reviewed_roles)
-            role_responses.extend(responses)
-
-        emails = format_response_emails(account_results, role_responses)
-        all_sent = True
-        for email, text in emails.items():
-            response_writer.append(batch.case_id, email, text)
-            self.output_fn(
-                f"{_section_heading(f'Response email for {email}', ITEM_SEPARATOR)}"
-                f"\n{text}"
-            )
-            sent = self._prompt_yes_no(
-                f"Was the response email to {email} sent? [yes/no]: "
-            )
-            all_sent = all_sent and sent
-
-        successful_without_email = any(
-            result.status in {ActionStatus.APPLIED, ActionStatus.VERIFIED_MANUAL}
-            and not result.proposal.submitter_email.strip()
-            for result in results
-        )
-        missing_role_email = any(
-            not response.submitter_email.strip() for response in role_responses
-        )
-        all_sent = all_sent and not successful_without_email and not missing_role_email
-        for source_id in batch.source_submission_ids:
-            self._update_status_with_audit(
-                batch,
-                source_id,
-                "Company_Profile_Change__c",
-                "Status__c",
-                ProfileChangeStatus.CLOSED,
-            )
-        case_status = CaseStatus.CLOSED if all_sent else CaseStatus.PENDING
-        self._update_status_with_audit(
-            batch,
-            batch.case_id,
-            "Case",
-            "Status",
-            case_status,
-        )
-        return not all_sent
+        return self._review_resilient_batch(batch, response_writer)
 
     def _review_resilient_batch(
         self, batch: CaseBatch, response_writer: _ResponseWriter
     ) -> bool:
-        """Resolve all Contacts first, then apply Account and role changes."""
+        """Reconcile Contacts once, then process Accounts and role links."""
         account_name = next(
             (
                 row.get("account_name", "").strip()
@@ -661,12 +609,6 @@ class InteractiveProfileUpdateProcessor:
         for row in batch.rows:
             self._checkpoint_row(row)
 
-        resolutions = self._fresh_batch_resolutions(batch, fresh_by_id)
-        resolved: dict[str, _ResolvedContact] = {}
-        for key, resolution in resolutions.items():
-            row = self._row_for_resolution(batch, resolution)
-            resolved[key] = self._review_resolution_choice(batch, row, resolution)
-
         self._update_status_with_audit(
             batch,
             batch.case_id,
@@ -676,16 +618,27 @@ class InteractiveProfileUpdateProcessor:
             action="prepare batch",
         )
 
+        self.output_fn(_section_heading("Contact Updates"))
+        contact_items, source_mapping = self._collect_contact_work(batch, fresh_by_id)
+        contact_items = self._resolve_contact_identities(batch, contact_items)
+        source_mapping = {
+            source_key: next(
+                (item.key for item in contact_items if source_key in item.source_keys),
+                item_key,
+            )
+            for source_key, item_key in source_mapping.items()
+        }
+        for item in contact_items:
+            self._reconcile_contact_fields(batch, item)
+        for item in contact_items:
+            self._prepare_contact_decision(batch, item)
+
         results: list[ActionResult] = []
-        for state in resolved.values():
-            row = self._row_for_resolution(batch, state.resolution)
-            contact_results = self._complete_contact_work(batch, row, state)
-            state.contact_results = contact_results
+        for item in contact_items:
+            contact_results = self._execute_contact_work(batch, item)
             results.extend(contact_results)
 
-        no_email_results = self._review_no_email_role_contacts(batch, fresh_by_id)
-        results.extend(no_email_results)
-
+        self.output_fn(_section_heading("Account Updates"))
         account_results: list[ActionResult] = []
         for row in batch.rows:
             fresh_submissions = [
@@ -696,17 +649,19 @@ class InteractiveProfileUpdateProcessor:
             account_results.extend(reviewed)
             results.extend(reviewed)
 
+        self.output_fn(_section_heading("Role Links"))
         role_responses: list[_RoleResponse] = []
         for row in batch.rows:
             fresh_submissions = [
                 fresh_by_id[source_id]
                 for source_id in _json_string_list(row["source_submission_ids"])
             ]
-            reviewed, responses = self._assign_resolved_roles(
+            reviewed, responses = self._assign_reconciled_roles(
                 batch,
                 row,
                 fresh_submissions,
-                resolved,
+                contact_items,
+                source_mapping,
             )
             results.extend(reviewed)
             role_responses.extend(responses)
@@ -719,14 +674,17 @@ class InteractiveProfileUpdateProcessor:
             role_responses,
         )
 
-    def _fresh_batch_resolutions(
+    def _collect_contact_work(
         self,
         batch: CaseBatch,
         fresh_by_id: dict[str, dict[str, Any]],
-    ) -> dict[str, ContactResolution]:
-        """Reload staged decisions against fresh family and exact-email Contacts."""
-        staged: dict[str, ContactResolution] = {}
-        invalid_index = 0
+    ) -> tuple[
+        list[_ContactWorkItem],
+        dict[tuple[str, str, str], str],
+    ]:
+        """Collect only fresh, explicitly submitted Contact values."""
+        staged_by_source: dict[tuple[str, str, str], ContactResolution] = {}
+        staged_submitter_ids: set[str] = set()
         for row in batch.rows:
             try:
                 raw_items = json.loads(row.get("contact_resolutions", "") or "[]")
@@ -745,87 +703,209 @@ class InteractiveProfileUpdateProcessor:
                     )
                 try:
                     resolution = ContactResolution.from_dict(raw_item)
-                except (
-                    AttributeError,
-                    KeyError,
-                    TypeError,
-                    ValueError,
-                ) as error:
+                except (AttributeError, KeyError, TypeError, ValueError) as error:
                     raise ProcessingError(
                         "A staged Contact resolution has invalid fields."
                     ) from error
-                key = resolution.comparison_key
-                if not key:
-                    invalid_index += 1
-                    key = f"invalid:{invalid_index}:{resolution.normalized_email}"
-                if key in staged:
-                    merge_resolution(staged[key], resolution)
-                    if any(source.kind == "role" for source in resolution.sources):
-                        staged[key].submitted.update(
-                            {
-                                field_name: value
-                                for field_name, value in resolution.submitted.items()
-                                if value
-                            }
+                has_submitter = False
+                for source in resolution.sources:
+                    source_key = (source.kind, source.role, source.submission_id)
+                    staged_by_source[source_key] = resolution
+                    has_submitter = has_submitter or source.kind == "submitter"
+                if has_submitter:
+                    row_source_ids = _json_string_list(row["source_submission_ids"])
+                    staged_submitter_ids.update(row_source_ids)
+                    for submission_id in row_source_ids:
+                        staged_by_source.setdefault(
+                            ("submitter", "", submission_id),
+                            resolution,
                         )
-                else:
-                    staged[key] = resolution
 
-        refreshed: dict[str, ContactResolution] = {}
+        account_fields = [
+            "Id",
+            "ParentId",
+            *(role.account_lookup for role in ROLE_DEFINITIONS),
+        ]
+        account = self.client.get_record("Account", batch.account_id, account_fields)
+        family_ids = self._fresh_family_account_ids(batch)
+
+        occurrences: list[
+            tuple[
+                ContactSource,
+                dict[str, str],
+                dict[str, str],
+                str,
+            ]
+        ] = []
+        for row in batch.rows:
+            for submission_id in _json_string_list(row["source_submission_ids"]):
+                record = fresh_by_id[submission_id]
+                if submission_id in staged_submitter_ids:
+                    name = normalize_contact_value("name", record.get("Name__c"))
+                    first_name, last_name = _split_person_name(name)
+                    details = {
+                        "first_name": first_name,
+                        "last_name": last_name,
+                        "email": normalize_contact_value(
+                            "email", record.get("Email__c")
+                        ),
+                        "phone": normalize_contact_value(
+                            "phone", record.get("Phone__c")
+                        ),
+                    }
+                    details = {
+                        field_name: value
+                        for field_name, value in details.items()
+                        if value
+                    }
+                    if details:
+                        source = ContactSource("submitter", submission_id=submission_id)
+                        staged_resolution = staged_by_source.get(
+                            ("submitter", "", submission_id)
+                        )
+                        selected = (
+                            staged_resolution.selected_contact
+                            if staged_resolution is not None
+                            else None
+                        )
+                        identity_id = (
+                            _display(selected.get("Id")) if selected is not None else ""
+                        )
+                        occurrences.append((source, details, row, identity_id))
+
+                for role in ROLE_DEFINITIONS:
+                    details = {
+                        suffix: normalize_contact_value(
+                            suffix, record.get(source_field)
+                        )
+                        for suffix, source_field in role.submitted_fields
+                    }
+                    details = {
+                        field_name: value
+                        for field_name, value in details.items()
+                        if value
+                    }
+                    if not details:
+                        continue
+                    source = ContactSource(
+                        "role",
+                        role=role.prefix,
+                        submission_id=submission_id,
+                    )
+                    action = row.get(f"{role.prefix}_resolution_action", "").strip()
+                    staged_id = row.get(
+                        f"{role.prefix}_salesforce_contact_id", ""
+                    ).strip()
+                    current_id = _display(account.get(role.account_lookup))
+                    identity_id = ""
+                    if action in {"update_contact", "change_email"}:
+                        identity_id = current_id or staged_id
+                    elif not details.get("email") and action != "create_contact":
+                        identity_id = current_id or staged_id
+                    staged_resolution = staged_by_source.get(
+                        ("role", role.prefix, submission_id)
+                    )
+                    selected = (
+                        staged_resolution.selected_contact
+                        if staged_resolution is not None
+                        else None
+                    )
+                    if not identity_id and selected is not None:
+                        identity_id = _display(selected.get("Id"))
+                    occurrences.append((source, details, row, identity_id))
+
+        email_identity_ids: dict[str, set[str]] = {}
+        for _, details, _, identity_id in occurrences:
+            _, comparison_key, _ = normalize_email(details.get("email"))
+            if comparison_key and identity_id:
+                email_identity_ids.setdefault(comparison_key, set()).add(identity_id)
+
+        grouped: dict[str, _ContactWorkItem] = {}
+        source_mapping: dict[tuple[str, str, str], str] = {}
         invalid_index = 0
-        for staged_resolution in staged.values():
-            sources = staged_resolution.sources or [ContactSource("unknown")]
-            for source in sources:
-                details = self._fresh_source_contact_details(
-                    source,
-                    fresh_by_id,
-                    staged_resolution.submitted,
+        for source, details, row, identity_id in occurrences:
+            normalized_email, comparison_key, warnings = normalize_email(
+                details.get("email")
+            )
+            linked_ids = email_identity_ids.get(comparison_key, set())
+            if not identity_id and len(linked_ids) == 1:
+                identity_id = next(iter(linked_ids))
+            if identity_id:
+                key = f"id:{identity_id}"
+            elif comparison_key:
+                key = f"email:{comparison_key}"
+            else:
+                invalid_index += 1
+                key = (
+                    f"unresolved:{invalid_index}:{source.kind}:"
+                    f"{source.role}:{source.submission_id}"
                 )
-                email = details.get("email") or staged_resolution.normalized_email
-                normalized, comparison_key, _ = normalize_email(email)
-                key = comparison_key
-                if not comparison_key:
-                    invalid_index += 1
-                    key = f"invalid:{invalid_index}:{normalized}"
-                if key not in refreshed:
-                    refreshed[key] = ContactResolution(
-                        staged_resolution.classification,
-                        normalized,
+            source_key = (source.kind, source.role, source.submission_id)
+            source_mapping[source_key] = key
+            item = grouped.get(key)
+            if item is None:
+                if identity_id:
+                    contact = self.client.get_record(
+                        "Contact", identity_id, CONTACT_REVIEW_FIELDS
+                    )
+                    resolution = ContactResolution(
+                        ContactResolutionClassification.USE_EXISTING,
+                        normalized_email,
                         comparison_key,
                         sources=[source],
-                        reason=staged_resolution.reason,
-                        confidence=staged_resolution.confidence,
-                        warnings=list(staged_resolution.warnings),
-                        submitted=details,
+                        selected_contact=contact,
+                        reason=(
+                            "The fresh Salesforce Contact ID identified the "
+                            "existing Contact."
+                        ),
+                        confidence="exact Contact ID",
+                        warnings=warnings,
                     )
                 else:
-                    refreshed[key].sources.append(source)
-                    refreshed[key].warnings.extend(
-                        warning
-                        for warning in staged_resolution.warnings
-                        if warning not in refreshed[key].warnings
+                    classification = (
+                        ContactResolutionClassification.CREATE_NEW
+                        if source.kind == "role"
+                        and row.get(f"{source.role}_resolution_action", "").strip()
+                        == "create_contact"
+                        else ContactResolutionClassification.AMBIGUOUS
                     )
-                    if source.kind == "role":
-                        refreshed[key].submitted.update(
-                            {
-                                field_name: value
-                                for field_name, value in details.items()
-                                if value
-                            }
-                        )
-        staged = refreshed
+                    resolution = ContactResolution(
+                        classification,
+                        normalized_email,
+                        comparison_key,
+                        sources=[source],
+                        reason="Fresh Contact proposals require matching.",
+                        confidence="unresolved",
+                        warnings=warnings,
+                    )
+                item = _ContactWorkItem(
+                    key,
+                    resolution,
+                    row,
+                    proposals={},
+                    source_keys=set(),
+                    contact_id=identity_id,
+                )
+                grouped[key] = item
+            elif source not in item.resolution.sources:
+                item.resolution.sources.append(source)
+            item.source_keys.add(source_key)
+            for field_name, value in details.items():
+                item.proposals.setdefault(field_name, {}).setdefault(value, []).append(
+                    source
+                )
 
-        family_ids = self._fresh_family_account_ids(batch)
         contacts: list[dict[str, Any]] = []
-        for resolution in staged.values():
-            if not resolution.normalized_email:
+        for item in grouped.values():
+            if item.contact_id or not item.resolution.normalized_email:
                 continue
             contacts.extend(
                 self.client.query_records(
                     "Contact",
                     CONTACT_REVIEW_FIELDS,
                     where=(
-                        f"Email = '{escape_soql_string(resolution.normalized_email)}'"
+                        "Email = "
+                        f"'{escape_soql_string(item.resolution.normalized_email)}'"
                     ),
                     order_by="Id ASC",
                 )
@@ -850,63 +930,646 @@ class InteractiveProfileUpdateProcessor:
             }.values()
         )
 
-        fresh: dict[str, ContactResolution] = {}
-        for key, staged_resolution in staged.items():
-            resolution = resolve_contact(
-                staged_resolution.normalized_email,
+        for item in grouped.values():
+            if item.contact_id:
+                continue
+            if (
+                not item.resolution.comparison_key
+                and item.resolution.classification
+                is not ContactResolutionClassification.CREATE_NEW
+            ):
+                item.ignored = True
+                item.resolution.reason = (
+                    "A partial Contact proposal has no current role Contact ID "
+                    "and no valid email."
+                )
+                item.resolution.warnings.append(
+                    "The Contact proposal was ignored because it cannot be "
+                    "identified safely."
+                )
+                continue
+            if not item.resolution.comparison_key:
+                continue
+            submitted = {
+                field_name: next(iter(values))
+                for field_name, values in item.proposals.items()
+                if values
+            }
+            fresh_resolution = resolve_contact(
+                item.resolution.normalized_email,
                 contacts,
                 family_ids,
-                sources=staged_resolution.sources,
-                submitted=staged_resolution.submitted,
+                sources=item.resolution.sources,
+                submitted=submitted,
             )
-            resolution.warnings = list(
-                dict.fromkeys([*staged_resolution.warnings, *resolution.warnings])
+            fresh_resolution.warnings = list(
+                dict.fromkeys([*item.resolution.warnings, *fresh_resolution.warnings])
             )
-            fresh[key] = resolution
-        return fresh
+            item.resolution = fresh_resolution
+        items = list(grouped.values())
+        for row in batch.rows:
+            row_source_ids = set(_json_string_list(row["source_submission_ids"]))
+            for role in ROLE_DEFINITIONS:
+                same_role = [
+                    item
+                    for item in items
+                    if any(
+                        kind == "role"
+                        and source_role == role.prefix
+                        and submission_id in row_source_ids
+                        for kind, source_role, submission_id in item.source_keys
+                    )
+                ]
+                if len(same_role) < 2:
+                    continue
+                target = same_role[0]
+                preferred_resolution = same_role[-1].resolution
+                selected_contacts = {
+                    _display(
+                        (item.resolution.selected_contact or {}).get("Id")
+                    ): item.resolution.selected_contact
+                    for item in same_role
+                    if _display((item.resolution.selected_contact or {}).get("Id"))
+                }
+                for item in same_role[1:]:
+                    target.source_keys.update(item.source_keys)
+                    for source in item.resolution.sources:
+                        if source not in target.resolution.sources:
+                            target.resolution.sources.append(source)
+                    for field_name, values in item.proposals.items():
+                        for value, sources in values.items():
+                            destination = target.proposals.setdefault(
+                                field_name, {}
+                            ).setdefault(value, [])
+                            destination.extend(
+                                source
+                                for source in sources
+                                if source not in destination
+                            )
+                    items.remove(item)
+                if len(selected_contacts) == 1:
+                    contact = next(iter(selected_contacts.values()))
+                    target.resolution.classification = (
+                        ContactResolutionClassification.USE_EXISTING
+                    )
+                    target.resolution.selected_contact = contact
+                    target.contact_id = _display(contact.get("Id"))
+                elif len(selected_contacts) > 1:
+                    target.resolution.classification = (
+                        ContactResolutionClassification.AMBIGUOUS
+                    )
+                    target.resolution.selected_contact = None
+                    target.resolution.candidates = [
+                        dict(contact)
+                        for contact in selected_contacts.values()
+                        if contact is not None
+                    ]
+                    target.contact_id = ""
+                    target.resolution.reason = (
+                        "Submissions for the same role identify different "
+                        "Salesforce Contacts."
+                    )
+                else:
+                    combined_sources = target.resolution.sources
+                    combined_warnings = target.resolution.warnings
+                    target.resolution = preferred_resolution
+                    target.resolution.sources = combined_sources
+                    target.resolution.warnings = list(
+                        dict.fromkeys(
+                            [
+                                *combined_warnings,
+                                *preferred_resolution.warnings,
+                            ]
+                        )
+                    )
+        return items, source_mapping
+
+    def _resolve_contact_identities(
+        self,
+        batch: CaseBatch,
+        items: list[_ContactWorkItem],
+    ) -> list[_ContactWorkItem]:
+        """Finish identity choices and merge items that select the same ID."""
+        for item in items:
+            if item.ignored:
+                self._audit_resolution(
+                    batch,
+                    item.row,
+                    item.resolution,
+                    ActionStatus.REJECTED,
+                    "ignore Contact without safe identity",
+                )
+                continue
+            state = self._review_resolution_choice(batch, item.row, item.resolution)
+            item.contact_id = state.contact_id
+            item.ignored = state.ignored
+
+        merged: dict[str, _ContactWorkItem] = {}
+        for item in items:
+            key = f"id:{item.contact_id}" if item.contact_id else item.key
+            existing = merged.get(key)
+            if existing is None:
+                item.key = key
+                merged[key] = item
+                continue
+            existing.source_keys.update(item.source_keys)
+            existing.ignored = existing.ignored and item.ignored
+            for source in item.resolution.sources:
+                if source not in existing.resolution.sources:
+                    existing.resolution.sources.append(source)
+            for field_name, values in item.proposals.items():
+                for value, sources in values.items():
+                    target = existing.proposals.setdefault(field_name, {}).setdefault(
+                        value, []
+                    )
+                    target.extend(source for source in sources if source not in target)
+        return list(merged.values())
+
+    def _reconcile_contact_fields(
+        self,
+        batch: CaseBatch,
+        item: _ContactWorkItem,
+    ) -> None:
+        """Resolve every field conflict without writing to Salesforce."""
+        if item.ignored:
+            item.reconciled = {}
+            item.write_values = {}
+            return
+        if item.contact_id:
+            item.current_contact = self.client.get_record(
+                "Contact", item.contact_id, CONTACT_REVIEW_FIELDS
+            )
+            item.original_contact = dict(item.current_contact)
+        else:
+            item.current_contact = {}
+            item.original_contact = {}
+
+        reconciled: dict[str, str] = {}
+        for suffix, contact_field, field_label in CONTACT_SUFFIX_FIELDS:
+            values = item.proposals.get(suffix, {})
+            if (
+                suffix == "email"
+                and item.resolution.classification
+                is ContactResolutionClassification.LIKELY_TYPO
+            ):
+                values = {}
+            if not values:
+                continue
+            if len(values) == 1:
+                reconciled[suffix] = next(iter(values))
+                continue
+            current = _display((item.current_contact or {}).get(contact_field))
+            self.output_fn(
+                _section_heading(
+                    f"Contact field conflict: {field_label}",
+                    ITEM_SEPARATOR,
+                )
+            )
+            for index, (value, sources) in enumerate(values.items(), start=1):
+                self.output_fn(
+                    f"{index}. {value}\n"
+                    f"   Sources: {self._format_contact_sources(sources)}"
+                )
+            self.output_fn(f"current. {current or '(blank)'}")
+            conflict_sources = "\n".join(
+                f"{value}: {self._format_contact_sources(sources)}"
+                for value, sources in values.items()
+            )
+            while True:
+                try:
+                    answer = (
+                        self.input_fn(
+                            f"Choose reconciled {field_label} "
+                            f"[1-{len(values)}/current]: "
+                        )
+                        .strip()
+                        .casefold()
+                    )
+                except StopIteration as error:
+                    proposal = self._contact_proposal(
+                        batch,
+                        item,
+                        field_name=contact_field,
+                        label=f"{field_label} conflict",
+                        original_value=current,
+                        proposed_value="",
+                        warnings=conflict_sources,
+                    )
+                    self._append_audit(
+                        ActionResult(
+                            proposal,
+                            None,
+                            ActionStatus.FAILED,
+                            action="resolve Contact field conflict",
+                            error=(
+                                f"Conflicting {field_label} values require an "
+                                "explicit choice."
+                            ),
+                        )
+                    )
+                    raise ProcessingError(
+                        f"Conflicting {field_label} values require an explicit choice."
+                    ) from error
+                except (KeyboardInterrupt, EOFError) as error:
+                    proposal = self._contact_proposal(
+                        batch,
+                        item,
+                        field_name=contact_field,
+                        label=f"{field_label} conflict",
+                        original_value=current,
+                        proposed_value="",
+                        warnings=conflict_sources,
+                    )
+                    self._append_audit(
+                        ActionResult(
+                            proposal,
+                            None,
+                            ActionStatus.INTERRUPTED,
+                            action="resolve Contact field conflict",
+                            error="Reviewer interrupted conflict resolution.",
+                        )
+                    )
+                    raise ProcessingInterrupted(
+                        "Profile Update review was interrupted."
+                    ) from error
+                if answer == "current":
+                    chosen = current
+                    break
+                if answer.isdigit() and 1 <= int(answer) <= len(values):
+                    chosen = list(values)[int(answer) - 1]
+                    break
+                self.output_fn("Choose a candidate number or current.")
+            reconciled[suffix] = chosen
+            proposal = self._contact_proposal(
+                batch,
+                item,
+                field_name=contact_field,
+                label=f"{field_label} conflict",
+                original_value=current,
+                proposed_value=chosen,
+                warnings=conflict_sources,
+            )
+            self._append_audit(
+                ActionResult(
+                    proposal,
+                    None,
+                    ActionStatus.VERIFIED_MANUAL,
+                    action="resolve Contact field conflict",
+                )
+            )
+
+        item.reconciled = reconciled
+        current = item.current_contact or {}
+        item.write_values = {
+            contact_field: reconciled[suffix]
+            for suffix, contact_field, _ in CONTACT_SUFFIX_FIELDS
+            if suffix in reconciled
+            and reconciled[suffix]
+            and not _values_equal(current.get(contact_field), reconciled[suffix])
+        }
 
     @staticmethod
-    def _fresh_source_contact_details(
-        source: ContactSource,
-        fresh_by_id: dict[str, dict[str, Any]],
-        fallback: dict[str, str],
-    ) -> dict[str, str]:
-        """Overlay fresh submission values on staged Contact details."""
-        details = {
-            field_name: normalize_contact_value(field_name, value)
-            for field_name, value in fallback.items()
-        }
-        record = fresh_by_id.get(source.submission_id)
-        if record is None:
-            return details
-        if source.kind == "submitter":
-            name = normalize_contact_value("name", record.get("Name__c"))
-            first_name, last_name = _split_person_name(name)
-            fresh_values = {
-                "first_name": first_name,
-                "last_name": last_name,
-                "email": normalize_contact_value("email", record.get("Email__c")),
-                "phone": normalize_contact_value("phone", record.get("Phone__c")),
-            }
-        else:
-            role = next(
-                (
-                    definition
-                    for definition in ROLE_DEFINITIONS
-                    if definition.prefix == source.role
-                ),
-                None,
+    def _format_contact_sources(sources: list[ContactSource]) -> str:
+        return ", ".join(
+            (
+                f"{source.submission_id or '(unknown submission)'} / "
+                f"{source.role.replace('_', ' ').title()}"
+                if source.kind == "role"
+                else f"{source.submission_id or '(unknown submission)'} / Submitter"
             )
-            if role is None:
-                return details
-            fresh_values = {
-                suffix: normalize_contact_value(suffix, record.get(source_field))
-                for suffix, source_field in role.submitted_fields
-            }
-        details.update(
-            {field_name: value for field_name, value in fresh_values.items() if value}
+            for source in sources
         )
-        return details
+
+    def _show_reconciled_contact(self, item: _ContactWorkItem) -> None:
+        self.output_fn(
+            _section_heading(
+                f"Reconciled {self._resolution_label(item.resolution)}",
+                ITEM_SEPARATOR,
+            )
+        )
+        self.output_fn("Field | Current Salesforce | Reconciled | Sources")
+        current = item.current_contact or {}
+        reconciled = item.reconciled or {}
+        for suffix, contact_field, field_label in CONTACT_SUFFIX_FIELDS:
+            values = item.proposals.get(suffix, {})
+            if not values:
+                continue
+            sources = [
+                source
+                for proposal_sources in values.values()
+                for source in proposal_sources
+            ]
+            self.output_fn(
+                f"{field_label} | "
+                f"{_display(current.get(contact_field)) or '(blank)'} | "
+                f"{reconciled.get(suffix, '') or '(blank)'} | "
+                f"{self._format_contact_sources(sources)}"
+            )
+
+    def _prepare_contact_decision(
+        self,
+        batch: CaseBatch,
+        item: _ContactWorkItem,
+    ) -> None:
+        """Show one final Contact proposal and collect one A/M/N decision."""
+        if item.ignored:
+            return
+        self._show_reconciled_contact(item)
+        payload = dict(item.write_values or {})
+        if not item.contact_id:
+            payload = {"AccountId": batch.account_id, **payload}
+        proposal = self._contact_proposal(
+            batch,
+            item,
+            field_name="Contact",
+            label=f"{self._resolution_label(item.resolution)} Contact",
+            original_value=item.current_contact or {},
+            proposed_value=payload,
+        )
+        if item.contact_id and not item.write_values:
+            item.result = ActionResult(
+                proposal,
+                None,
+                ActionStatus.NOOP,
+                action="reconciled Contact already current",
+            )
+            self._append_audit(item.result)
+            self.output_fn("Contact is already current; no change needed.")
+            return
+        has_last_name = bool((item.reconciled or {}).get("last_name"))
+        if not item.contact_id and not has_last_name:
+            self.output_fn(
+                "This Contact cannot be created automatically because the "
+                "required Last Name field is missing."
+            )
+        self._show_proposal(proposal)
+        item.decision = self._review_decision(
+            proposal,
+            automatic_allowed=bool(item.contact_id)
+            or (has_last_name and bool(item.resolution.comparison_key)),
+            action="review reconciled Contact",
+        )
+
+    def _execute_contact_work(
+        self,
+        batch: CaseBatch,
+        item: _ContactWorkItem,
+    ) -> list[ActionResult]:
+        """Apply or verify one aggregate Contact decision."""
+        if item.ignored:
+            return []
+        if item.result is not None:
+            return [item.result]
+        proposal = self._contact_proposal(
+            batch,
+            item,
+            field_name="Contact",
+            label=f"{self._resolution_label(item.resolution)} Contact",
+            original_value=item.current_contact or {},
+            proposed_value=(
+                dict(item.write_values or {})
+                if item.contact_id
+                else {"AccountId": batch.account_id, **dict(item.write_values or {})}
+            ),
+        )
+        decision = item.decision
+        if decision is ReviewDecision.WILL_NOT_BE_MADE:
+            result = ActionResult(
+                proposal,
+                decision,
+                ActionStatus.REJECTED,
+                action="no Contact write",
+            )
+            self._append_audit(result)
+            item.result = result
+            return [result]
+        if decision is ReviewDecision.MAKE_MANUALLY:
+            result = self._verify_manual_contact(batch, item, proposal)
+        elif item.contact_id:
+            try:
+                self.client.update_record(
+                    "Contact", item.contact_id, dict(item.write_values or {})
+                )
+            except SalesforceError as error:
+                result = ActionResult(
+                    proposal,
+                    decision,
+                    ActionStatus.FAILED,
+                    action="update Contact from reconciled proposals",
+                    error=str(error),
+                    error_code=error.error_code or "",
+                    salesforce_message=error.salesforce_message or "",
+                )
+                self._append_audit(result)
+                raise ProcessingError(str(error)) from error
+            result = ActionResult(
+                proposal,
+                decision,
+                ActionStatus.APPLIED,
+                action="update Contact from reconciled proposals",
+            )
+            self._append_audit(result)
+        else:
+            try:
+                contact_id = self.client.create_record(
+                    "Contact", dict(proposal.proposed_value)
+                )
+            except SalesforceError as error:
+                if _is_duplicate_contact_error(error):
+                    result = self._recover_duplicate_contact(
+                        batch,
+                        item.row,
+                        proposal,
+                        item.resolution,
+                        error,
+                    )
+                    contact_id = result.proposal.target_record_id
+                else:
+                    result = ActionResult(
+                        proposal,
+                        decision,
+                        ActionStatus.FAILED,
+                        action="create Contact",
+                        error=str(error),
+                        error_code=error.error_code or "",
+                        salesforce_message=error.salesforce_message or "",
+                    )
+                    self._append_audit(result)
+                    raise ProcessingError(str(error)) from error
+            else:
+                created_proposal = ChangeProposal(
+                    **{
+                        **proposal.__dict__,
+                        "target_record_id": contact_id,
+                        "selected_contact": contact_snapshot(
+                            {"Id": contact_id, **dict(proposal.proposed_value)}
+                        ),
+                    }
+                )
+                result = ActionResult(
+                    created_proposal,
+                    decision,
+                    ActionStatus.APPLIED,
+                    action="create Contact",
+                )
+                self._append_audit(result)
+            if result.status in {
+                ActionStatus.APPLIED,
+                ActionStatus.VERIFIED_MANUAL,
+            }:
+                item.contact_id = contact_id
+
+        item.result = result
+        results = [result]
+        if result.status in {
+            ActionStatus.APPLIED,
+            ActionStatus.VERIFIED_MANUAL,
+        }:
+            item.current_contact = self.client.get_record(
+                "Contact", item.contact_id, CONTACT_REVIEW_FIELDS
+            )
+            item.resolution.selected_contact = item.current_contact
+            if (
+                not proposal.target_record_id or proposal.target_record_id == "(new)"
+            ) and any(source.kind == "submitter" for source in item.sources):
+                results.append(
+                    self._assign_created_submitter_to_case(
+                        batch,
+                        item.row,
+                        item.resolution,
+                        item.contact_id,
+                    )
+                )
+        return results
+
+    def _verify_manual_contact(
+        self,
+        batch: CaseBatch,
+        item: _ContactWorkItem,
+        proposal: ChangeProposal,
+    ) -> ActionResult:
+        """Verify all reconciled Contact fields together."""
+        try:
+            if item.contact_id:
+                self.input_fn(
+                    "Make the complete Contact change in Salesforce, then "
+                    "press Enter to verify it: "
+                )
+                contact_id = item.contact_id
+            else:
+                contact_id = self.input_fn(
+                    "Create the Contact in Salesforce, then enter its Contact ID: "
+                ).strip()
+                if not contact_id:
+                    raise ProcessingError(
+                        "A Contact ID is required for manual verification."
+                    )
+            fresh = self.client.get_record("Contact", contact_id, CONTACT_REVIEW_FIELDS)
+        except (KeyboardInterrupt, EOFError) as error:
+            result = ActionResult(
+                proposal,
+                ReviewDecision.MAKE_MANUALLY,
+                ActionStatus.INTERRUPTED,
+                action="verify reconciled Contact manually",
+                error="Reviewer interrupted processing.",
+            )
+            self._append_audit(result)
+            raise ProcessingInterrupted(
+                "Profile Update review was interrupted."
+            ) from error
+        except ProcessingError as error:
+            result = ActionResult(
+                proposal,
+                ReviewDecision.MAKE_MANUALLY,
+                ActionStatus.FAILED,
+                action="verify reconciled Contact manually",
+                error=str(error),
+            )
+            self._append_audit(result)
+            raise
+        except SalesforceError as error:
+            result = ActionResult(
+                proposal,
+                ReviewDecision.MAKE_MANUALLY,
+                ActionStatus.FAILED,
+                action="verify reconciled Contact manually",
+                error=str(error),
+            )
+            self._append_audit(result)
+            raise ProcessingError(str(error)) from error
+        expected = item.write_values or {}
+        if not item.contact_id:
+            expected = {
+                field_name: value
+                for field_name, value in proposal.proposed_value.items()
+                if field_name != "AccountId"
+            }
+        if (
+            not item.contact_id
+            and not _values_equal(fresh.get("AccountId"), batch.account_id)
+        ) or any(
+            not _values_equal(fresh.get(field_name), value)
+            for field_name, value in expected.items()
+        ):
+            error = "Salesforce Contact does not match all reconciled proposed fields."
+            result = ActionResult(
+                proposal,
+                ReviewDecision.MAKE_MANUALLY,
+                ActionStatus.FAILED,
+                action="verify reconciled Contact manually",
+                error=error,
+            )
+            self._append_audit(result)
+            raise ProcessingError(error)
+        item.contact_id = contact_id
+        verified_proposal = ChangeProposal(
+            **{
+                **proposal.__dict__,
+                "target_record_id": contact_id,
+                "selected_contact": contact_snapshot(fresh),
+            }
+        )
+        result = ActionResult(
+            verified_proposal,
+            ReviewDecision.MAKE_MANUALLY,
+            ActionStatus.VERIFIED_MANUAL,
+            action="verify reconciled Contact manually",
+        )
+        self._append_audit(result)
+        return result
+
+    def _contact_proposal(
+        self,
+        batch: CaseBatch,
+        item: _ContactWorkItem,
+        *,
+        field_name: str,
+        label: str,
+        original_value: Any,
+        proposed_value: Any,
+        warnings: str = "",
+    ) -> ChangeProposal:
+        """Build an aggregate Contact proposal with every source ID."""
+        base = self._proposal(
+            batch,
+            item.row,
+            target_object="Contact",
+            target_record_id=item.contact_id or "(new)",
+            field_name=field_name,
+            label=label,
+            original_value=original_value,
+            proposed_value=proposed_value,
+            resolution=item.resolution,
+        )
+        return ChangeProposal(
+            **{
+                **base.__dict__,
+                "source_submission_ids": item.source_submission_ids,
+                "warnings": "\n".join(
+                    value for value in (base.warnings, warnings) if value
+                ),
+            }
+        )
 
     def _fresh_family_account_ids(self, batch: CaseBatch) -> set[str]:
         target = self.client.get_record("Account", batch.account_id, ["Id", "ParentId"])
@@ -925,25 +1588,6 @@ class InteractiveProfileUpdateProcessor:
                 )
             )
         return family_account_ids(target, family_accounts)
-
-    def _row_for_resolution(
-        self, batch: CaseBatch, resolution: ContactResolution
-    ) -> dict[str, str]:
-        source_ids = {
-            source.submission_id
-            for source in resolution.sources
-            if source.submission_id
-        }
-        return next(
-            (
-                row
-                for row in batch.rows
-                if source_ids.intersection(
-                    _json_string_list(row["source_submission_ids"])
-                )
-            ),
-            batch.rows[0],
-        )
 
     def _review_resolution_choice(
         self,
@@ -1036,6 +1680,13 @@ class InteractiveProfileUpdateProcessor:
                     .casefold()
                 )
             except StopIteration as error:
+                self._audit_resolution(
+                    batch,
+                    row,
+                    resolution,
+                    ActionStatus.FAILED,
+                    "resolve ambiguous Contact",
+                )
                 raise ProcessingError(
                     "Multiple Salesforce Contacts require an explicit "
                     "operator selection."
@@ -1100,162 +1751,6 @@ class InteractiveProfileUpdateProcessor:
         )
         self._append_audit(ActionResult(proposal, None, status, action=action))
 
-    def _complete_contact_work(
-        self,
-        batch: CaseBatch,
-        row: dict[str, str],
-        state: _ResolvedContact,
-    ) -> list[ActionResult]:
-        resolution = state.resolution
-        if state.ignored:
-            return []
-        if state.contact_id:
-            results = self._review_existing_contact_fields(
-                batch,
-                row,
-                resolution,
-                state.contact_id,
-            )
-        else:
-            label = self._resolution_label(resolution)
-            created = self._review_new_contact(
-                batch,
-                row,
-                label,
-                resolution.submitted,
-                resolution=resolution,
-            )
-            results = [created]
-            if created.status in {
-                ActionStatus.APPLIED,
-                ActionStatus.VERIFIED_MANUAL,
-            }:
-                state.contact_id = created.proposal.target_record_id
-                resolution.selected_contact = self.client.get_record(
-                    "Contact", state.contact_id, CONTACT_REVIEW_FIELDS
-                )
-
-        created_contact = any(
-            result.proposal.target_record_id == state.contact_id
-            and result.proposal.field_name == "Contact"
-            and (
-                result.action == "create Contact"
-                or "manual Contact creation" in result.action
-            )
-            and result.status in {ActionStatus.APPLIED, ActionStatus.VERIFIED_MANUAL}
-            for result in results
-        )
-        is_submitter = any(source.kind == "submitter" for source in resolution.sources)
-        if created_contact and is_submitter and state.contact_id:
-            results.append(
-                self._assign_created_submitter_to_case(
-                    batch, row, resolution, state.contact_id
-                )
-            )
-        return results
-
-    def _review_existing_contact_fields(
-        self,
-        batch: CaseBatch,
-        row: dict[str, str],
-        resolution: ContactResolution,
-        contact_id: str,
-    ) -> list[ActionResult]:
-        contact = self.client.get_record("Contact", contact_id, CONTACT_REVIEW_FIELDS)
-        self._show_contact_details(
-            f"Resolved {self._resolution_label(resolution)}",
-            contact,
-        )
-        results: list[ActionResult] = []
-        for suffix, contact_field, field_label in CONTACT_SUFFIX_FIELDS:
-            proposed = resolution.submitted.get(suffix, "")
-            if not proposed:
-                continue
-            if (
-                suffix == "email"
-                and resolution.classification
-                is ContactResolutionClassification.LIKELY_TYPO
-            ):
-                continue
-            proposal = self._proposal(
-                batch,
-                row,
-                target_object="Contact",
-                target_record_id=contact_id,
-                field_name=contact_field,
-                label=f"{self._resolution_label(resolution)} {field_label}",
-                proposed_value=proposed,
-                resolution=resolution,
-            )
-            results.append(self._review_proposal(proposal))
-        return results
-
-    def _review_no_email_role_contacts(
-        self,
-        batch: CaseBatch,
-        fresh_by_id: dict[str, dict[str, Any]],
-    ) -> list[ActionResult]:
-        """Apply partial role updates to the current role Contact only."""
-        results: list[ActionResult] = []
-        reviewed: set[tuple[str, str, str]] = set()
-        for row in batch.rows:
-            submissions = [
-                fresh_by_id[source_id]
-                for source_id in _json_string_list(row["source_submission_ids"])
-            ]
-            for role in ROLE_DEFINITIONS:
-                submitted = _submitted_role_values(submissions, row, role)
-                if not any(submitted.values()) or submitted.get("email"):
-                    continue
-                contact_id, contact = self._fresh_role_contact(
-                    batch, role.account_lookup
-                )
-                if not contact_id or contact is None:
-                    resolution = ContactResolution(
-                        ContactResolutionClassification.AMBIGUOUS,
-                        "",
-                        "",
-                        sources=[ContactSource("role", role=role.prefix)],
-                        reason=(
-                            "A role without email has no current Account-role "
-                            "Contact and cannot create one automatically."
-                        ),
-                        confidence="none",
-                        warnings=[
-                            "Role without email was ignored because its current "
-                            "Account-role Contact is blank."
-                        ],
-                        submitted=submitted,
-                    )
-                    self._audit_resolution(
-                        batch,
-                        row,
-                        resolution,
-                        ActionStatus.REJECTED,
-                        "ignore role without email and current Contact",
-                    )
-                    continue
-                for suffix, contact_field, field_label in CONTACT_SUFFIX_FIELDS:
-                    proposed = submitted.get(suffix, "")
-                    identity = (contact_id, contact_field, proposed)
-                    if not proposed or identity in reviewed:
-                        continue
-                    reviewed.add(identity)
-                    results.append(
-                        self._review_proposal(
-                            self._proposal(
-                                batch,
-                                row,
-                                target_object="Contact",
-                                target_record_id=contact_id,
-                                field_name=contact_field,
-                                label=f"{role.label} Contact {field_label}",
-                                proposed_value=proposed,
-                            )
-                        )
-                    )
-        return results
-
     def _assign_created_submitter_to_case(
         self,
         batch: CaseBatch,
@@ -1295,15 +1790,18 @@ class InteractiveProfileUpdateProcessor:
         self._append_audit(result)
         return result
 
-    def _assign_resolved_roles(
+    def _assign_reconciled_roles(
         self,
         batch: CaseBatch,
         row: dict[str, str],
         submissions: list[dict[str, Any]],
-        resolved: dict[str, _ResolvedContact],
+        items: list[_ContactWorkItem],
+        source_mapping: dict[tuple[str, str, str], str],
     ) -> tuple[list[ActionResult], list[_RoleResponse]]:
+        """Link roles using the preserved source mapping; never mutate Contacts."""
         results: list[ActionResult] = []
         responses: list[_RoleResponse] = []
+        items_by_key = {item.key: item for item in items}
         for role in ROLE_DEFINITIONS:
             submitted = _submitted_role_values(submissions, row, role)
             if not any(submitted.values()):
@@ -1311,37 +1809,23 @@ class InteractiveProfileUpdateProcessor:
             original_id, original_contact = self._fresh_role_contact(
                 batch, role.account_lookup
             )
-            email = submitted.get("email", "")
-            if not email:
-                final_contact = (
-                    self.client.get_record(
-                        "Contact", original_id, CONTACT_REVIEW_FIELDS
-                    )
-                    if original_id
-                    else None
+            item: _ContactWorkItem | None = None
+            for submission in reversed(submissions):
+                if not any(
+                    normalize_contact_value(suffix, submission.get(source_field))
+                    for suffix, source_field in role.submitted_fields
+                ):
+                    continue
+                source_key = (
+                    "role",
+                    role.prefix,
+                    _display(submission.get("Id")),
                 )
-                responses.append(
-                    self._build_role_response(
-                        row,
-                        role.label,
-                        final_contact,
-                        original_contact,
-                        changed=final_contact != original_contact,
-                    )
-                )
-                continue
-            normalized, key, _ = normalize_email(email)
-            state = resolved.get(key)
-            if state is None and normalized:
-                state = next(
-                    (
-                        candidate
-                        for candidate in resolved.values()
-                        if candidate.resolution.normalized_email == normalized
-                    ),
-                    None,
-                )
-            if state is None or state.ignored or not state.contact_id:
+                mapped_key = source_mapping.get(source_key)
+                if mapped_key:
+                    item = items_by_key.get(mapped_key)
+                    break
+            if item is None or item.ignored or not item.contact_id:
                 responses.append(
                     self._build_role_response(
                         row,
@@ -1352,9 +1836,12 @@ class InteractiveProfileUpdateProcessor:
                     )
                 )
                 continue
-            final_contact = self.client.get_record(
-                "Contact", state.contact_id, CONTACT_REVIEW_FIELDS
-            )
+
+            final_contact = item.current_contact
+            if final_contact is None:
+                final_contact = self.client.get_record(
+                    "Contact", item.contact_id, CONTACT_REVIEW_FIELDS
+                )
             result = self._review_proposal(
                 self._proposal(
                     batch,
@@ -1363,14 +1850,23 @@ class InteractiveProfileUpdateProcessor:
                     target_record_id=batch.account_id,
                     field_name=role.account_lookup,
                     label=f"{role.label} Account Role",
-                    proposed_value=state.contact_id,
-                    resolution=state.resolution,
+                    proposed_value=item.contact_id,
+                    resolution=item.resolution,
                 ),
                 original_display=_contact_name_email(original_contact),
                 proposed_display=_contact_name_email(final_contact),
             )
             results.append(result)
-            changed = result.status in {
+            previous_contact = (
+                item.original_contact
+                if original_id == item.contact_id and item.original_contact
+                else original_contact
+            )
+            contact_changed = item.result is not None and item.result.status in {
+                ActionStatus.APPLIED,
+                ActionStatus.VERIFIED_MANUAL,
+            }
+            changed = contact_changed or result.status in {
                 ActionStatus.APPLIED,
                 ActionStatus.VERIFIED_MANUAL,
             }
@@ -1378,10 +1874,12 @@ class InteractiveProfileUpdateProcessor:
                 self._build_role_response(
                     row,
                     role.label,
-                    final_contact
-                    if result.status is not ActionStatus.REJECTED
-                    else original_contact,
-                    original_contact,
+                    (
+                        final_contact
+                        if result.status is not ActionStatus.REJECTED
+                        else previous_contact
+                    ),
+                    previous_contact,
                     changed=changed,
                 )
             )
@@ -1611,131 +2109,6 @@ class InteractiveProfileUpdateProcessor:
             results.append(self._review_proposal(proposal))
         return results
 
-    def _review_roles(
-        self,
-        batch: CaseBatch,
-        row: dict[str, str],
-        submissions: list[dict[str, Any]],
-    ) -> tuple[list[ActionResult], list[_RoleResponse]]:
-        results: list[ActionResult] = []
-        responses: list[_RoleResponse] = []
-        for role in ROLE_DEFINITIONS:
-            submitted = _submitted_role_values(submissions, row, role)
-            if not any(submitted.values()):
-                continue
-            self.output_fn(
-                _section_heading(f"{role.label} Contact role", ITEM_SEPARATOR)
-            )
-
-            original_role_id, original_role_contact = self._fresh_role_contact(
-                batch, role.account_lookup
-            )
-            matched = self._fresh_contact_by_email(
-                batch,
-                row,
-                role.label,
-                submitted.get("email", ""),
-            )
-            contact_results: list[ActionResult] = []
-            if matched is None:
-                created = self._review_new_contact(batch, row, role.label, submitted)
-                results.append(created)
-                contact_results.append(created)
-                if created.status in {
-                    ActionStatus.APPLIED,
-                    ActionStatus.VERIFIED_MANUAL,
-                }:
-                    contact_id = created.proposal.target_record_id
-                else:
-                    contact_id = ""
-            else:
-                self._show_contact_details(
-                    f"Current {role.label} Contact",
-                    matched,
-                )
-                contact_id = _display(matched.get("Id"))
-                for suffix, contact_field, field_label in CONTACT_SUFFIX_FIELDS:
-                    if suffix == "title" and role.title_field is None:
-                        continue
-                    proposed = submitted.get(suffix, "")
-                    if not proposed:
-                        continue
-                    proposal = self._proposal(
-                        batch,
-                        row,
-                        target_object="Contact",
-                        target_record_id=contact_id,
-                        field_name=contact_field,
-                        label=f"{role.label} Contact {field_label}",
-                        proposed_value=proposed,
-                    )
-                    reviewed = self._review_proposal(proposal)
-                    results.append(reviewed)
-                    contact_results.append(reviewed)
-
-            if not contact_id:
-                responses.append(
-                    self._build_role_response(
-                        row,
-                        role.label,
-                        original_role_contact,
-                        original_role_contact,
-                        changed=False,
-                    )
-                )
-                continue
-
-            proposed_role_contact = self.client.get_record(
-                "Contact",
-                contact_id,
-                CONTACT_REVIEW_FIELDS,
-            )
-            role_result = self._review_proposal(
-                self._proposal(
-                    batch,
-                    row,
-                    target_object="Account",
-                    target_record_id=batch.account_id,
-                    field_name=role.account_lookup,
-                    label=f"{role.label} Account Role",
-                    proposed_value=contact_id,
-                ),
-                original_display=_contact_name_email(original_role_contact),
-                proposed_display=_contact_name_email(proposed_role_contact),
-            )
-            results.append(role_result)
-
-            resolved_role = role_result.status in {
-                ActionStatus.APPLIED,
-                ActionStatus.VERIFIED_MANUAL,
-                ActionStatus.NOOP,
-            }
-            final_role_id = contact_id if resolved_role else original_role_id
-            final_role_contact = (
-                self.client.get_record("Contact", final_role_id, CONTACT_REVIEW_FIELDS)
-                if final_role_id
-                else None
-            )
-            contact_changed = any(
-                result.status in {ActionStatus.APPLIED, ActionStatus.VERIFIED_MANUAL}
-                for result in contact_results
-            )
-            role_changed = role_result.status in {
-                ActionStatus.APPLIED,
-                ActionStatus.VERIFIED_MANUAL,
-            }
-            responses.append(
-                self._build_role_response(
-                    row,
-                    role.label,
-                    final_role_contact,
-                    original_role_contact,
-                    changed=role_changed
-                    or (contact_changed and final_role_id == contact_id),
-                )
-            )
-        return results, responses
-
     def _fresh_role_contact(
         self,
         batch: CaseBatch,
@@ -1756,56 +2129,6 @@ class InteractiveProfileUpdateProcessor:
         )
         return contact_id, contact
 
-    def _fresh_contact_by_email(
-        self,
-        batch: CaseBatch,
-        row: dict[str, str],
-        role_label: str,
-        email: str,
-    ) -> dict[str, Any] | None:
-        contacts: list[dict[str, Any]] = []
-        if email:
-            contacts = self.client.query_records(
-                "Contact",
-                CONTACT_REVIEW_FIELDS,
-                where=f"Email = '{escape_soql_string(email)}'",
-                order_by="Id ASC",
-            )
-        if len(contacts) > 1:
-            error = (
-                f"Multiple Salesforce Contacts have the exact email {email!r}; "
-                f"the {role_label} role cannot be resolved safely."
-            )
-            proposal = self._proposal(
-                batch,
-                row,
-                target_object="Contact",
-                target_record_id="",
-                field_name="Email",
-                label=f"{role_label} Contact exact email match",
-                original_value=tuple(
-                    _display(contact.get("Id")) for contact in contacts
-                ),
-                proposed_value=email,
-            )
-            self._append_audit(
-                ActionResult(
-                    proposal,
-                    None,
-                    ActionStatus.FAILED,
-                    action="match Contact by exact email",
-                    error=error,
-                )
-            )
-            raise ProcessingError(error)
-        if contacts:
-            return dict(contacts[0])
-        self.output_fn(
-            f"No Salesforce Contact has the exact submitted {role_label} "
-            f"email {_display(email) or '(blank)'}."
-        )
-        return None
-
     def _build_role_response(
         self,
         row: dict[str, str],
@@ -1825,181 +2148,6 @@ class InteractiveProfileUpdateProcessor:
             previous_details=(previous if changed and previous != current else ""),
             changed=changed,
         )
-
-    def _review_new_contact(
-        self,
-        batch: CaseBatch,
-        row: dict[str, str],
-        role_label: str,
-        submitted: dict[str, str],
-        *,
-        resolution: ContactResolution | None = None,
-    ) -> ActionResult:
-        last_name = submitted.get("last_name", "")
-        payload: dict[str, str] = {"AccountId": batch.account_id}
-        for suffix, contact_field, _ in CONTACT_SUFFIX_FIELDS:
-            value = submitted.get(suffix, "")
-            if value:
-                payload[contact_field] = value
-        proposal = self._proposal(
-            batch,
-            row,
-            target_object="Contact",
-            target_record_id="(new)",
-            field_name="Contact",
-            label=f"{role_label} Contact",
-            proposed_value=payload,
-            original_value="",
-            resolution=resolution,
-        )
-        submitted_contact = {
-            contact_field: submitted.get(suffix, "")
-            for suffix, contact_field, _ in CONTACT_SUFFIX_FIELDS
-        }
-        self._show_contact_details(
-            f"Submitted {role_label} Contact",
-            submitted_contact,
-        )
-        if not last_name:
-            self.output_fn(
-                f"{role_label} Contact cannot be created automatically because "
-                "the required Last Name field is missing."
-            )
-        self._show_proposal(
-            proposal,
-            proposed_display=_contact_name_email(submitted_contact),
-        )
-        decision = self._review_decision(
-            proposal,
-            automatic_allowed=bool(last_name)
-            and (resolution is None or bool(resolution.comparison_key)),
-            action="create Contact",
-        )
-
-        if decision is ReviewDecision.WILL_NOT_BE_MADE:
-            result = ActionResult(
-                proposal,
-                decision,
-                ActionStatus.REJECTED,
-                action="create Contact",
-            )
-            self._append_audit(result)
-            return result
-        if decision is ReviewDecision.MAKE_MANUALLY:
-            try:
-                contact_id = self.input_fn(
-                    "Create the Contact in Salesforce, then enter its Contact ID: "
-                ).strip()
-                if not contact_id:
-                    raise ProcessingError(
-                        "A Contact ID is required for manual verification."
-                    )
-                fresh = self.client.get_record(
-                    "Contact", contact_id, CONTACT_REVIEW_FIELDS
-                )
-            except (KeyboardInterrupt, EOFError) as error:
-                result = ActionResult(
-                    proposal,
-                    decision,
-                    ActionStatus.INTERRUPTED,
-                    action="verify manual Contact creation",
-                    error="Reviewer interrupted processing.",
-                )
-                self._append_audit(result)
-                raise ProcessingInterrupted(
-                    "Profile Update review was interrupted."
-                ) from error
-            except ProcessingError as error:
-                result = ActionResult(
-                    proposal,
-                    decision,
-                    ActionStatus.FAILED,
-                    action="verify manual Contact creation",
-                    error=str(error),
-                )
-                self._append_audit(result)
-                raise
-            except SalesforceError as error:
-                result = ActionResult(
-                    proposal,
-                    decision,
-                    ActionStatus.FAILED,
-                    action="verify manual Contact creation",
-                    error=str(error),
-                )
-                self._append_audit(result)
-                raise ProcessingError(str(error)) from error
-            matches_account = _values_equal(fresh.get("AccountId"), batch.account_id)
-            matches_fields = all(
-                _values_equal(fresh.get(field_name), value)
-                for field_name, value in payload.items()
-                if field_name != "AccountId"
-            )
-            if not matches_account or not matches_fields:
-                error = (
-                    "Manually selected Contact does not match the submitted "
-                    "Contact information."
-                )
-                result = ActionResult(
-                    proposal,
-                    decision,
-                    ActionStatus.FAILED,
-                    action="verify manual Contact creation",
-                    error=error,
-                )
-                self._append_audit(result)
-                raise ProcessingError(error)
-            verified_proposal = ChangeProposal(
-                **{
-                    **proposal.__dict__,
-                    "target_record_id": contact_id,
-                    "selected_contact": contact_snapshot(fresh),
-                }
-            )
-            result = ActionResult(
-                verified_proposal,
-                decision,
-                ActionStatus.VERIFIED_MANUAL,
-                action="verify manual Contact creation",
-            )
-            self._append_audit(result)
-            return result
-
-        try:
-            contact_id = self.client.create_record("Contact", payload)
-        except SalesforceError as error:
-            if resolution is not None and _is_duplicate_contact_error(error):
-                return self._recover_duplicate_contact(
-                    batch,
-                    row,
-                    proposal,
-                    resolution,
-                    error,
-                )
-            result = ActionResult(
-                proposal,
-                decision,
-                ActionStatus.FAILED,
-                action="create Contact",
-                error=str(error),
-            )
-            self._append_audit(result)
-            raise ProcessingError(str(error)) from error
-        created_proposal = ChangeProposal(
-            **{
-                **proposal.__dict__,
-                "target_record_id": contact_id,
-                "selected_contact": contact_snapshot({"Id": contact_id, **payload}),
-            }
-        )
-        result = ActionResult(
-            created_proposal,
-            decision,
-            ActionStatus.APPLIED,
-            action="create Contact",
-        )
-        self._append_audit(result)
-        return result
 
     def _recover_duplicate_contact(
         self,

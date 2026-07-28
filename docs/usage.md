@@ -702,34 +702,69 @@ An already-current value is an audited no-op. It does not prompt and does not
 appear in response-email text.
 
 All row checkpoints are shown before the first Salesforce write. Processing
-then uses these ordered phases:
+then prints and completes these ordered phases:
 
-1. Resolve every distinct submitter and role comparison key for the Case.
-2. Show ambiguous candidates and collect all operator choices. A reviewer may
-   select one, create a Contact, or ignore only that email. A likely typo shows
-   its suggested Contact and corrected comparison and requires confirmation.
-3. Finish all approved Contact creates and field updates.
-4. Process non-role Account changes.
-5. Assign resolved Contacts to Account roles.
+1. `Contact Updates`
+2. `Account Updates`
+3. `Role Links`
 
-The same resolved Contact is reused when several roles or rows share a key.
-Roles without email keep their current Account-role Contact; they cannot create
-a new Contact automatically. Ignoring an email skips only its resolutions and
-roles.
+### Contact Updates
 
-When submitter and role email keys match, richer role details take precedence.
-Otherwise `Name__c` is split at the final space for possible Contact creation.
-Creation still requires an explicit decision. If that decision creates the
-submitter Contact, its ID is assigned to `Case.ContactId`; the Contact create
-and Case update are audited separately. Matching an existing submitter Contact
-alone never changes `Case.ContactId`.
+The processor reloads every source Profile Update and collects each nonblank
+Contact value explicitly submitted for the submitter and every role. The
+flattened staging `submitted` dictionary, staging fallbacks, and existing
+Salesforce field values are not proposals. Blank values neither erase a field
+nor participate in a conflict.
 
-For an exact match, the Contact's current name, title, email, and phone are
-displayed together before its individual fields. For a new Contact, all
-submitted details are displayed together before the creation decision.
-Account-role proposals use friendly Contact names and emails for the current
-and proposed values. Salesforce IDs remain available internally for record
-writes and audit entries, but are not exposed in decision prompts.
+Contact identity is based primarily on a Salesforce Contact ID. This includes
+fresh current Account-role lookups for partial updates and staged
+`change_email` or `update_contact` resolutions. When there is no identifying
+ID, exact, ambiguous, likely-typo, and new-Contact email matching continues to
+use the conservative family-aware rules described above. Ambiguous candidates
+are shown together; the reviewer may select one, create a Contact, or ignore
+that unresolved entry.
+
+Proposals for the same Contact are grouped across rows, roles, and
+submissions. Identical normalized values are stored once with all their
+sources. Distinct values conflict, including two values submitted for the same
+role. For each conflict, the command displays numbered candidate values beside
+their submission/role sources and prompts:
+
+```text
+Choose reconciled Title [1-2/current]:
+```
+
+The reviewer must choose one candidate or `current`. Choosing `current` keeps
+the current Salesforce value and removes that field from the final write. All
+identity and field-conflict choices finish before any Contact is written.
+
+A final table for each Contact shows `Field`, `Current Salesforce`,
+`Reconciled`, and `Sources`. The reviewer then makes one `A`, `M`, or `N`
+decision for the complete Contact:
+
+- `A` updates all changed fields in one `update_record` call, or creates a
+  shared new Contact once.
+- `M` pauses for a manual change and verifies all reconciled fields together.
+- `N` leaves the Contact unchanged.
+
+Thus each resolved Contact has at most one automated Contact create or update
+call in a run. A Contact already matching every reconciled value is an audited
+no-op without a decision prompt. If a new submitter Contact is created, its ID
+is assigned to `Case.ContactId`; matching an existing submitter alone does not
+change that Case lookup.
+
+### Account Updates and Role Links
+
+Ordinary company-name, owner, and billing-address changes run only after the
+Contact phase is complete. The final role-link phase uses the preserved mapping
+from each submission/role source to its resolved Contact ID, so it still works
+when phase one changed the Contact email or created a Contact shared by several
+roles. This phase may update Account role lookup fields only. It performs no
+Contact create or update.
+
+Account-role proposals use friendly Contact names and emails for current and
+proposed values. Salesforce IDs remain available internally for record writes
+and audit entries, but are not exposed in decision prompts.
 
 ### Duplicate-create recovery
 
@@ -784,9 +819,12 @@ so the Case is also set to `Closed`. If a response is not sent, the source
 records are closed and the Case stays `Pending`.
 
 Contact audit objects include classification, comparison key, candidates,
-selected Contact, reason, confidence, and warnings. Operator selections,
-duplicate recovery, ignored entries, Contact writes, Case Contact assignment,
-and later Account-role assignments are separate, immediately flushed events.
+selected Contact, reason, confidence, and warnings. Every field-conflict
+selection is an explicit event that records the candidate values and their
+sources. A single aggregate Contact create/update event records the final field
+dictionary and every source submission ID for that Contact. Operator identity
+selections, duplicate recovery, ignored entries, Case Contact assignment, and
+later Account-role assignments are separate, immediately flushed events.
 
 On interruption, an unrelated Salesforce failure, or a manual value that does not verify,
 the audit is flushed, unfinalized source Profile Updates stay open, the Case is
