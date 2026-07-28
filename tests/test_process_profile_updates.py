@@ -930,7 +930,7 @@ def test_new_contract_reuses_submitter_role_contact_and_assigns_case(tmp_path):
                 "FirstName": "Sam",
                 "LastName": "Submitter",
                 "Email": "sam@example.com",
-                "Phone": "312-555-0101",
+                "Phone": "312.555.0101",
             },
         )
     ]
@@ -958,6 +958,133 @@ def test_new_contract_reuses_submitter_role_contact_and_assigns_case(tmp_path):
     assert contact_create["comparison_key"] == "sam@example.com"
     assert case_assignment["target_record_id"] == "case-1"
     assert role_assignment["selected_contact"]["Id"] == "created-1"
+
+
+def test_fresh_contact_resolution_normalizes_values_before_comparison():
+    client = FakeClient(
+        source=source_record(
+            Name__c="  jane mcdonald ",
+            Email__c=" JANE@Example.COM ",
+            Phone__c="+1 (312) 555-0100 ext. 123",
+        )
+    )
+    processor = InteractiveProfileUpdateProcessor(client, now=NOW)
+    row = staged_row(
+        contact_resolutions=staged_resolution(
+            email="old@example.com",
+            sources=[ContactSource("submitter", submission_id="submission-1")],
+            submitted={
+                "first_name": "Old",
+                "last_name": "Value",
+                "email": "old@example.com",
+                "phone": "old",
+            },
+        )
+    )
+    batch = build_case_batches([row], now=NOW)[0]
+
+    resolutions = processor._fresh_batch_resolutions(
+        batch,
+        {"submission-1": client.records[("Company_Profile_Change__c", "submission-1")]},
+    )
+
+    resolution = resolutions["jane@example.com"]
+    assert resolution.submitted == {
+        "first_name": "Jane",
+        "last_name": "McDonald",
+        "email": "jane@example.com",
+        "phone": "312.555.0100 x123",
+    }
+    assert any(
+        query[2] == "Email = 'jane@example.com'" for query in client.queries
+    )
+
+
+def test_fresh_role_without_email_is_normalized_before_review(tmp_path):
+    current = {
+        "Id": "contact-quality",
+        "AccountId": "account-1",
+        "FirstName": "Taylor",
+        "LastName": "Lee",
+        "Title": "Old Title",
+        "Email": "taylor@example.com",
+        "Phone": "312.555.0199",
+    }
+    client = FakeClient(
+        source=source_record(
+            QC_Title__c=" chief qa officer ",
+            Quality_Phone__c="+1 (312) 555-0104 #0007",
+        ),
+        account=account_record(Cert_Marketing_Contact__c="contact-quality"),
+        contacts=[current],
+    )
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["apply automatically", "apply automatically", "yes"]),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    processor.review([staged_row(contact_resolutions="[]")], tmp_path)
+
+    assert (
+        "Contact",
+        "contact-quality",
+        {"Title": "Chief QA Officer"},
+    ) in client.updated
+    assert (
+        "Contact",
+        "contact-quality",
+        {"Phone": "312.555.0104 x0007"},
+    ) in client.updated
+
+
+def test_compatibility_review_normalizes_fresh_role_values(tmp_path):
+    client = FakeClient(
+        source=source_record(
+            Cert_First_Name__c=" aLEX ",
+            Cert_Last_Name__c=" mcdonald ",
+            Cert_Title__c=" chief qa officer ",
+            Cert_Email__c=" NEW.CONTACT@Example.COM ",
+            Cert_Phone__c="+1 (312) 555-0105 ext 42",
+        )
+    )
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(
+            ["apply automatically", "apply automatically", "yes"]
+        ),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    processor.review(
+        [
+            staged_row(
+                certification_first_name="stale",
+                certification_last_name="stale",
+                certification_email="stale@example.com",
+            )
+        ],
+        tmp_path,
+    )
+
+    assert client.created == [
+        (
+            "Contact",
+            {
+                "AccountId": "account-1",
+                "FirstName": "Alex",
+                "LastName": "McDonald",
+                "Title": "Chief QA Officer",
+                "Email": "new.contact@example.com",
+                "Phone": "312.555.0105 x42",
+            },
+        )
+    ]
+    assert any(
+        query[2] == "Email = 'new.contact@example.com'" for query in client.queries
+    )
 
 
 def test_duplicate_create_can_recover_with_an_alternate_email_contact(tmp_path):

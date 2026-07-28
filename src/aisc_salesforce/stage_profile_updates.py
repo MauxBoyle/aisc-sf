@@ -12,13 +12,16 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .contact_normalization import normalize_contact_value
 from .contact_resolution import (
     ContactResolution,
     ContactSource,
     family_account_ids,
     merge_resolution,
-    normalize_email,
     resolve_contact,
+)
+from .contact_resolution import (
+    normalize_email as normalize_resolution_email,
 )
 from .profile_update_subjects import subject_has_profile_update
 from .profile_updates import escape_soql_string
@@ -374,9 +377,15 @@ class ProfileUpdateStagingService:
                     account.get("Certification_ID__c") if account else None,
                     merged.get("Certification_ID__c"),
                 ),
-                "submitter_name": _clean_text(merged.get("Name__c")),
-                "submitter_email": _clean_text(merged.get("Email__c")),
-                "submitter_phone": _clean_text(merged.get("Phone__c")),
+                "submitter_name": normalize_contact_value(
+                    "name", merged.get("Name__c")
+                ),
+                "submitter_email": normalize_contact_value(
+                    "email", merged.get("Email__c")
+                ),
+                "submitter_phone": normalize_contact_value(
+                    "phone", merged.get("Phone__c")
+                ),
                 "comments": _collect_submitted_values(records, "Comments__c"),
                 "personnel_notes": _collect_submitted_values(
                     records, "Other_Personnel_Notes__c"
@@ -631,7 +640,7 @@ def _build_contact_resolutions(
     resolutions: dict[str, ContactResolution] = {}
     invalid_index = 0
     for email, source, submitted in entries:
-        normalized, comparison_key, _ = normalize_email(email)
+        normalized, comparison_key, _ = normalize_resolution_email(email)
         resolution = resolve_contact(
             normalized,
             contacts,
@@ -672,7 +681,9 @@ def _group_submissions(
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for index, record in enumerate(submissions):
         account_id = _clean_text(record.get("Account__c"))
-        normalized_email, comparison_key, _ = normalize_email(record.get("Email__c"))
+        normalized_email, comparison_key, _ = normalize_resolution_email(
+            record.get("Email__c")
+        )
         email = comparison_key or normalized_email
         record_id = _clean_text(record.get("Id")) or str(index)
         account_key = account_id or f"blank-account:{record_id}"
@@ -727,7 +738,9 @@ def _merge_roles(records: list[dict[str, Any]]) -> list[MergedRole]:
             supplied_here = False
             for suffix, api_name in definition.submitted_fields:
                 if _has_value(record.get(api_name)):
-                    values[suffix] = _display_value(record.get(api_name))
+                    values[suffix] = normalize_contact_value(
+                        suffix, record.get(api_name)
+                    )
                     supplied_here = True
             if supplied_here:
                 source_submission_id = _clean_text(record.get("Id"))

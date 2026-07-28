@@ -490,6 +490,54 @@ When at least one revised address component is present, the output contains all
 five components. Missing submitted components are filled from the Account
 billing address where possible.
 
+### Submitted contact normalization
+
+Staging canonicalizes only values submitted for the submitter and the five
+Contact roles. It does this before role resolution, CSV projection, and
+`contact_resolutions` JSON construction:
+
+- Every email is trimmed and lowercased, including an invalid address that must
+  remain available for human review.
+- Submitter names, role first and last names, and role titles are trimmed and
+  changed to Proper Case. Punctuation is preserved.
+- Case-insensitive whole-token exceptions preserve these spellings: `CEO`,
+  `CFO`, `COO`, `CTO`, `VP`, `HR`, `QA`, `QC`, `QMS`, `IT`, `ISO`, `AWS`,
+  `API`, `AI`, `PhD`, `MBA`, `iOS`, `macOS`, `McDonald`, `MacKenzie`, and
+  `O'Connor`.
+- A recognizable ten-digit North American phone, optionally prefixed by `1` or
+  `+1`, becomes `###.###.####`.
+- An extension introduced by `x`, `ext`, `ext.`, `extension`, or `#` becomes
+  ` x#`. Every extension digit is kept, including leading zeroes.
+- Blank phones stay blank. International, malformed, partial, and otherwise
+  unrecognized phones keep their submitted text after outer whitespace is
+  trimmed.
+
+Examples:
+
+| Submitted | Staged |
+|---|---|
+| `ALEX.SMITH@Example.COM` | `alex.smith@example.com` |
+| `jane mcdonald` | `Jane McDonald` |
+| `chief qa officer` | `Chief QA Officer` |
+| `+1 (312) 555-0100 ext. 123` | `312.555.0100 x123` |
+| `+44 20 7946 0958` | `+44 20 7946 0958` |
+
+Existing Salesforce Contact values are not normalized. Values copied from an
+existing Contact to provide review context retain their Salesforce spelling
+and formatting, and non-contact submission fields are unchanged. The staging
+command is still query-only. During interactive processing, fresh submission
+records are loaded as before and these same rules are applied to their contact
+values before comparisons or proposals.
+
+To add another capitalization exception, edit
+`CONTACT_CASE_EXCEPTIONS` in
+`src/aisc_salesforce/contact_normalization.py`. Add the desired canonical
+spelling to that tuple and add a parameterized test case if the existing
+all-exceptions test does not already cover the scenario. Do not add another
+branch to the Proper Case algorithm: the lookup is automatically
+case-insensitive and whole-token-only. Then run the focused normalization
+tests and the full verification commands.
+
 ### CSV contract
 
 Each row contains these groups of columns:
