@@ -192,7 +192,13 @@ decisions, Salesforce execution, response formatting, and audit writing
 separate.
 
 `InteractiveProfileUpdateProcessor` refetches a target immediately before each
-decision. It writes `review_audit.jsonl` after every result and
+decision. Submitted Contacts with valid emails are resolved and reconciled by
+email identity before Account role assignment; a current role Contact ID is
+only a fallback for a partial proposal without an email. Different emails stay
+separate even when submitted for the same role, unless identity review resolves
+them to the same Salesforce Contact. Reviewer-facing Contact comparisons use
+labeled field lines, while the JSON audit retains structured dictionaries. The
+processor writes `review_audit.jsonl` after every result and
 `response_emails.txt` for successful Account changes and completed submitted
 roles. Profile Update closure and the Case's final status happen only after the
 entire Case batch is resolved. `format_response_emails` keeps Account field
