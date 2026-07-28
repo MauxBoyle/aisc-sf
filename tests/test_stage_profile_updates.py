@@ -174,6 +174,101 @@ def test_staging_publishes_deduplicated_contact_resolution_contract():
     assert resolution["submitted"]["last_name"] == "Smith"
 
 
+def test_staging_normalizes_submitter_and_every_submitted_role_consistently():
+    record = submission(
+        Name__c="  jane mcdonald  ",
+        Email__c=" JANE.Submitter@Example.COM ",
+        Phone__c="+1 (312) 555-0100 ext. 123",
+        Cert_First_Name__c="aLEX",
+        Cert_Last_Name__c="mcdonald",
+        Cert_Title__c="chief qa officer",
+        Cert_Email__c=" CERT@Example.COM ",
+        Cert_Phone__c="312-555-0101",
+        Principal_First_Name__c="pat",
+        Principal_Last_Name__c="o'connor",
+        Principal_Title__c="ceo",
+        Principal_Email__c=" PRINCIPAL@Example.COM ",
+        Principal_Phone__c="1 312 555 0102",
+        AP_First_Name__c="casey",
+        AP_Last_Name__c="mackenzie",
+        AP_Title__c="vp of it",
+        AP_Email__c=" AP@Example.COM ",
+        AP_Phone__c="3125550103 x004",
+        Quality_First_Name__c="taylor",
+        Quality_Last_Name__c="lee",
+        QC_Title__c="qms api manager",
+        Quality_Email__c=" QUALITY@Example.COM ",
+        Quality_Phone__c="(312) 555-0104 #55",
+        NY_First_Name__c="morgan",
+        NY_Last_Name__c="reed",
+        NY_Email__c=" NY@Example.COM ",
+        NY_Phone__c="+44 20 7946 0958",
+    )
+
+    result, _ = stage([record], accounts=[account(ParentId="")])
+
+    row = result.rows[0]
+    assert (
+        row["submitter_name"],
+        row["submitter_email"],
+        row["submitter_phone"],
+    ) == (
+        "Jane McDonald",
+        "jane.submitter@example.com",
+        "312.555.0100 x123",
+    )
+    expected_roles = {
+        "certification": {
+            "first_name": "Alex",
+            "last_name": "McDonald",
+            "title": "Chief QA Officer",
+            "email": "cert@example.com",
+            "phone": "312.555.0101",
+        },
+        "principal": {
+            "first_name": "Pat",
+            "last_name": "O'Connor",
+            "title": "CEO",
+            "email": "principal@example.com",
+            "phone": "312.555.0102",
+        },
+        "accounting": {
+            "first_name": "Casey",
+            "last_name": "MacKenzie",
+            "title": "VP Of IT",
+            "email": "ap@example.com",
+            "phone": "312.555.0103 x004",
+        },
+        "quality": {
+            "first_name": "Taylor",
+            "last_name": "Lee",
+            "title": "QMS API Manager",
+            "email": "quality@example.com",
+            "phone": "312.555.0104 x55",
+        },
+        "new_york": {
+            "first_name": "Morgan",
+            "last_name": "Reed",
+            "email": "ny@example.com",
+            "phone": "+44 20 7946 0958",
+        },
+    }
+    resolutions = {
+        item["normalized_email"]: item["submitted"]
+        for item in json.loads(row["contact_resolutions"])
+    }
+    assert resolutions["jane.submitter@example.com"] == {
+        "first_name": "Jane",
+        "last_name": "McDonald",
+        "email": "jane.submitter@example.com",
+        "phone": "312.555.0100 x123",
+    }
+    for prefix, expected in expected_roles.items():
+        for suffix, value in expected.items():
+            assert row[f"{prefix}_{suffix}"] == value
+        assert resolutions[expected["email"]] == expected
+
+
 def test_staging_queries_the_parent_account_as_part_of_the_family():
     _, client = stage([submission()], accounts=[account()])
 
@@ -404,7 +499,7 @@ def test_same_submitted_contact_in_multiple_roles_is_not_ambiguous():
     row = result.rows[0]
     assert row["certification_resolution_action"] == "use_submitted_contact"
     assert row["certification_title"] == "President"
-    assert row["certification_phone"] == "312-555-0142"
+    assert row["certification_phone"] == "312.555.0142"
     assert row["certification_warning"] == ""
     assert row["has_warnings"] == "false"
 
@@ -513,7 +608,7 @@ def test_another_submitted_role_filling_optional_contact_details_is_reported():
 
     row = result.rows[0]
     assert row["certification_title"] == "President"
-    assert row["certification_phone"] == "312-555-0142"
+    assert row["certification_phone"] == "312.555.0142"
     assert row["has_contact_derived_values"] == "true"
 
 

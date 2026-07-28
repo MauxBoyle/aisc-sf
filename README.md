@@ -303,6 +303,22 @@ separate, and every blank-email submission stays separate and receives a
 warning. Each CSV row preserves all source submission IDs and names as JSON
 arrays.
 
+Submitted contact values are canonicalized before role matching and
+`contact_resolutions` creation. Submitter and role emails are trimmed and
+lowercased, names and titles use Proper Case with project-defined exceptions,
+and recognizable North American phone numbers use `###.###.####` plus an
+optional ` x#` extension. For example, `jane mcdonald`, `chief qa officer`,
+and `+1 (312) 555-0100 ext. 123` become `Jane McDonald`,
+`Chief QA Officer`, and `312.555.0100 x123`. Blank values stay blank.
+International, malformed, and otherwise unrecognized phones are only trimmed;
+for example, `+44 20 7946 0958` remains unchanged.
+
+This applies only to submitted contact data. Existing Salesforce Contact
+values and non-contact submission fields are not reformatted, and staging
+remains query-only. The interactive processor applies the same rules when it
+reloads fresh submissions before comparisons. See the
+[detailed normalization rules and exception-list maintenance](docs/usage.md#submitted-contact-normalization).
+
 The CSV has shared submission and Account columns, Key Data columns, and
 prefixed role columns for `certification_`, `principal_`, `accounting_`,
 `quality_`, and `new_york_`. Role columns preserve submitted values and record

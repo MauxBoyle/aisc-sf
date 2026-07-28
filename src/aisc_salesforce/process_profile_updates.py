@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, TextIO
 from zoneinfo import ZoneInfo
 
+from .contact_normalization import normalize_contact_value
 from .contact_resolution import (
     ContactResolution,
     ContactResolutionClassification,
@@ -35,6 +36,7 @@ from .stage_profile_updates import (
     CSV_COLUMNS,
     ROLE_DEFINITIONS,
     ProfileUpdateStagingService,
+    RoleDefinition,
     StagingResult,
     write_staged_profile_updates,
 )
@@ -870,17 +872,21 @@ class InteractiveProfileUpdateProcessor:
         fallback: dict[str, str],
     ) -> dict[str, str]:
         """Overlay fresh submission values on staged Contact details."""
-        details = dict(fallback)
+        details = {
+            field_name: normalize_contact_value(field_name, value)
+            for field_name, value in fallback.items()
+        }
         record = fresh_by_id.get(source.submission_id)
         if record is None:
             return details
         if source.kind == "submitter":
-            first_name, last_name = _split_person_name(_display(record.get("Name__c")))
+            name = normalize_contact_value("name", record.get("Name__c"))
+            first_name, last_name = _split_person_name(name)
             fresh_values = {
                 "first_name": first_name,
                 "last_name": last_name,
-                "email": _display(record.get("Email__c")),
-                "phone": _display(record.get("Phone__c")),
+                "email": normalize_contact_value("email", record.get("Email__c")),
+                "phone": normalize_contact_value("phone", record.get("Phone__c")),
             }
         else:
             role = next(
@@ -894,7 +900,7 @@ class InteractiveProfileUpdateProcessor:
             if role is None:
                 return details
             fresh_values = {
-                suffix: _display(record.get(source_field))
+                suffix: normalize_contact_value(suffix, record.get(source_field))
                 for suffix, source_field in role.submitted_fields
             }
         details.update(
@@ -1198,13 +1204,7 @@ class InteractiveProfileUpdateProcessor:
                 for source_id in _json_string_list(row["source_submission_ids"])
             ]
             for role in ROLE_DEFINITIONS:
-                submitted = {
-                    suffix: (
-                        _latest_nonblank(submissions, source_field)
-                        or row.get(f"{role.prefix}_{suffix}", "").strip()
-                    )
-                    for suffix, source_field in role.submitted_fields
-                }
+                submitted = _submitted_role_values(submissions, row, role)
                 if not any(submitted.values()) or submitted.get("email"):
                     continue
                 contact_id, contact = self._fresh_role_contact(
@@ -1305,13 +1305,7 @@ class InteractiveProfileUpdateProcessor:
         results: list[ActionResult] = []
         responses: list[_RoleResponse] = []
         for role in ROLE_DEFINITIONS:
-            submitted = {
-                suffix: (
-                    _latest_nonblank(submissions, source_field)
-                    or row.get(f"{role.prefix}_{suffix}", "").strip()
-                )
-                for suffix, source_field in role.submitted_fields
-            }
+            submitted = _submitted_role_values(submissions, row, role)
             if not any(submitted.values()):
                 continue
             original_id, original_contact = self._fresh_role_contact(
@@ -1626,14 +1620,7 @@ class InteractiveProfileUpdateProcessor:
         results: list[ActionResult] = []
         responses: list[_RoleResponse] = []
         for role in ROLE_DEFINITIONS:
-            prefix = role.prefix
-            submitted = {
-                suffix: (
-                    _latest_nonblank(submissions, source_field)
-                    or row.get(f"{prefix}_{suffix}", "").strip()
-                )
-                for suffix, source_field in role.submitted_fields
-            }
+            submitted = _submitted_role_values(submissions, row, role)
             if not any(submitted.values()):
                 continue
             self.output_fn(
@@ -2679,6 +2666,23 @@ def _latest_nonblank(records: list[dict[str, Any]], field_name: str) -> str:
         if candidate:
             value = candidate
     return value
+
+
+def _submitted_role_values(
+    submissions: list[dict[str, Any]],
+    row: dict[str, str],
+    role: RoleDefinition,
+) -> dict[str, str]:
+    """Prefer and normalize fresh submitted values for one Contact role."""
+    values: dict[str, str] = {}
+    for suffix, source_field in role.submitted_fields:
+        fresh_value = _latest_nonblank(submissions, source_field)
+        values[suffix] = (
+            normalize_contact_value(suffix, fresh_value)
+            if fresh_value
+            else row.get(f"{role.prefix}_{suffix}", "").strip()
+        )
+    return values
 
 
 def _json_string_list(value: str) -> list[str]:
