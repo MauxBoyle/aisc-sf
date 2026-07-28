@@ -805,11 +805,15 @@ def test_exact_email_match_is_global_and_each_mismatch_precedes_role_decision(
         for item in entries
     )
     displayed = "\n".join(output)
-    assert "Reconciled Certification Contact" in displayed
+    assert "Reconciled Contact: Alexa Jones <old@example.com>" in displayed
     assert ("First Name | Alex | Alexa | submission-1 / Certification") in displayed
     assert (
         "Phone | 312-555-0100 | 312.555.0199 | submission-1 / Certification"
     ) in displayed
+    assert "First Name: Alex -> Alexa" in displayed
+    assert "Phone: 312-555-0100 -> 312.555.0199" in displayed
+    assert "Current Salesforce value: {" not in displayed
+    assert "Proposed value: {" not in displayed
     assert (
         "Certification Account Role\n"
         "Current Salesforce value: Old Contact <old.contact@example.com>\n"
@@ -903,11 +907,18 @@ def test_valid_contact_creation_precedes_field_and_role_decisions(tmp_path):
         {"Cert_Certification_Contact__c": "created-1"},
     ) in client.updated
     displayed = "\n".join(output)
-    assert "Reconciled Certification Contact" in displayed
+    assert (
+        "Reconciled Contact: New Person <new.person@example.com>" in displayed
+    )
     assert "First Name | (blank) | New | submission-1 / Certification" in displayed
     assert (
         "Email | (blank) | new.person@example.com | submission-1 / Certification"
     ) in displayed
+    assert "New Salesforce values:" in displayed
+    assert "First Name: New" in displayed
+    assert "Last Name: Person" in displayed
+    assert "Email: new.person@example.com" in displayed
+    assert "Proposed value: {" not in displayed
 
 
 def test_new_contract_reuses_submitter_role_contact_and_assigns_case(tmp_path):
@@ -1328,30 +1339,48 @@ def test_interruption_during_contact_conflict_is_audited_before_any_write(tmp_pa
     assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
 
 
-def test_changed_email_uses_current_role_contact_id_and_updates_once(tmp_path):
-    contact = {
+def test_submitted_email_selects_its_contact_instead_of_current_role_contact(
+    tmp_path,
+):
+    current_role_contact = {
         "Id": "contact-1",
         "AccountId": "account-1",
-        "FirstName": "Alex",
-        "LastName": "Smith",
+        "FirstName": "Ray",
+        "LastName": "Ryan",
         "Title": "",
-        "Email": "old@example.com",
+        "Email": "ray@example.com",
+        "Phone": "",
+    }
+    submitted_contact = {
+        "Id": "contact-2",
+        "AccountId": "account-1",
+        "FirstName": "Tim",
+        "LastName": "Ryan",
+        "Title": "Old Title",
+        "Email": "tim@example.com",
         "Phone": "",
     }
     client = FakeClient(
         account=account_record(Cert_Certification_Contact__c="contact-1"),
-        contacts=[contact],
+        contacts=[current_role_contact, submitted_contact],
     )
     client.records[("Company_Profile_Change__c", "submission-1")].update(
         {
-            "Cert_First_Name__c": "Alex",
-            "Cert_Last_Name__c": "Smith",
-            "Cert_Email__c": "new@example.com",
+            "Cert_First_Name__c": "Tim",
+            "Cert_Last_Name__c": "Ryan",
+            "Cert_Title__c": "President",
+            "Cert_Email__c": "tim@example.com",
         }
     )
     processor = InteractiveProfileUpdateProcessor(
         client,
-        input_fn=Feeder(["apply automatically", "yes"]),
+        input_fn=Feeder(
+            [
+                "apply automatically",
+                "apply automatically",
+                "yes",
+            ]
+        ),
         output_fn=lambda message: None,
         now=NOW,
     )
@@ -1359,7 +1388,7 @@ def test_changed_email_uses_current_role_contact_id_and_updates_once(tmp_path):
         certification_resolution_action="change_email",
         certification_salesforce_contact_id="contact-1",
         contact_resolutions=staged_resolution(
-            email="new@example.com",
+            email="tim@example.com",
             sources=[
                 ContactSource(
                     "role",
@@ -1375,8 +1404,135 @@ def test_changed_email_uses_current_role_contact_id_and_updates_once(tmp_path):
 
     assert client.created == []
     assert [item for item in client.updated if item[0] == "Contact"] == [
-        ("Contact", "contact-1", {"Email": "new@example.com"})
+        ("Contact", "contact-2", {"Title": "President"})
     ]
+    assert (
+        "Account",
+        "account-1",
+        {"Cert_Certification_Contact__c": "contact-2"},
+    ) in client.updated
+
+
+def test_contact_updates_use_tim_and_stacy_emails_before_assigning_roles(tmp_path):
+    ray = {
+        "Id": "contact-ray",
+        "AccountId": "account-1",
+        "FirstName": "Ray",
+        "LastName": "Ryan",
+        "Title": "President",
+        "Email": "ray@wsfabrication.com",
+        "Phone": "312.555.0100",
+    }
+    tim = {
+        "Id": "contact-tim",
+        "AccountId": "account-1",
+        "FirstName": "Tim",
+        "LastName": "Ryan",
+        "Title": "Old Title",
+        "Email": "tim@wsfabrication.com",
+        "Phone": "312.555.0101",
+    }
+    stacy = {
+        "Id": "contact-stacy",
+        "AccountId": "account-1",
+        "FirstName": "Stacy",
+        "LastName": "Morgan",
+        "Title": "",
+        "Email": "stacy@wsfabrication.com",
+        "Phone": "312.555.0102",
+    }
+    client = FakeClient(
+        source=source_record(
+            Name__c="Stacy Morgan",
+            Email__c="stacy@wsfabrication.com",
+            Phone__c="312-555-0198",
+            Principal_First_Name__c="Tim",
+            Principal_Last_Name__c="Ryan",
+            Principal_Title__c="Owner",
+            Principal_Email__c="tim@wsfabrication.com",
+            Principal_Phone__c="312-555-0199",
+        ),
+        account=account_record(Cert_Principal_Contact__c="contact-ray"),
+        contacts=[ray, tim, stacy],
+    )
+    submitter_resolution = json.loads(
+        staged_resolution(
+            email="stacy@wsfabrication.com",
+            sources=[ContactSource("submitter", submission_id="submission-1")],
+            classification=ContactResolutionClassification.USE_EXISTING,
+            selected=stacy,
+        )
+    )[0]
+    # This deliberately reproduces the stale/wrong role-based selection. Fresh
+    # email resolution must still choose Tim rather than Ray.
+    principal_resolution = json.loads(
+        staged_resolution(
+            email="tim@wsfabrication.com",
+            sources=[
+                ContactSource(
+                    "role",
+                    role="principal",
+                    submission_id="submission-1",
+                )
+            ],
+            classification=ContactResolutionClassification.USE_EXISTING,
+            selected=ray,
+        )
+    )[0]
+    output = []
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(
+            [
+                "apply automatically",
+                "apply automatically",
+                "apply automatically",
+                "yes",
+            ]
+        ),
+        output_fn=output.append,
+        now=NOW,
+    )
+
+    processor.review(
+        [
+            staged_row(
+                submitter_name="Stacy Morgan",
+                submitter_email="stacy@wsfabrication.com",
+                principal_resolution_action="update_contact",
+                principal_salesforce_contact_id="contact-ray",
+                contact_resolutions=json.dumps(
+                    [submitter_resolution, principal_resolution]
+                ),
+            )
+        ],
+        tmp_path,
+    )
+
+    assert [item for item in client.updated if item[0] == "Contact"] == [
+        ("Contact", "contact-stacy", {"Phone": "312.555.0198"}),
+        (
+            "Contact",
+            "contact-tim",
+            {"Title": "Owner", "Phone": "312.555.0199"},
+        ),
+    ]
+    assert not any(
+        object_name == "Contact" and record_id == "contact-ray"
+        for object_name, record_id, _ in client.updated
+    )
+    assert (
+        "Account",
+        "account-1",
+        {"Cert_Principal_Contact__c": "contact-tim"},
+    ) in client.updated
+    displayed = "\n".join(output)
+    assert (
+        "Reconciled Contact: Stacy Morgan <stacy@wsfabrication.com>" in displayed
+    )
+    assert "Reconciled Contact: Tim Ryan <tim@wsfabrication.com>" in displayed
+    assert "Current Salesforce value: {" not in displayed
+    assert "Proposed value: {" not in displayed
 
 
 def test_shared_new_contact_is_created_once_and_reused_for_both_roles(tmp_path):
@@ -1445,7 +1601,7 @@ def test_shared_new_contact_is_created_once_and_reused_for_both_roles(tmp_path):
     ) in client.updated
 
 
-def test_distinct_emails_from_two_submissions_for_one_role_are_one_conflict(
+def test_distinct_emails_in_one_role_stay_separate_until_role_assignment(
     tmp_path,
 ):
     client = FakeClient()
@@ -1471,7 +1627,7 @@ def test_distinct_emails_from_two_submissions_for_one_role_are_one_conflict(
     ]
     feeder = Feeder(
         [
-            "2",
+            "apply automatically",
             "apply automatically",
             "apply automatically",
             "yes",
@@ -1507,24 +1663,42 @@ def test_distinct_emails_from_two_submissions_for_one_role_are_one_conflict(
                 "AccountId": "account-1",
                 "FirstName": "New",
                 "LastName": "Person",
+                "Email": "first@example.com",
+            },
+        ),
+        (
+            "Contact",
+            {
+                "AccountId": "account-1",
+                "FirstName": "New",
+                "LastName": "Person",
                 "Email": "second@example.com",
             },
         )
     ]
+    assert (
+        "Account",
+        "account-1",
+        {"Cert_Certification_Contact__c": "created-2"},
+    ) in client.updated
     entries = [
         json.loads(line)
         for line in result.audit_path.read_text(encoding="utf-8").splitlines()
     ]
-    email_conflict = next(
-        entry
-        for entry in entries
-        if entry["action"] == "resolve Contact field conflict"
-        and entry["field"] == "Email"
-    )
-    assert email_conflict["source_submission_ids"] == [
-        "submission-1",
-        "submission-2",
+    creates = [entry for entry in entries if entry["action"] == "create Contact"]
+    assert [entry["proposed_value"]["Email"] for entry in creates] == [
+        "first@example.com",
+        "second@example.com",
     ]
+    assert [entry["source_submission_ids"] for entry in creates] == [
+        ["submission-1"],
+        ["submission-2"],
+    ]
+    assert not any(
+        entry["action"] == "resolve Contact field conflict"
+        and entry["field"] == "Email"
+        for entry in entries
+    )
 
 
 def test_every_fresh_submitter_submission_contributes_to_reconciliation(tmp_path):

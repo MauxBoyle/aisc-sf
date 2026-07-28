@@ -92,6 +92,14 @@ CONTACT_SUFFIX_FIELDS = [
     ("phone", "Phone", "Phone"),
 ]
 
+CONTACT_FIELD_LABELS = {
+    "AccountId": "Account ID",
+    **{
+        contact_field: field_label
+        for _, contact_field, field_label in CONTACT_SUFFIX_FIELDS
+    },
+}
+
 ACCOUNT_EMAIL_OPENING = (
     "Thank you for updating your information with AISC. The changes are "
     "summarized below. An updated Participant Portal login will be sent by a "
@@ -760,18 +768,7 @@ class InteractiveProfileUpdateProcessor:
                     }
                     if details:
                         source = ContactSource("submitter", submission_id=submission_id)
-                        staged_resolution = staged_by_source.get(
-                            ("submitter", "", submission_id)
-                        )
-                        selected = (
-                            staged_resolution.selected_contact
-                            if staged_resolution is not None
-                            else None
-                        )
-                        identity_id = (
-                            _display(selected.get("Id")) if selected is not None else ""
-                        )
-                        occurrences.append((source, details, row, identity_id))
+                        occurrences.append((source, details, row, ""))
 
                 for role in ROLE_DEFINITIONS:
                     details = {
@@ -798,10 +795,11 @@ class InteractiveProfileUpdateProcessor:
                     ).strip()
                     current_id = _display(account.get(role.account_lookup))
                     identity_id = ""
-                    if action in {"update_contact", "change_email"}:
-                        identity_id = current_id or staged_id
-                    elif not details.get("email") and action != "create_contact":
-                        identity_id = current_id or staged_id
+                    # A submitted email identifies the Contact independently of
+                    # the role. Only a partial proposal with no email falls back
+                    # to the Contact currently linked to that role.
+                    if not details.get("email") and action != "create_contact":
+                        identity_id = staged_id or current_id
                     staged_resolution = staged_by_source.get(
                         ("role", role.prefix, submission_id)
                     )
@@ -810,7 +808,11 @@ class InteractiveProfileUpdateProcessor:
                         if staged_resolution is not None
                         else None
                     )
-                    if not identity_id and selected is not None:
+                    if (
+                        not details.get("email")
+                        and not identity_id
+                        and selected is not None
+                    ):
                         identity_id = _display(selected.get("Id"))
                     occurrences.append((source, details, row, identity_id))
 
@@ -966,83 +968,10 @@ class InteractiveProfileUpdateProcessor:
                 dict.fromkeys([*item.resolution.warnings, *fresh_resolution.warnings])
             )
             item.resolution = fresh_resolution
-        items = list(grouped.values())
-        for row in batch.rows:
-            row_source_ids = set(_json_string_list(row["source_submission_ids"]))
-            for role in ROLE_DEFINITIONS:
-                same_role = [
-                    item
-                    for item in items
-                    if any(
-                        kind == "role"
-                        and source_role == role.prefix
-                        and submission_id in row_source_ids
-                        for kind, source_role, submission_id in item.source_keys
-                    )
-                ]
-                if len(same_role) < 2:
-                    continue
-                target = same_role[0]
-                preferred_resolution = same_role[-1].resolution
-                selected_contacts = {
-                    _display(
-                        (item.resolution.selected_contact or {}).get("Id")
-                    ): item.resolution.selected_contact
-                    for item in same_role
-                    if _display((item.resolution.selected_contact or {}).get("Id"))
-                }
-                for item in same_role[1:]:
-                    target.source_keys.update(item.source_keys)
-                    for source in item.resolution.sources:
-                        if source not in target.resolution.sources:
-                            target.resolution.sources.append(source)
-                    for field_name, values in item.proposals.items():
-                        for value, sources in values.items():
-                            destination = target.proposals.setdefault(
-                                field_name, {}
-                            ).setdefault(value, [])
-                            destination.extend(
-                                source
-                                for source in sources
-                                if source not in destination
-                            )
-                    items.remove(item)
-                if len(selected_contacts) == 1:
-                    contact = next(iter(selected_contacts.values()))
-                    target.resolution.classification = (
-                        ContactResolutionClassification.USE_EXISTING
-                    )
-                    target.resolution.selected_contact = contact
-                    target.contact_id = _display(contact.get("Id"))
-                elif len(selected_contacts) > 1:
-                    target.resolution.classification = (
-                        ContactResolutionClassification.AMBIGUOUS
-                    )
-                    target.resolution.selected_contact = None
-                    target.resolution.candidates = [
-                        dict(contact)
-                        for contact in selected_contacts.values()
-                        if contact is not None
-                    ]
-                    target.contact_id = ""
-                    target.resolution.reason = (
-                        "Submissions for the same role identify different "
-                        "Salesforce Contacts."
-                    )
-                else:
-                    combined_sources = target.resolution.sources
-                    combined_warnings = target.resolution.warnings
-                    target.resolution = preferred_resolution
-                    target.resolution.sources = combined_sources
-                    target.resolution.warnings = list(
-                        dict.fromkeys(
-                            [
-                                *combined_warnings,
-                                *preferred_resolution.warnings,
-                            ]
-                        )
-                    )
-        return items, source_mapping
+        # Keep different email identities separate even when they appeared in
+        # the same role. Role assignment happens later, after every submitted
+        # Contact has been reviewed and brought up to date.
+        return list(grouped.values()), source_mapping
 
     def _resolve_contact_identities(
         self,
@@ -1241,9 +1170,10 @@ class InteractiveProfileUpdateProcessor:
         )
 
     def _show_reconciled_contact(self, item: _ContactWorkItem) -> None:
+        identity = self._contact_review_identity(item)
         self.output_fn(
             _section_heading(
-                f"Reconciled {self._resolution_label(item.resolution)}",
+                f"Reconciled Contact: {identity}",
                 ITEM_SEPARATOR,
             )
         )
@@ -1282,7 +1212,7 @@ class InteractiveProfileUpdateProcessor:
             batch,
             item,
             field_name="Contact",
-            label=f"{self._resolution_label(item.resolution)} Contact",
+            label=f"Contact: {self._contact_review_identity(item)}",
             original_value=item.current_contact or {},
             proposed_value=payload,
         )
@@ -1324,7 +1254,7 @@ class InteractiveProfileUpdateProcessor:
             batch,
             item,
             field_name="Contact",
-            label=f"{self._resolution_label(item.resolution)} Contact",
+            label=f"Contact: {self._contact_review_identity(item)}",
             original_value=item.current_contact or {},
             proposed_value=(
                 dict(item.write_values or {})
@@ -1886,15 +1816,26 @@ class InteractiveProfileUpdateProcessor:
         return results, responses
 
     @staticmethod
-    def _resolution_label(resolution: ContactResolution) -> str:
-        role_names = [
-            source.role.replace("_", " ").title()
-            for source in resolution.sources
-            if source.kind == "role" and source.role
-        ]
-        if role_names:
-            return "/".join(dict.fromkeys(role_names)) + " Contact"
-        return "Submitter Contact"
+    def _contact_review_identity(item: _ContactWorkItem) -> str:
+        """Return a person/email label that does not depend on a role."""
+        contact = item.current_contact or item.resolution.selected_contact or {}
+        reconciled = item.reconciled or {}
+        name = " ".join(
+            value
+            for value in (
+                reconciled.get("first_name") or _display(contact.get("FirstName")),
+                reconciled.get("last_name") or _display(contact.get("LastName")),
+            )
+            if value
+        )
+        email = (
+            reconciled.get("email")
+            or item.resolution.normalized_email
+            or _display(contact.get("Email"))
+        )
+        if name and email:
+            return f"{name} <{email}>"
+        return name or email or "(unidentified)"
 
     def _finish_batch(
         self,
@@ -2527,11 +2468,40 @@ class InteractiveProfileUpdateProcessor:
             if proposed_display is not None
             else _display(proposal.proposed_value)
         )
+        if (
+            original_display is None
+            and proposed_display is None
+            and isinstance(proposal.original_value, dict)
+            and isinstance(proposal.proposed_value, dict)
+        ):
+            self._show_mapping_proposal(proposal)
+            return
         self.output_fn(
             f"\n{proposal.label}\n"
             f"Current Salesforce value: {current or '(blank)'}\n"
             f"Proposed value: {proposed or '(blank)'}"
         )
+
+    def _show_mapping_proposal(self, proposal: ChangeProposal) -> None:
+        """Show dictionary-backed changes as readable field comparisons."""
+        current = proposal.original_value
+        proposed = proposal.proposed_value
+        heading = (
+            "New Salesforce values:"
+            if not proposal.target_record_id
+            or proposal.target_record_id == "(new)"
+            else "Salesforce changes:"
+        )
+        lines = [f"\n{proposal.label}", heading]
+        for field_name, proposed_value in proposed.items():
+            label = CONTACT_FIELD_LABELS.get(field_name, field_name)
+            current_value = _display(current.get(field_name)) or "(blank)"
+            new_value = _display(proposed_value) or "(blank)"
+            if heading == "New Salesforce values:":
+                lines.append(f"{label}: {new_value}")
+            else:
+                lines.append(f"{label}: {current_value} -> {new_value}")
+        self.output_fn("\n".join(lines))
 
     def _show_contact_details(
         self,

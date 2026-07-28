@@ -381,8 +381,8 @@ order:
 
 The command prints progress before and after authentication, Case preparation,
 staging, CSV publication, CSV validation, and review startup. Section
-separators make workflow stages, Cases, staged rows, Contact roles, and response
-emails easier to distinguish.
+separators make workflow stages, Cases, staged rows, individual Contact
+reviews, and response emails easier to distinguish.
 
 Use `--output-dir` the same way as the staging command:
 
@@ -418,32 +418,52 @@ The Contact section reloads every source Profile Update from Salesforce and
 collects only nonblank Contact values that were explicitly submitted for the
 submitter or a role. Staging fallbacks and old Salesforce values can help
 identify a Contact, but they are never treated as proposed changes. Salesforce
-Contact IDs are the primary identity, including the current Account-role
-lookup for partial or changed-email submissions. When no ID identifies the
-person, the existing conservative email matching rules still decide whether an
-exact Contact can be used, a new Contact can be created, or an operator choice
-is required.
+Contacts with a valid submitted email are identified by that email before role
+assignment is considered. The processor queries fresh Contacts and applies the
+conservative family-aware matching rules to decide whether an exact Contact can
+be used, a new Contact can be created, or an operator choice is required. It
+does not assume that the Contact currently holding a role is the submitted
+person. For example, if Tim's email is submitted for the principal role while
+Ray currently holds that role, Tim's Contact is reviewed and updated; Ray's
+Contact is not used merely because of the role. A partial proposal with no
+email may still use its staged or current Account-role Contact ID as a safe
+fallback.
 
-All values for the same Contact are reconciled together. Repeated normalized
-values collapse into one proposal with all of their sources. Distinct nonblank
-values are a conflict—even when two submissions supplied them for the same
-role. The reviewer sees every candidate value and its submission/role sources
-side by side, then must choose a candidate or `current` for each conflicting
-field. Choosing `current` removes that field from the eventual Salesforce
-write. Every conflict is resolved before the first Contact write.
+All values for the same email identity are reconciled together. Repeated
+normalized values collapse into one proposal with all of their sources.
+Different email identities remain separate Contact reviews even when they
+appeared in the same role. If identity review later resolves two entries to the
+same Salesforce Contact ID, their proposals are combined at that point.
+Distinct nonblank values for one resolved Contact are a conflict. The reviewer
+sees every candidate value and its submission/role sources side by side, then
+must choose a candidate or `current` for each conflicting field. Choosing
+`current` removes that field from the eventual Salesforce write. Every conflict
+is resolved before the first Contact write.
 
-After reconciliation, one Contact-level table shows each current value,
-reconciled value, and source. One `A`, `M`, or `N` decision applies to the
-complete Contact. An automatic decision makes at most one Contact
-`update_record` call, or creates a shared new Contact once. A manual decision
-verifies all proposed fields together. A rejected Contact is unchanged.
-Source-to-Contact mappings are preserved after creation and email changes, so
-the final role section can reuse the same resolved Contact safely.
+After reconciliation, the heading identifies the person and email rather than
+leading with a role. One Contact-level table shows each current value,
+reconciled value, and source. The final comparison uses readable field lines
+instead of printing a Python dictionary. For example:
+
+```text
+Salesforce changes:
+Title: Old Title -> Owner
+Phone: 312.555.0101 -> 312.555.0199
+```
+
+One `A`, `M`, or `N` decision applies to the complete Contact. An automatic
+decision makes at most one Contact `update_record` call, or creates a shared
+new Contact once. A manual decision verifies all proposed fields together. A
+rejected Contact is unchanged. Source-to-Contact mappings are preserved after
+creation and email changes, so the final role section can reuse the same
+resolved Contact safely.
 
 Non-role Account changes run after every Contact is complete. The `Role Links`
 section runs last and may update only Account lookup fields; it never creates
 or updates a Contact. Several rows or roles that describe the same Contact
-reuse its one result. A partial role without an email uses its current
+reuse its one result. This separation means a Contact is first brought up to
+date based on its identity; only afterward does the reviewer decide which role
+should point to it. A partial role without an email uses its current
 Account-role Contact when available and cannot create a new Contact
 automatically without safe identity evidence.
 
@@ -484,9 +504,10 @@ Contact events include classification, comparison key, candidates, selected
 Contact, reason, confidence, and warnings. Each conflict choice is an explicit
 event containing its candidate values and sources. Each reconciled Contact has
 one aggregate create/update event containing the final field dictionary and
-all source submission IDs. Operator identity selections, duplicate recovery,
-ignored entries, Case Contact assignment, and role assignments remain separate
-events.
+all source submission IDs. This structured dictionary remains in the JSON audit
+for machine-readable traceability, but it is not printed as the reviewer-facing
+comparison. Operator identity selections, duplicate recovery, ignored entries,
+Case Contact assignment, and role assignments remain separate events.
 The response file contains one generated paragraph per submitter email.
 Account-information changes keep the `ITEM: NEW INFORMATION` and
 `Replaces OLD INFORMATION` format. Each submitted Contact role is consolidated

@@ -585,6 +585,12 @@ warning for human review. Resolution sources show whether the match came from
 another submitted role, submitted data for a new Contact, an Account Contact, a
 sibling Account Contact, or the Account's current role lookup.
 
+These prefixed actions explain the read-only staging recommendation; they do
+not override fresh identity resolution during processing. In particular,
+`change_email` does not cause a valid submitted email to be written onto the
+current role Contact automatically. The processing command resolves that email
+as its own Contact identity first.
+
 The target Account's **family accounts** are the target itself, its parent, and
 its **sibling accounts** with the same parent. A root Account without a parent
 has a family containing only itself. Contacts from this family are preferred.
@@ -656,7 +662,7 @@ reviewed first, followed by the remaining batches from oldest to newest.
 Progress messages appear around authentication, Case preparation, staging, CSV
 publication, CSV validation, and review startup. The same output channel is
 used for progress and interactive review. Visual separators mark stages, Cases,
-staged rows, Contact roles, and response-email sections.
+staged rows, individual Contact reviews, and response-email sections.
 
 ### What the reviewer sees
 
@@ -716,19 +722,24 @@ flattened staging `submitted` dictionary, staging fallbacks, and existing
 Salesforce field values are not proposals. Blank values neither erase a field
 nor participate in a conflict.
 
-Contact identity is based primarily on a Salesforce Contact ID. This includes
-fresh current Account-role lookups for partial updates and staged
-`change_email` or `update_contact` resolutions. When there is no identifying
-ID, exact, ambiguous, likely-typo, and new-Contact email matching continues to
-use the conservative family-aware rules described above. Ambiguous candidates
-are shown together; the reviewer may select one, create a Contact, or ignore
-that unresolved entry.
+When a proposal contains a valid submitted email, that email is the starting
+identity and the Contact's role does not choose the record. The processor
+queries fresh Salesforce Contacts, then applies the exact, ambiguous,
+likely-typo, and new-Contact family-aware rules described above. It does not
+automatically attach the proposal to the Contact currently holding the role.
+For example, submitted details for `tim@wsfabrication.com` are compared with
+Tim's Contact even if Ray is the current principal. A partial proposal with no
+email can still use a staged Contact ID or the fresh current Account-role
+lookup. Ambiguous candidates are shown together; the reviewer may select one,
+create a Contact, or ignore that unresolved entry.
 
-Proposals for the same Contact are grouped across rows, roles, and
-submissions. Identical normalized values are stored once with all their
-sources. Distinct values conflict, including two values submitted for the same
-role. For each conflict, the command displays numbered candidate values beside
-their submission/role sources and prompts:
+Proposals sharing one email comparison key are grouped across rows, roles, and
+submissions. Different emails remain separate Contact work items even when they
+were submitted for the same role. If identity review later selects the same
+Salesforce Contact ID for two items, they are merged then. Identical normalized
+values are stored once with all their sources. Distinct values for one resolved
+Contact conflict. For each conflict, the command displays numbered candidate
+values beside their submission/role sources and prompts:
 
 ```text
 Choose reconciled Title [1-2/current]:
@@ -738,9 +749,20 @@ The reviewer must choose one candidate or `current`. Choosing `current` keeps
 the current Salesforce value and removes that field from the final write. All
 identity and field-conflict choices finish before any Contact is written.
 
-A final table for each Contact shows `Field`, `Current Salesforce`,
-`Reconciled`, and `Sources`. The reviewer then makes one `A`, `M`, or `N`
-decision for the complete Contact:
+A final heading identifies each Contact by person and email, independent of
+role. Its table shows `Field`, `Current Salesforce`, `Reconciled`, and
+`Sources`. The decision summary displays readable lines instead of a Python
+dictionary:
+
+```text
+Salesforce changes:
+Title: Old Title -> Owner
+Phone: 312.555.0101 -> 312.555.0199
+```
+
+A new Contact similarly appears under `New Salesforce values`, with one
+labeled field per line. The reviewer then makes one `A`, `M`, or `N` decision
+for the complete Contact:
 
 - `A` updates all changed fields in one `update_record` call, or creates a
   shared new Contact once.
@@ -760,7 +782,8 @@ Contact phase is complete. The final role-link phase uses the preserved mapping
 from each submission/role source to its resolved Contact ID, so it still works
 when phase one changed the Contact email or created a Contact shared by several
 roles. This phase may update Account role lookup fields only. It performs no
-Contact create or update.
+Contact create or update. Contact identity and field updates therefore finish
+before role assignment can influence an Account lookup.
 
 Account-role proposals use friendly Contact names and emails for current and
 proposed values. Salesforce IDs remain available internally for record writes
@@ -822,9 +845,11 @@ Contact audit objects include classification, comparison key, candidates,
 selected Contact, reason, confidence, and warnings. Every field-conflict
 selection is an explicit event that records the candidate values and their
 sources. A single aggregate Contact create/update event records the final field
-dictionary and every source submission ID for that Contact. Operator identity
-selections, duplicate recovery, ignored entries, Case Contact assignment, and
-later Account-role assignments are separate, immediately flushed events.
+dictionary and every source submission ID for that Contact. The dictionary is
+kept in JSON for machine-readable auditing; the interactive comparison uses the
+readable field lines shown above. Operator identity selections, duplicate
+recovery, ignored entries, Case Contact assignment, and later Account-role
+assignments are separate, immediately flushed events.
 
 On interruption, an unrelated Salesforce failure, or a manual value that does not verify,
 the audit is flushed, unfinalized source Profile Updates stay open, the Case is
