@@ -373,16 +373,26 @@ succeeds, so a failed run cannot leave a partial snapshot.
 `process-profile-updates` performs the complete processing workflow in this
 order:
 
-1. Run the existing Case automation.
-2. Stop if any required Case operation fails.
-3. Publish a fresh `profile_updates.csv`.
-4. Read that published file back from disk.
-5. Review rows in Account-and-Case batches.
+1. Repair blank Submission Accounts through the review interface.
+2. Run the existing Case automation.
+3. Stop if any required Case operation fails.
+4. Publish a fresh `profile_updates.csv`.
+5. Read that published file back from disk.
+6. Review rows in Account-and-Case batches.
 
-The command prints progress before and after authentication, Case preparation,
-staging, CSV publication, CSV validation, and review startup. Section
-separators make workflow stages, Cases, staged rows, individual Contact
-reviews, and response emails easier to distinguish.
+For a New Profile Update with a blank Account, the command looks up Accounts
+using the submitted Profile ID. It presents every match as a structured choice;
+press Enter to use the first Account, enter its displayed number to choose a
+different match, or enter `P` to look up a different Profile ID. The Account is
+saved on the Profile Update before Case preparation begins.
+
+Batches containing a Key Update strictly older than seven days are reviewed
+first. The remaining batches are reviewed from oldest to newest.
+
+The command prints progress before and after authentication, Submission Account
+resolution, Case preparation, staging, CSV publication, CSV validation, and
+review startup. Section separators make workflow stages, Cases, staged rows,
+individual Contact reviews, and response emails easier to distinguish.
 
 The review processor is renderer-neutral: it exchanges frozen Python
 dataclasses with a `ReviewUI` implementation instead of calling `print()` or

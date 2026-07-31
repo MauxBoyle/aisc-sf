@@ -653,18 +653,29 @@ uv run aisc_salesforce process-profile-updates \
 ```
 
 The command has no dry-run option. A staged recommendation alone never causes
-a Salesforce data change. The command first runs `ProfileUpdateService`; if
-Case creation or reuse fails, it stops before staging or review. It then
-publishes and validates a new CSV and groups all rows with the same Account and
-Case. Batches containing a Key Update strictly older than seven days are
-reviewed first, followed by the remaining batches from oldest to newest.
+a Salesforce data change. Before Case preparation, the command repairs each New
+Profile Update whose Submission Account is blank. It looks up Accounts using
+the submitted Profile ID and presents the matches as a typed choice. Press
+Enter to select the first Account, enter another displayed number to choose
+that Account, or enter `P` to supply a different Profile ID. The selected
+Account is saved on the Profile Update, after which `ProfileUpdateService`
+creates or reuses its Case. If that Case operation fails, the command stops
+before staging or review.
 
-Progress messages appear around authentication, Case preparation, staging, CSV
-publication, CSV validation, and review startup. Progress output belongs to the
-CLI workflow, while reviewer interactions cross a separate typed `ReviewUI`
-boundary. The CLI adapter sends both to the configured terminal output
-function, preserving the existing display. Visual separators mark stages,
-Cases, staged rows, individual Contact reviews, and response-email sections.
+The command then publishes and validates a new CSV and groups all rows with the
+same Account and Case. Batches containing a Key Update strictly older than
+seven days are reviewed first, followed by the remaining batches from oldest
+to newest. A Key Update exactly seven days old remains in the normal
+oldest-to-newest group.
+
+Progress messages appear around authentication, Submission Account resolution,
+Case preparation, staging, CSV publication, CSV validation, and review startup.
+Progress output belongs to the CLI workflow, while reviewer interactions cross
+a separate typed `ReviewUI` boundary. The Account selection, including its
+first-choice default, is represented by the same `ChoiceQuestion` used by other
+review actions. The CLI adapter sends both kinds of output to the configured
+terminal output function. Visual separators mark stages, Cases, staged rows,
+individual Contact reviews, and response-email sections.
 
 For another front end, implement `ReviewUI.display(event)` and
 `ReviewUI.ask(question)`, then pass that object to

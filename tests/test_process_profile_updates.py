@@ -23,6 +23,12 @@ from aisc_salesforce.process_profile_updates import (
     read_staged_profile_updates,
 )
 from aisc_salesforce.profile_updates import AutomationCounts
+from aisc_salesforce.review_ui import (
+    ChoiceAnswer,
+    ChoiceQuestion,
+    FreeTextAnswer,
+    FreeTextQuestion,
+)
 from aisc_salesforce.salesforce import SalesforceError
 from aisc_salesforce.stage_profile_updates import CSV_COLUMNS, StagingResult
 
@@ -240,6 +246,40 @@ class CapturingProcessor:
         return artifact_dir
 
 
+class ResolvingProcessor(CapturingProcessor):
+    def resolve_missing_submission_accounts(self):
+        self.events.append("resolve_accounts")
+        return 1
+
+
+def test_workflow_repairs_submission_accounts_before_creating_cases(tmp_path):
+    events = []
+    processor = ResolvingProcessor(events)
+
+    def writer(rows, output_dir):
+        events.append("write")
+        folder = output_dir / "published"
+        folder.mkdir()
+        with (folder / "profile_updates.csv").open(
+            "w", newline="", encoding="utf-8"
+        ) as output:
+            csv.DictWriter(output, fieldnames=CSV_COLUMNS).writeheader()
+            csv.DictWriter(output, fieldnames=CSV_COLUMNS).writerow(rows[0])
+        return folder
+
+    workflow = ProfileUpdateProcessingWorkflow(
+        CaseService(events),
+        StagingService(events),
+        processor,
+        staging_writer=writer,
+        output_fn=lambda message: None,
+    )
+
+    workflow.run(tmp_path)
+
+    assert events == ["resolve_accounts", "cases", "stage", "write", "review"]
+
+
 def test_workflow_creates_cases_then_stages_and_reads_the_published_csv(tmp_path):
     events = []
     output = []
@@ -368,6 +408,124 @@ def test_batches_group_account_and_case_and_prioritize_old_key_updates():
         "case-newer",
     ]
     assert len(batches[-1].rows) == 2
+
+
+def test_key_update_exactly_seven_days_old_is_not_in_the_priority_group():
+    rows = [
+        staged_row(
+            earliest_submission_date="2026-07-01T12:00:00+00:00",
+            case_id="case-old-ordinary",
+        ),
+        staged_row(
+            earliest_submission_date="2026-07-16T12:00:00+00:00",
+            earliest_key_update_date="2026-07-10T18:00:00+00:00",
+            has_key_updates="true",
+            case_id="case-exactly-seven-days",
+        ),
+    ]
+
+    batches = build_case_batches(rows, now=NOW)
+
+    assert [batch.case_id for batch in batches] == [
+        "case-old-ordinary",
+        "case-exactly-seven-days",
+    ]
+
+
+class AccountResolutionUI:
+    def __init__(self, *, entered_profile_id=""):
+        self.entered_profile_id = entered_profile_id
+        self.events = []
+        self.questions = []
+
+    def display(self, event):
+        self.events.append(event)
+
+    def ask(self, question):
+        self.questions.append(question)
+        if isinstance(question, FreeTextQuestion):
+            return FreeTextAnswer(self.entered_profile_id)
+        if isinstance(question, ChoiceQuestion):
+            return ChoiceAnswer(question.choices[0])
+        raise AssertionError(type(question))
+
+
+class AccountResolutionClient:
+    def __init__(self, *, profile_id="C-100"):
+        self.profile_id = profile_id
+        self.queries = []
+        self.updated = []
+
+    def query_records(self, object_name, fields, *, where=None, order_by=None):
+        self.queries.append((object_name, fields, where, order_by))
+        if object_name == "Company_Profile_Change__c":
+            return [
+                {
+                    "Id": "submission-1",
+                    "Name": "PU-100",
+                    "CreatedDate": "2026-07-15T14:30:00.000+0000",
+                    "Account__c": None,
+                    "Certification_ID__c": self.profile_id,
+                }
+            ]
+        if object_name == "Account":
+            return [
+                {
+                    "Id": "account-1",
+                    "Name": "Acme Steel",
+                    "Certification_ID__c": self.profile_id or "C-200",
+                },
+                {
+                    "Id": "account-2",
+                    "Name": "Beta Steel",
+                    "Certification_ID__c": self.profile_id or "C-200",
+                },
+            ]
+        raise AssertionError(object_name)
+
+    def update_record(self, object_name, record_id, values):
+        self.updated.append((object_name, record_id, values))
+
+
+def test_missing_submission_account_defaults_to_first_profile_id_match():
+    client = AccountResolutionClient()
+    ui = AccountResolutionUI()
+    processor = InteractiveProfileUpdateProcessor(client, ui, now=NOW)
+
+    repaired = processor.resolve_missing_submission_accounts()
+
+    assert repaired == 1
+    assert client.updated == [
+        (
+            "Company_Profile_Change__c",
+            "submission-1",
+            {"Account__c": "account-1"},
+        )
+    ]
+    account_query = next(query for query in client.queries if query[0] == "Account")
+    assert account_query[2] == "Certification_ID__c = 'C-100'"
+    assert account_query[3] == "Name ASC, Id ASC"
+    question = next(
+        question for question in ui.questions if isinstance(question, ChoiceQuestion)
+    )
+    assert question.default_key == "1"
+    assert [choice.key for choice in question.choices] == [
+        "1",
+        "2",
+        "different_profile_id",
+    ]
+
+
+def test_missing_submission_account_accepts_profile_id_when_form_value_is_blank():
+    client = AccountResolutionClient(profile_id="")
+    ui = AccountResolutionUI(entered_profile_id="C-200")
+    processor = InteractiveProfileUpdateProcessor(client, ui, now=NOW)
+
+    processor.resolve_missing_submission_accounts()
+
+    account_query = next(query for query in client.queries if query[0] == "Account")
+    assert account_query[2] == "Certification_ID__c = 'C-200'"
+    assert isinstance(ui.questions[0], FreeTextQuestion)
 
 
 def test_blocking_case_match_is_never_guessed():
