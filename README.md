@@ -384,6 +384,16 @@ staging, CSV publication, CSV validation, and review startup. Section
 separators make workflow stages, Cases, staged rows, individual Contact
 reviews, and response emails easier to distinguish.
 
+The review processor is renderer-neutral: it exchanges frozen Python
+dataclasses with a `ReviewUI` implementation instead of calling `print()` or
+`input()`. `CLIReviewUI` turns those typed events and questions into the same
+terminal output, shortcuts, and complete phrases documented below, so the
+command and reviewer decisions are unchanged. Interpolated Salesforce values
+are carried as `ValueFragment` objects, and each choice question contains only
+the actions that are actually available. This boundary is the extension point
+for a future TUI; Salesforce writes, validation, auditing, and status changes
+remain in `InteractiveProfileUpdateProcessor`.
+
 Use `--output-dir` the same way as the staging command:
 
 ```bash

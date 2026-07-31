@@ -165,6 +165,60 @@ test.
 
 ## Interactive Profile Update processing
 
+::: aisc_salesforce.review_ui
+    options:
+      show_root_heading: true
+      members:
+        - TextFragment
+        - ValueFragment
+        - StyledFragment
+        - StyledText
+        - ReviewChoice
+        - Heading
+        - Notice
+        - ValidationFeedback
+        - ContextLine
+        - ScalarComparison
+        - MappingComparisonRow
+        - MappingComparison
+        - ContactCard
+        - ContactComparisonRow
+        - ContactComparison
+        - ConflictCandidate
+        - ContactFieldConflict
+        - StagedRowSummary
+        - AccountHistory
+        - ResponseEmail
+        - ChoiceQuestion
+        - FreeTextQuestion
+        - AcknowledgementQuestion
+        - ChoiceAnswer
+        - FreeTextAnswer
+        - AcknowledgementAnswer
+        - ReviewEvent
+        - ReviewQuestion
+        - ReviewAnswer
+        - ReviewUI
+        - UnsupportedReviewInteractionError
+
+The frozen review dataclasses form the supported renderer boundary.
+`ValueFragment` distinguishes interpolated domain values from explanatory text,
+so a visual UI can style values without parsing sentences. `ChoiceQuestion`
+contains only its available `ReviewChoice` objects. Questions and answers have
+separate choice, free-text, and acknowledgement shapes; an unknown interaction
+or mismatched answer raises `UnsupportedReviewInteractionError` explicitly.
+
+::: aisc_salesforce.cli_review_ui
+    options:
+      show_root_heading: true
+      members:
+        - CLIReviewUI
+
+`CLIReviewUI` adapts the typed boundary to terminal `input_fn` and `output_fn`
+callbacks. It preserves the command's headings, comparisons, Contact tables,
+shortcuts, complete phrases, invalid-input retries, and interruption behavior.
+It contains no Salesforce or audit logic.
+
 ::: aisc_salesforce.process_profile_updates
     options:
       show_root_heading: true
@@ -185,19 +239,21 @@ test.
         - format_response_emails
 
 `ProfileUpdateProcessingWorkflow` keeps Case preparation, staging publication,
-disk validation, and review in a fixed order. Its `output_fn` callback sends
-startup progress through the same channel as interactive output. The smaller
-processing data types and methods keep proposal construction, reviewer
-decisions, Salesforce execution, response formatting, and audit writing
-separate.
+disk validation, and review in a fixed order. Its `output_fn` callback is only
+for CLI orchestration progress; review interactions go through the injected
+`ReviewUI`. The smaller processing data types and methods keep proposal
+construction, reviewer decisions, Salesforce execution, response formatting,
+and audit writing separate.
 
-`InteractiveProfileUpdateProcessor` refetches a target immediately before each
-decision. Submitted Contacts with valid emails are resolved and reconciled by
-email identity before Account role assignment; a current role Contact ID is
-only a fallback for a partial proposal without an email. Different emails stay
-separate even when submitted for the same role, unless identity review resolves
-them to the same Salesforce Contact. Reviewer-facing Contact comparisons use
-labeled field lines, while the JSON audit retains structured dictionaries. The
+`InteractiveProfileUpdateProcessor` accepts a `ReviewUI` and refetches a target
+immediately before each decision. It never renders terminal text or reads
+terminal input directly. Submitted Contacts with valid emails are resolved and
+reconciled by email identity before Account role assignment; a current role
+Contact ID is only a fallback for a partial proposal without an email. Different
+emails stay separate even when submitted for the same role, unless identity
+review resolves them to the same Salesforce Contact. Reviewer-facing Contact
+comparisons use labeled field lines, while the JSON audit retains structured
+dictionaries. The
 processor writes `review_audit.jsonl` after every result and
 `response_emails.txt` for successful Account changes and completed submitted
 roles. Profile Update closure and the Case's final status happen only after the

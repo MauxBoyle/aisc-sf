@@ -660,9 +660,22 @@ Case. Batches containing a Key Update strictly older than seven days are
 reviewed first, followed by the remaining batches from oldest to newest.
 
 Progress messages appear around authentication, Case preparation, staging, CSV
-publication, CSV validation, and review startup. The same output channel is
-used for progress and interactive review. Visual separators mark stages, Cases,
-staged rows, individual Contact reviews, and response-email sections.
+publication, CSV validation, and review startup. Progress output belongs to the
+CLI workflow, while reviewer interactions cross a separate typed `ReviewUI`
+boundary. The CLI adapter sends both to the configured terminal output
+function, preserving the existing display. Visual separators mark stages,
+Cases, staged rows, individual Contact reviews, and response-email sections.
+
+For another front end, implement `ReviewUI.display(event)` and
+`ReviewUI.ask(question)`, then pass that object to
+`InteractiveProfileUpdateProcessor`. Events include headings, notices, scalar
+and mapping comparisons, Contact cards, validation feedback, and generated
+response emails. Questions are deliberately split into choice, free-text, and
+acknowledgement shapes, with matching answer dataclasses. A choice question
+lists only allowed `ReviewChoice` values; for example, an incomplete Contact
+does not include automatic creation. The processor still owns email and Contact
+ID validation, Salesforce refreshes and writes, audit entries, and safe-stop or
+interruption handling.
 
 ### What the reviewer sees
 

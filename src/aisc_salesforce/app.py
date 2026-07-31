@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import os
 import sys
 from collections.abc import Callable
@@ -13,6 +14,7 @@ from .application_snapshot import (
     ApplicationSnapshotService,
     write_application_snapshot,
 )
+from .cli_review_ui import CLIReviewUI
 from .dictionary import DictionaryError, load_export_plan
 from .imis_contacts import ContactConsolidationError, consolidate_contactbasic
 from .picklist_audit import (
@@ -28,6 +30,7 @@ from .process_profile_updates import (
 from .profile_updates import ProfileUpdateService
 from .queried_fields import FieldInventoryError, build_queried_field_inventory
 from .rename_profile_update_cases import RenameProfileUpdateCasesService
+from .review_ui import UnsupportedReviewInteractionError
 from .salesforce import (
     SalesforceClient,
     SalesforceError,
@@ -154,7 +157,12 @@ def main(
                 input_fn=input_fn,
                 output_fn=output_fn,
             )
-        except (ProcessingError, SalesforceError, OSError) as error:
+        except (
+            ProcessingError,
+            SalesforceError,
+            UnsupportedReviewInteractionError,
+            OSError,
+        ) as error:
             print(f"Process profile updates failed: {error}", file=sys.stderr)
             return 1
     if args.command == "rename-profile-update-cases":
@@ -330,14 +338,24 @@ def _run_process_profile_updates(
     auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
     client = SalesforceClient(auth)
     output_fn("Salesforce authentication complete.")
-    workflow = ProfileUpdateProcessingWorkflow(
-        ProfileUpdateService(client, queue_id, responder_id),
-        ProfileUpdateStagingService(client),
-        InteractiveProfileUpdateProcessor(
+    processor_parameters = inspect.signature(
+        InteractiveProfileUpdateProcessor
+    ).parameters
+    if "ui" in processor_parameters:
+        processor = InteractiveProfileUpdateProcessor(
+            client,
+            CLIReviewUI(input_fn=input_fn, output_fn=output_fn),
+        )
+    else:  # Compatibility for injected processors using the former constructor.
+        processor = InteractiveProfileUpdateProcessor(
             client,
             input_fn=input_fn,
             output_fn=output_fn,
-        ),
+        )
+    workflow = ProfileUpdateProcessingWorkflow(
+        ProfileUpdateService(client, queue_id, responder_id),
+        ProfileUpdateStagingService(client),
+        processor,
         output_fn=output_fn,
     )
     result = workflow.run(output_dir)
