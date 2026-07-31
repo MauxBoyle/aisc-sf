@@ -328,6 +328,16 @@ class ProfileUpdateProcessingWorkflow:
 
     def run(self, output_dir: Path) -> ProcessingResult | Any:
         """Execute setup in the required order and review the published CSV."""
+        resolve_accounts = getattr(
+            self.processor, "resolve_missing_submission_accounts", None
+        )
+        if resolve_accounts is not None:
+            self.output_fn(_section_heading("Resolving Submission Accounts"))
+            repaired = resolve_accounts()
+            self.output_fn(
+                f"Submission Account resolution complete: {repaired} repaired."
+            )
+
         self.output_fn(_section_heading("Preparing Profile Update Cases"))
         counts: AutomationCounts = self.case_service.run()
         if counts.failed:
@@ -597,6 +607,118 @@ class InteractiveProfileUpdateProcessor:
                 "AcknowledgementQuestion requires AcknowledgementAnswer, got "
                 f"{type(answer).__name__}."
             )
+
+    def resolve_missing_submission_accounts(self) -> int:
+        """Let the reviewer repair blank Account lookups before Case creation."""
+        submissions = self.client.query_records(
+            "Company_Profile_Change__c",
+            ["Id", "Name", "CreatedDate", "Account__c", "Certification_ID__c"],
+            where=(f"Status__c = '{ProfileChangeStatus.NEW}' AND Account__c = NULL"),
+            order_by="CreatedDate ASC, Id ASC",
+        )
+        repaired = 0
+        for submission in submissions:
+            submission_id = _required_record_text(submission, "Id", "Profile Update ID")
+            submission_name = _display(submission.get("Name") or submission_id)
+            profile_id = _display(submission.get("Certification_ID__c")).strip()
+            account = self._choose_submission_account(submission_name, profile_id)
+            account_id = _required_record_text(account, "Id", "Account ID")
+            self.client.update_record(
+                "Company_Profile_Change__c",
+                submission_id,
+                {"Account__c": account_id},
+            )
+            repaired += 1
+            self._display_event(
+                Notice(
+                    styled(
+                        "Assigned Profile Update ",
+                        ValueFragment(submission_name),
+                        " to ",
+                        ValueFragment(_display(account.get("Name")) or account_id),
+                        ".",
+                    )
+                )
+            )
+        return repaired
+
+    def _choose_submission_account(
+        self, submission_name: str, profile_id: str
+    ) -> dict[str, Any]:
+        """Choose an Account, defaulting to the first Profile ID match."""
+        while True:
+            if not profile_id:
+                profile_id = self._ask_free_text(
+                    FreeTextQuestion(
+                        styled(
+                            "Profile Update ",
+                            ValueFragment(submission_name),
+                            " has no Submission Account. Enter its Profile ID: ",
+                        )
+                    )
+                ).strip()
+                if not profile_id:
+                    self._display_event(
+                        ValidationFeedback(styled("Profile ID cannot be blank."))
+                    )
+                    continue
+
+            accounts = self.client.query_records(
+                "Account",
+                ["Id", "Name", "Certification_ID__c"],
+                where=(f"Certification_ID__c = '{escape_soql_string(profile_id)}'"),
+                order_by="Name ASC, Id ASC",
+            )
+            accounts = [account for account in accounts if _display(account.get("Id"))]
+            if not accounts:
+                self._display_event(
+                    ValidationFeedback(
+                        styled(
+                            "No Account was found for Profile ID ",
+                            ValueFragment(profile_id),
+                            ".",
+                        )
+                    )
+                )
+                profile_id = ""
+                continue
+
+            choices = tuple(
+                ReviewChoice(
+                    str(index),
+                    _account_choice_label(account),
+                )
+                for index, account in enumerate(accounts, start=1)
+            ) + (
+                ReviewChoice(
+                    "different_profile_id",
+                    "Use a different Profile ID",
+                    ("p",),
+                ),
+            )
+            prompt_fragments: list[str | ValueFragment] = [
+                "Choose the Submission Account for Profile Update ",
+                ValueFragment(submission_name),
+                ":\n",
+            ]
+            for choice in choices:
+                marker = "P" if choice.key == "different_profile_id" else choice.key
+                prompt_fragments.extend(
+                    (f"{marker}. ", ValueFragment(choice.label), "\n")
+                )
+            prompt_fragments.append("Selection (default 1): ")
+            selected = self._ask_choice(
+                ChoiceQuestion(
+                    styled(*prompt_fragments),
+                    choices,
+                    styled("Enter an Account number or P for a different Profile ID."),
+                    default_key="1",
+                )
+            )
+            if selected == "different_profile_id":
+                profile_id = ""
+                continue
+            return accounts[int(selected) - 1]
 
     def review(
         self, rows: list[dict[str, str]], artifact_dir: Path
@@ -3049,6 +3171,14 @@ def _display(value: Any) -> str:
     return str(value).strip()
 
 
+def _required_record_text(record: dict[str, Any], field_name: str, label: str) -> str:
+    """Read one required text value from a Salesforce record."""
+    value = _display(record.get(field_name))
+    if not value:
+        raise ProcessingError(f"{label} is missing.")
+    return value
+
+
 def _split_person_name(value: Any) -> tuple[str, str]:
     """Split a submitter name at the final space."""
     parts = _display(value).rsplit(maxsplit=1)
@@ -3083,6 +3213,13 @@ def _is_duplicate_contact_error(error: SalesforceError) -> bool:
 
 def _section_heading(title: str, separator: str = STAGE_SEPARATOR) -> str:
     return f"\n{separator}\n{title}\n{separator}"
+
+
+def _account_choice_label(account: dict[str, Any]) -> str:
+    """Return the identifying Account text shown in a selection control."""
+    name = _display(account.get("Name")) or "(name unavailable)"
+    profile_id = _display(account.get("Certification_ID__c")) or "(blank)"
+    return f"{name} (Profile ID {profile_id})"
 
 
 def _contact_name_email(contact: dict[str, Any] | None) -> str:

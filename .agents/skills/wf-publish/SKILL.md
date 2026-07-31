@@ -27,7 +27,29 @@ Perform the merge using a **merge commit** (not squash or rebase), substituting 
 gh pr merge <pr> --merge
 ```
 
-### 3. Clean Up
+### 3. Update Local `main`
+
+After a successful merge, make sure the local checkout uses the newly merged
+code. First switch to `main`, then fetch and fast-forward it:
+
+```bash
+git switch main
+git fetch origin main
+git merge --ff-only origin/main
+```
+
+Verify the result:
+
+```bash
+git status --short
+git log --oneline -3
+```
+
+If the working tree has uncommitted changes or local `main` has diverged,
+stop and ask the user before changing or discarding anything. Do not use a
+forced reset to update `main`.
+
+### 4. Clean Up
 
 After a successful merge:
 - **Close related issues** referenced in the PR
