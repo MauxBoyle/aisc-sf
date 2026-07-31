@@ -29,6 +29,36 @@ from .queried_fields import (
     CONTACT_REVIEW_FIELDS,
     SUBMISSION_FIELDS,
 )
+from .review_ui import (
+    AccountHistory,
+    AcknowledgementAnswer,
+    AcknowledgementQuestion,
+    ChoiceAnswer,
+    ChoiceQuestion,
+    ConflictCandidate,
+    ContactCard,
+    ContactComparison,
+    ContactComparisonRow,
+    ContactFieldConflict,
+    ContextLine,
+    FreeTextAnswer,
+    FreeTextQuestion,
+    Heading,
+    MappingComparison,
+    MappingComparisonRow,
+    Notice,
+    ResponseEmail,
+    ReviewChoice,
+    ReviewEvent,
+    ReviewUI,
+    ScalarComparison,
+    StagedRowSummary,
+    StyledText,
+    UnsupportedReviewInteractionError,
+    ValidationFeedback,
+    ValueFragment,
+    styled,
+)
 from .salesforce import SalesforceClient, SalesforceError
 from .salesforce_enums import CaseStatus, ProfileChangeStatus
 from .stage_profile_updates import (
@@ -510,16 +540,63 @@ class InteractiveProfileUpdateProcessor:
     def __init__(
         self,
         client: SalesforceClient,
+        ui: ReviewUI | None = None,
         *,
-        input_fn: Callable[[str], str] = input,
-        output_fn: Callable[[str], None] = print,
+        input_fn: Callable[[str], str] | None = None,
+        output_fn: Callable[[str], None] | None = None,
         now: datetime | None = None,
     ):
         self.client = client
-        self.input_fn = input_fn
-        self.output_fn = output_fn
+        if ui is None:
+            # Kept as a compatibility bridge for callers of the old constructor.
+            # The application entry point constructs this adapter explicitly.
+            from .cli_review_ui import CLIReviewUI
+
+            ui = CLIReviewUI(
+                input_fn=input_fn or input,
+                output_fn=output_fn or print,
+            )
+        elif input_fn is not None or output_fn is not None:
+            raise TypeError("Pass either ui or input_fn/output_fn, not both.")
+        self.ui = ui
         self.now = _aware_datetime(now or datetime.now(UTC))
         self._audit: _AuditWriter | None = None
+
+    def _display_event(self, event: ReviewEvent) -> None:
+        """Send a typed event to the injected renderer."""
+        self.ui.display(event)
+
+    def _ask_choice(self, question: ChoiceQuestion) -> str:
+        """Ask a choice question and reject a mismatched UI answer."""
+        answer = self.ui.ask(question)
+        if not isinstance(answer, ChoiceAnswer):
+            raise UnsupportedReviewInteractionError(
+                f"ChoiceQuestion requires ChoiceAnswer, got {type(answer).__name__}."
+            )
+        allowed = {choice.key: choice for choice in question.choices}
+        if answer.choice.key not in allowed:
+            raise UnsupportedReviewInteractionError(
+                f"ChoiceAnswer key {answer.choice.key!r} is not available."
+            )
+        return answer.choice.key
+
+    def _ask_free_text(self, question: FreeTextQuestion) -> str:
+        """Ask a free-text question and reject a mismatched UI answer."""
+        answer = self.ui.ask(question)
+        if not isinstance(answer, FreeTextAnswer):
+            raise UnsupportedReviewInteractionError(
+                f"FreeTextQuestion requires FreeTextAnswer, got {type(answer).__name__}."
+            )
+        return answer.text
+
+    def _acknowledge(self, question: AcknowledgementQuestion) -> None:
+        """Pause for acknowledgement and reject a mismatched UI answer."""
+        answer = self.ui.ask(question)
+        if not isinstance(answer, AcknowledgementAnswer):
+            raise UnsupportedReviewInteractionError(
+                "AcknowledgementQuestion requires AcknowledgementAnswer, got "
+                f"{type(answer).__name__}."
+            )
 
     def review(
         self, rows: list[dict[str, str]], artifact_dir: Path
@@ -604,9 +681,15 @@ class InteractiveProfileUpdateProcessor:
             ),
             batch.account_id,
         )
-        self.output_fn(
-            _section_heading(
-                f"Case {batch.case_number or batch.case_id}: {account_name}"
+        self._display_event(
+            Heading(
+                styled(
+                    "Case ",
+                    ValueFragment(batch.case_number or batch.case_id),
+                    ": ",
+                    ValueFragment(account_name),
+                ),
+                STAGE_SEPARATOR,
             )
         )
         fresh_by_id = self._fresh_case_submissions(batch)
@@ -626,7 +709,7 @@ class InteractiveProfileUpdateProcessor:
             action="prepare batch",
         )
 
-        self.output_fn(_section_heading("Contact Updates"))
+        self._display_event(Heading(styled("Contact Updates"), STAGE_SEPARATOR))
         contact_items, source_mapping = self._collect_contact_work(batch, fresh_by_id)
         contact_items = self._resolve_contact_identities(batch, contact_items)
         source_mapping = {
@@ -646,7 +729,7 @@ class InteractiveProfileUpdateProcessor:
             contact_results = self._execute_contact_work(batch, item)
             results.extend(contact_results)
 
-        self.output_fn(_section_heading("Account Updates"))
+        self._display_event(Heading(styled("Account Updates"), STAGE_SEPARATOR))
         account_results: list[ActionResult] = []
         for row in batch.rows:
             fresh_submissions = [
@@ -657,7 +740,7 @@ class InteractiveProfileUpdateProcessor:
             account_results.extend(reviewed)
             results.extend(reviewed)
 
-        self.output_fn(_section_heading("Role Links"))
+        self._display_event(Heading(styled("Role Links"), STAGE_SEPARATOR))
         role_responses: list[_RoleResponse] = []
         for row in batch.rows:
             fresh_submissions = [
@@ -1048,31 +1131,42 @@ class InteractiveProfileUpdateProcessor:
                 reconciled[suffix] = next(iter(values))
                 continue
             current = _display((item.current_contact or {}).get(contact_field))
-            self.output_fn(
-                _section_heading(
-                    f"Contact field conflict: {field_label}",
-                    ITEM_SEPARATOR,
+            self._display_event(
+                ContactFieldConflict(
+                    field_label,
+                    ValueFragment(current),
+                    tuple(
+                        ConflictCandidate(
+                            str(index),
+                            ValueFragment(value),
+                            ValueFragment(self._format_contact_sources(sources)),
+                        )
+                        for index, (value, sources) in enumerate(
+                            values.items(), start=1
+                        )
+                    ),
                 )
             )
-            for index, (value, sources) in enumerate(values.items(), start=1):
-                self.output_fn(
-                    f"{index}. {value}\n"
-                    f"   Sources: {self._format_contact_sources(sources)}"
-                )
-            self.output_fn(f"current. {current or '(blank)'}")
             conflict_sources = "\n".join(
                 f"{value}: {self._format_contact_sources(sources)}"
                 for value, sources in values.items()
             )
             while True:
                 try:
-                    answer = (
-                        self.input_fn(
-                            f"Choose reconciled {field_label} "
-                            f"[1-{len(values)}/current]: "
+                    answer = self._ask_choice(
+                        ChoiceQuestion(
+                            styled(
+                                "Choose reconciled ",
+                                ValueFragment(field_label),
+                                f" [1-{len(values)}/current]: ",
+                            ),
+                            tuple(
+                                ReviewChoice(str(index), value)
+                                for index, value in enumerate(values, start=1)
+                            )
+                            + (ReviewChoice("current", "current"),),
+                            styled("Choose a candidate number or current."),
                         )
-                        .strip()
-                        .casefold()
                     )
                 except StopIteration as error:
                     proposal = self._contact_proposal(
@@ -1127,7 +1221,6 @@ class InteractiveProfileUpdateProcessor:
                 if answer.isdigit() and 1 <= int(answer) <= len(values):
                     chosen = list(values)[int(answer) - 1]
                     break
-                self.output_fn("Choose a candidate number or current.")
             reconciled[suffix] = chosen
             proposal = self._contact_proposal(
                 batch,
@@ -1171,15 +1264,9 @@ class InteractiveProfileUpdateProcessor:
 
     def _show_reconciled_contact(self, item: _ContactWorkItem) -> None:
         identity = self._contact_review_identity(item)
-        self.output_fn(
-            _section_heading(
-                f"Reconciled Contact: {identity}",
-                ITEM_SEPARATOR,
-            )
-        )
-        self.output_fn("Field | Current Salesforce | Reconciled | Sources")
         current = item.current_contact or {}
         reconciled = item.reconciled or {}
+        rows = []
         for suffix, contact_field, field_label in CONTACT_SUFFIX_FIELDS:
             values = item.proposals.get(suffix, {})
             if not values:
@@ -1189,12 +1276,15 @@ class InteractiveProfileUpdateProcessor:
                 for proposal_sources in values.values()
                 for source in proposal_sources
             ]
-            self.output_fn(
-                f"{field_label} | "
-                f"{_display(current.get(contact_field)) or '(blank)'} | "
-                f"{reconciled.get(suffix, '') or '(blank)'} | "
-                f"{self._format_contact_sources(sources)}"
+            rows.append(
+                ContactComparisonRow(
+                    field_label,
+                    ValueFragment(_display(current.get(contact_field))),
+                    ValueFragment(reconciled.get(suffix, "")),
+                    ValueFragment(self._format_contact_sources(sources)),
+                )
             )
+        self._display_event(ContactComparison(ValueFragment(identity), tuple(rows)))
 
     def _prepare_contact_decision(
         self,
@@ -1224,13 +1314,17 @@ class InteractiveProfileUpdateProcessor:
                 action="reconciled Contact already current",
             )
             self._append_audit(item.result)
-            self.output_fn("Contact is already current; no change needed.")
+            self._display_event(Notice(styled("Contact is already current; no change needed.")))
             return
         has_last_name = bool((item.reconciled or {}).get("last_name"))
         if not item.contact_id and not has_last_name:
-            self.output_fn(
-                "This Contact cannot be created automatically because the "
-                "required Last Name field is missing."
+            self._display_event(
+                Notice(
+                    styled(
+                        "This Contact cannot be created automatically because the "
+                        "required Last Name field is missing."
+                    )
+                )
             )
         self._show_proposal(proposal)
         item.decision = self._review_decision(
@@ -1381,18 +1475,31 @@ class InteractiveProfileUpdateProcessor:
         """Verify all reconciled Contact fields together."""
         try:
             if item.contact_id:
-                self.input_fn(
-                    "Make the complete Contact change in Salesforce, then "
-                    "press Enter to verify it: "
+                self._acknowledge(
+                    AcknowledgementQuestion(
+                        styled(
+                            "Make the complete Contact change in Salesforce, then "
+                            "press Enter to verify it: "
+                        )
+                    )
                 )
                 contact_id = item.contact_id
             else:
-                contact_id = self.input_fn(
-                    "Create the Contact in Salesforce, then enter its Contact ID: "
-                ).strip()
-                if not contact_id:
-                    raise ProcessingError(
-                        "A Contact ID is required for manual verification."
+                while True:
+                    contact_id = self._ask_free_text(
+                        FreeTextQuestion(
+                            styled(
+                                "Create the Contact in Salesforce, then enter its "
+                                "Contact ID: "
+                            )
+                        )
+                    ).strip()
+                    if contact_id:
+                        break
+                    self._display_event(
+                        ValidationFeedback(
+                            styled("A Contact ID is required for manual verification.")
+                        )
                     )
             fresh = self.client.get_record("Contact", contact_id, CONTACT_REVIEW_FIELDS)
         except (KeyboardInterrupt, EOFError) as error:
@@ -1553,15 +1660,24 @@ class InteractiveProfileUpdateProcessor:
             candidate = resolution.selected_contact or resolution.candidates[0]
             self._show_contact_details("Suggested Contact", candidate)
             candidate_email, candidate_key, _ = normalize_email(candidate.get("Email"))
-            self.output_fn(
-                "Likely email typo: "
-                f"{resolution.normalized_email} was compared as "
-                f"{resolution.comparison_key}. The suggested correction is "
-                f"{candidate_email or '(blank)'} ({candidate_key or 'no valid key'})."
+            self._display_event(
+                Notice(
+                    styled(
+                        "Likely email typo: ",
+                        ValueFragment(resolution.normalized_email),
+                        " was compared as ",
+                        ValueFragment(resolution.comparison_key),
+                        ". The suggested correction is ",
+                        ValueFragment(candidate_email or "(blank)"),
+                        " (",
+                        ValueFragment(candidate_key or "no valid key"),
+                        ").",
+                    )
+                )
             )
             try:
                 confirmed = self._prompt_yes_no(
-                    "Use this suggested Contact? [yes/no]: "
+                    styled("Use this suggested Contact? [yes/no]: ")
                 )
             except StopIteration as error:
                 raise ProcessingError(
@@ -1590,24 +1706,37 @@ class InteractiveProfileUpdateProcessor:
         row: dict[str, str],
         resolution: ContactResolution,
     ) -> _ResolvedContact:
-        self.output_fn(
-            _section_heading(
-                f"Contact resolution for "
-                f"{resolution.normalized_email or '(invalid email)'}",
+        self._display_event(
+            Heading(
+                styled(
+                    "Contact resolution for ",
+                    ValueFragment(
+                        resolution.normalized_email or "(invalid email)"
+                    ),
+                ),
                 ITEM_SEPARATOR,
             )
         )
         for index, candidate in enumerate(resolution.candidates, start=1):
             self._show_contact_details(f"Candidate {index}", candidate)
         while True:
-            candidate_range = (
-                f"1-{len(resolution.candidates)}, " if resolution.candidates else ""
-            )
+            candidate_range = f"1-{len(resolution.candidates)}, " if resolution.candidates else ""
             try:
-                answer = (
-                    self.input_fn(f"Contact choice [{candidate_range}create/ignore]: ")
-                    .strip()
-                    .casefold()
+                answer = self._ask_choice(
+                    ChoiceQuestion(
+                        styled(
+                            f"Contact choice [{candidate_range}create/ignore]: "
+                        ),
+                        tuple(
+                            ReviewChoice(str(index), f"Candidate {index}")
+                            for index in range(1, len(resolution.candidates) + 1)
+                        )
+                        + (
+                            ReviewChoice("create", "create", ("c",)),
+                            ReviewChoice("ignore", "ignore", ("i",)),
+                        ),
+                        styled("Choose a candidate number, create, or ignore."),
+                    )
                 )
             except StopIteration as error:
                 self._audit_resolution(
@@ -1621,7 +1750,7 @@ class InteractiveProfileUpdateProcessor:
                     "Multiple Salesforce Contacts require an explicit "
                     "operator selection."
                 ) from error
-            if answer in {"create", "c"}:
+            if answer == "create":
                 resolution.classification = ContactResolutionClassification.CREATE_NEW
                 resolution.selected_contact = None
                 resolution.reason = "The operator chose to create a new Contact."
@@ -1633,7 +1762,7 @@ class InteractiveProfileUpdateProcessor:
                     "operator selected create new Contact",
                 )
                 return _ResolvedContact(resolution)
-            if answer in {"ignore", "i"}:
+            if answer == "ignore":
                 resolution.selected_contact = None
                 resolution.reason = "The operator ignored this email entry."
                 self._audit_resolution(
@@ -1658,7 +1787,6 @@ class InteractiveProfileUpdateProcessor:
                 return _ResolvedContact(
                     resolution, contact_id=_display(selected.get("Id"))
                 )
-            self.output_fn("Choose a candidate number, create, or ignore.")
 
     def _audit_resolution(
         self,
@@ -1849,12 +1977,15 @@ class InteractiveProfileUpdateProcessor:
         all_sent = True
         for email, text in emails.items():
             response_writer.append(batch.case_id, email, text)
-            self.output_fn(
-                f"{_section_heading(f'Response email for {email}', ITEM_SEPARATOR)}"
-                f"\n{text}"
+            self._display_event(
+                ResponseEmail(ValueFragment(email), text)
             )
             sent = self._prompt_yes_no(
-                f"Was the response email to {email} sent? [yes/no]: "
+                styled(
+                    "Was the response email to ",
+                    ValueFragment(email),
+                    " sent? [yes/no]: ",
+                )
             )
             all_sent = all_sent and sent
 
@@ -1896,33 +2027,34 @@ class InteractiveProfileUpdateProcessor:
         source_names = ", ".join(
             _json_string_list(row.get("source_submission_names", "[]"))
         )
-        heading = (
-            f"Staged row\n"
-            f"Account: {account_name or '(unavailable)'}\n"
-            f"Submitter: {submitter_name} <{submitter_email}>\n"
-            f"Profile Updates: {source_names or '(unnamed)'}"
+        self._display_event(
+            StagedRowSummary(
+                ValueFragment(account_name or "(unavailable)"),
+                ValueFragment(submitter_name),
+                ValueFragment(submitter_email),
+                ValueFragment(source_names or "(unnamed)"),
+                contact_details_supplemented=(
+                    row.get("has_contact_derived_values") == "true"
+                ),
+                has_no_update_content=(row.get("has_no_update_content") == "true"),
+            )
         )
-        if row.get("has_contact_derived_values") == "true":
-            heading += (
-                "\nNote: contact details were supplemented from available "
-                "contact information."
+        answer = self._ask_choice(
+            ChoiceQuestion(
+                styled(
+                    "Continue with this staged row? [C/Continue/Q/Quit] "
+                    "(default Continue): "
+                ),
+                (
+                    ReviewChoice("continue", "Continue", ("c",)),
+                    ReviewChoice("quit", "Quit", ("q",)),
+                ),
+                styled("Enter C or Continue, Q or Quit, or press Enter."),
+                default_key="continue",
             )
-        if row.get("has_no_update_content") == "true":
-            heading += (
-                "\nNote: this combined profile update has no submitted update content."
-            )
-        self.output_fn(_section_heading(heading, ITEM_SEPARATOR))
-        while True:
-            answer = self.input_fn(
-                "Continue with this staged row? [C/Continue/Q/Quit] "
-                "(default Continue): "
-            )
-            normalized = answer.strip().casefold()
-            if normalized in {"", "c", "continue"}:
-                return
-            if normalized in {"q", "quit"}:
-                raise ProcessingStoppedEarly
-            self.output_fn("Enter C or Continue, Q or Quit, or press Enter.")
+        )
+        if answer == "quit":
+            raise ProcessingStoppedEarly
 
     def _fresh_case_submissions(self, batch: CaseBatch) -> dict[str, dict[str, Any]]:
         return {
@@ -1947,7 +2079,9 @@ class InteractiveProfileUpdateProcessor:
             ),
             batch.account_id,
         )
-        self.output_fn(f"Account: {account_name}")
+        self._display_event(
+            ContextLine("Account", (ValueFragment(account_name),))
+        )
         submitters = dict.fromkeys(
             (
                 row.get("submitter_name", "").strip(),
@@ -1956,19 +2090,37 @@ class InteractiveProfileUpdateProcessor:
             for row in batch.rows
         )
         for name, email in submitters:
-            self.output_fn(f"Submitter: {name} <{email}>")
+            self._display_event(
+                ContextLine(
+                    "Submitter",
+                    styled(ValueFragment(name), " <", ValueFragment(email), ">"),
+                )
+            )
 
         for submission in submissions_by_id.values():
-            self.output_fn(
-                f"Profile Update {submission.get('Name') or submission.get('Id')} "
-                f"(status: {submission.get('Status__c', '')})"
+            self._display_event(
+                Notice(
+                    styled(
+                        "Profile Update ",
+                        ValueFragment(
+                            _display(submission.get("Name") or submission.get("Id"))
+                        ),
+                        " (status: ",
+                        ValueFragment(_display(submission.get("Status__c"))),
+                        ")",
+                    )
+                )
             )
             comments = _display(submission.get("Comments__c"))
             notes = _display(submission.get("Other_Personnel_Notes__c"))
             if comments:
-                self.output_fn(f"Comments: {comments}")
+                self._display_event(
+                    ContextLine("Comments", (ValueFragment(comments),))
+                )
             if notes:
-                self.output_fn(f"Other Personnel notes: {notes}")
+                self._display_event(
+                    ContextLine("Other Personnel notes", (ValueFragment(notes),))
+                )
 
         self._show_unique_row_context(batch.rows, "effective_date", "Effective date")
         self._show_unique_row_context(batch.rows, "key_answers", "Key Update answers")
@@ -1986,7 +2138,7 @@ class InteractiveProfileUpdateProcessor:
             if row.get(field_name, "").strip()
         )
         for value in values:
-            self.output_fn(f"{label}: {value}")
+            self._display_event(ContextLine(label, (ValueFragment(value),)))
 
     def _show_account_history(
         self,
@@ -2016,12 +2168,13 @@ class InteractiveProfileUpdateProcessor:
                 order_by="CreatedDate ASC, Id ASC",
             )
             for item in history:
-                self.output_fn(
-                    "Account History: "
-                    f"{item.get('Field')} changed from "
-                    f"{_display(item.get('OldValue')) or '(blank)'} to "
-                    f"{_display(item.get('NewValue')) or '(blank)'} at "
-                    f"{item.get('CreatedDate')}"
+                self._display_event(
+                    AccountHistory(
+                        ValueFragment(_display(item.get("Field"))),
+                        ValueFragment(_display(item.get("OldValue"))),
+                        ValueFragment(_display(item.get("NewValue"))),
+                        ValueFragment(_display(item.get("CreatedDate"))),
+                    )
                 )
 
     def _review_account_proposals(
@@ -2110,34 +2263,39 @@ class InteractiveProfileUpdateProcessor:
                 salesforce_message=error.salesforce_message or "",
             )
         )
-        self.output_fn(
-            "Salesforce blocked this Contact create as a possible duplicate."
-        )
-        choices = {
-            "1": "create_manually",
-            "create manually": "create_manually",
-            "2": "update_manually",
-            "update an existing contact manually": "update_manually",
-            "3": "alternate_email",
-            "use a contact with another email": "alternate_email",
-            "4": "ignore",
-            "ignore this entry": "ignore",
-        }
-        while True:
-            answer = (
-                self.input_fn(
-                    "Duplicate recovery [1/create manually, "
-                    "2/update an existing Contact manually, "
-                    "3/use a Contact with another email, "
-                    "4/ignore this entry]: "
-                )
-                .strip()
-                .casefold()
+        self._display_event(
+            Notice(
+                styled("Salesforce blocked this Contact create as a possible duplicate.")
             )
-            choice = choices.get(answer)
-            if choice is None:
-                self.output_fn("Choose 1, 2, 3, or 4.")
-                continue
+        )
+        while True:
+            choice = self._ask_choice(
+                ChoiceQuestion(
+                    styled(
+                        "Duplicate recovery [1/create manually, "
+                        "2/update an existing Contact manually, "
+                        "3/use a Contact with another email, "
+                        "4/ignore this entry]: "
+                    ),
+                    (
+                        ReviewChoice(
+                            "create_manually", "create manually", ("1",)
+                        ),
+                        ReviewChoice(
+                            "update_manually",
+                            "update an existing Contact manually",
+                            ("2",),
+                        ),
+                        ReviewChoice(
+                            "alternate_email",
+                            "use a Contact with another email",
+                            ("3",),
+                        ),
+                        ReviewChoice("ignore", "ignore this entry", ("4",)),
+                    ),
+                    styled("Choose 1, 2, 3, or 4."),
+                )
+            )
             if choice == "ignore":
                 resolution.reason = (
                     "The operator ignored a Salesforce duplicate-rule failure."
@@ -2161,10 +2319,16 @@ class InteractiveProfileUpdateProcessor:
                 return ignored
 
             if choice == "alternate_email":
-                alternate = self.input_fn("Enter the existing Contact's other email: ")
+                alternate = self._ask_free_text(
+                    FreeTextQuestion(
+                        styled("Enter the existing Contact's other email: ")
+                    )
+                )
                 normalized, _, warnings = normalize_email(alternate)
                 if warnings or not normalized:
-                    self.output_fn("Enter a valid email address.")
+                    self._display_event(
+                        ValidationFeedback(styled("Enter a valid email address."))
+                    )
                     continue
                 contact = self._select_contact_by_email(normalized)
                 action = "use alternate-email Contact after duplicate failure"
@@ -2174,7 +2338,14 @@ class InteractiveProfileUpdateProcessor:
                     if choice == "create_manually"
                     else "Update an existing Contact manually"
                 )
-                self.input_fn(f"{instruction}, then press Enter to verify by email: ")
+                self._acknowledge(
+                    AcknowledgementQuestion(
+                        styled(
+                            instruction,
+                            ", then press Enter to verify by email: ",
+                        )
+                    )
+                )
                 contact = self._select_contact_by_email(resolution.normalized_email)
                 action = (
                     "verify manual Contact creation after duplicate failure"
@@ -2182,9 +2353,13 @@ class InteractiveProfileUpdateProcessor:
                     else "verify manual Contact update after duplicate failure"
                 )
             if contact is None:
-                self.output_fn(
-                    "No Contact was found with that email; choose a recovery "
-                    "option again."
+                self._display_event(
+                    ValidationFeedback(
+                        styled(
+                            "No Contact was found with that email; choose a recovery "
+                            "option again."
+                        )
+                    )
                 )
                 continue
             contact_id = _display(contact.get("Id"))
@@ -2220,11 +2395,17 @@ class InteractiveProfileUpdateProcessor:
             return dict(contacts[0])
         for index, contact in enumerate(contacts, start=1):
             self._show_contact_details(f"Candidate {index}", contact)
-        while True:
-            answer = self.input_fn(f"Select Contact [1-{len(contacts)}]: ").strip()
-            if answer.isdigit() and 1 <= int(answer) <= len(contacts):
-                return dict(contacts[int(answer) - 1])
-            self.output_fn("Choose one candidate number.")
+        answer = self._ask_choice(
+            ChoiceQuestion(
+                styled(f"Select Contact [1-{len(contacts)}]: "),
+                tuple(
+                    ReviewChoice(str(index), f"Candidate {index}")
+                    for index in range(1, len(contacts) + 1)
+                ),
+                styled("Choose one candidate number."),
+            )
+        )
+        return dict(contacts[int(answer) - 1])
 
     def _proposal(
         self,
@@ -2321,7 +2502,14 @@ class InteractiveProfileUpdateProcessor:
                 action="already current",
             )
             self._append_audit(result)
-            self.output_fn(f"{proposal.label}: already current; no change needed.")
+            self._display_event(
+                Notice(
+                    styled(
+                        ValueFragment(proposal.label),
+                        ": already current; no change needed.",
+                    )
+                )
+            )
             return result
 
         self._show_proposal(
@@ -2372,8 +2560,12 @@ class InteractiveProfileUpdateProcessor:
             return result
         if decision is ReviewDecision.MAKE_MANUALLY:
             try:
-                self.input_fn(
-                    "Make the change in Salesforce, then press Enter to verify it: "
+                self._acknowledge(
+                    AcknowledgementQuestion(
+                        styled(
+                            "Make the change in Salesforce, then press Enter to verify it: "
+                        )
+                    )
                 )
                 verified = self.client.get_record(
                     proposal.target_object,
@@ -2476,32 +2668,30 @@ class InteractiveProfileUpdateProcessor:
         ):
             self._show_mapping_proposal(proposal)
             return
-        self.output_fn(
-            f"\n{proposal.label}\n"
-            f"Current Salesforce value: {current or '(blank)'}\n"
-            f"Proposed value: {proposed or '(blank)'}"
+        self._display_event(
+            ScalarComparison(
+                proposal.label,
+                ValueFragment(current),
+                ValueFragment(proposed),
+            )
         )
 
     def _show_mapping_proposal(self, proposal: ChangeProposal) -> None:
         """Show dictionary-backed changes as readable field comparisons."""
         current = proposal.original_value
         proposed = proposal.proposed_value
-        heading = (
-            "New Salesforce values:"
-            if not proposal.target_record_id
-            or proposal.target_record_id == "(new)"
-            else "Salesforce changes:"
-        )
-        lines = [f"\n{proposal.label}", heading]
+        is_new = not proposal.target_record_id or proposal.target_record_id == "(new)"
+        rows = []
         for field_name, proposed_value in proposed.items():
             label = CONTACT_FIELD_LABELS.get(field_name, field_name)
-            current_value = _display(current.get(field_name)) or "(blank)"
-            new_value = _display(proposed_value) or "(blank)"
-            if heading == "New Salesforce values:":
-                lines.append(f"{label}: {new_value}")
-            else:
-                lines.append(f"{label}: {current_value} -> {new_value}")
-        self.output_fn("\n".join(lines))
+            rows.append(
+                MappingComparisonRow(
+                    label,
+                    ValueFragment(_display(current.get(field_name))),
+                    ValueFragment(_display(proposed_value)),
+                )
+            )
+        self._display_event(MappingComparison(proposal.label, tuple(rows), is_new))
 
     def _show_contact_details(
         self,
@@ -2516,49 +2706,75 @@ class InteractiveProfileUpdateProcessor:
             )
             if value
         )
-        self.output_fn(
-            f"{heading}:\n"
-            f"Name: {name or '(blank)'}\n"
-            f"Title: {_display(contact.get('Title')) or '(blank)'}\n"
-            f"Email: {_display(contact.get('Email')) or '(blank)'}\n"
-            f"Phone: {_display(contact.get('Phone')) or '(blank)'}"
+        self._display_event(
+            ContactCard(
+                heading,
+                ValueFragment(name),
+                ValueFragment(_display(contact.get("Title"))),
+                ValueFragment(_display(contact.get("Email"))),
+                ValueFragment(_display(contact.get("Phone"))),
+            )
         )
 
     def _prompt_decision(self, *, automatic_allowed: bool = True) -> ReviewDecision:
-        values = {decision.value: decision for decision in ReviewDecision}
-        values.update(
-            {
-                "a": ReviewDecision.APPLY_AUTOMATICALLY,
-                "m": ReviewDecision.MAKE_MANUALLY,
-                "n": ReviewDecision.WILL_NOT_BE_MADE,
-            }
-        )
-        while True:
-            answer = self.input_fn(
-                "Decision [A/apply automatically / M/make manually / "
-                "N/will not be made]: "
+        choices = (
+            (
+                ReviewChoice(
+                    ReviewDecision.APPLY_AUTOMATICALLY.value,
+                    ReviewDecision.APPLY_AUTOMATICALLY.value,
+                    ("a",),
+                ),
             )
-            normalized = answer.strip().casefold()
-            decision = values.get(normalized)
-            if decision is None:
-                self.output_fn(
-                    "Enter A, M, or N, or one of the three complete decision phrases."
-                )
-                continue
-            if decision is ReviewDecision.APPLY_AUTOMATICALLY and not automatic_allowed:
-                self.output_fn(
-                    "This incomplete Contact cannot be created automatically; "
+            if automatic_allowed
+            else ()
+        )
+        choices += (
+            ReviewChoice(
+                ReviewDecision.MAKE_MANUALLY.value,
+                ReviewDecision.MAKE_MANUALLY.value,
+                ("m",),
+            ),
+            ReviewChoice(
+                ReviewDecision.WILL_NOT_BE_MADE.value,
+                ReviewDecision.WILL_NOT_BE_MADE.value,
+                ("n",),
+            ),
+        )
+        answer = self._ask_choice(
+            ChoiceQuestion(
+                styled(
+                    "Decision [A/apply automatically / M/make manually / "
+                    "N/will not be made]: "
+                ),
+                choices,
+                styled(
+                    "Enter A, M, or N, or one of the three complete decision "
+                    "phrases."
+                    if automatic_allowed
+                    else "This incomplete Contact cannot be created automatically; "
                     "choose make manually or will not be made."
-                )
-                continue
-            return decision
+                ),
+            )
+        )
+        try:
+            return ReviewDecision(answer)
+        except ValueError as error:
+            raise UnsupportedReviewInteractionError(
+                f"Unknown review decision answer {answer!r}."
+            ) from error
 
-    def _prompt_yes_no(self, prompt: str) -> bool:
-        while True:
-            answer = self.input_fn(prompt).strip().casefold()
-            if answer in {"yes", "no"}:
-                return answer == "yes"
-            self.output_fn("Enter yes or no.")
+    def _prompt_yes_no(self, prompt: StyledText) -> bool:
+        answer = self._ask_choice(
+            ChoiceQuestion(
+                prompt,
+                (
+                    ReviewChoice("yes", "yes"),
+                    ReviewChoice("no", "no"),
+                ),
+                styled("Enter yes or no."),
+            )
+        )
+        return answer == "yes"
 
     def _update_status_with_audit(
         self,
