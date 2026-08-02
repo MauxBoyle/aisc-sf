@@ -8,6 +8,7 @@ from aisc_salesforce.process_profile_updates import (
     InteractiveProfileUpdateProcessor,
     ReviewDecision,
 )
+from aisc_salesforce.review_queue import build_review_queue
 from aisc_salesforce.review_ui import (
     AcknowledgementAnswer,
     ChoiceAnswer,
@@ -15,6 +16,7 @@ from aisc_salesforce.review_ui import (
     MappingComparison,
     MappingComparisonRow,
     ReviewChoice,
+    ReviewQueueSnapshot,
     ScalarComparison,
     UnsupportedReviewInteractionError,
     ValueFragment,
@@ -78,6 +80,15 @@ def test_cli_renders_scalar_and_mapping_comparisons_compatibly():
         "\nContact: Alex Smith\nSalesforce changes:\n"
         "Email: old@example.com -> new@example.com",
     ]
+
+
+def test_cli_renders_a_concise_summary_from_the_complete_queue_event():
+    output = []
+    ui = CLIReviewUI(output_fn=output.append)
+
+    ui.display(ReviewQueueSnapshot(build_review_queue([])))
+
+    assert output == ["Review queue: 0 batch(es), 0 pending change(s); next: none"]
 
 
 def test_cli_retries_invalid_choice_with_question_feedback():

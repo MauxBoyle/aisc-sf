@@ -136,6 +136,7 @@ snapshots/
 application_snapshots/
 staged_profile_updates/
 profile_updates.csv
+review_queue.json
 review_audit.jsonl
 response_emails.txt
 .envrc

@@ -366,6 +366,9 @@ def _run_process_profile_updates(
     output_fn(f"Processed Profile Updates from: {result.staging_path}")
     output_fn(f"Audit trail: {result.audit_path}")
     output_fn(f"Response emails: {result.response_path}")
+    queue_path = getattr(result, "queue_path", None)
+    if queue_path is not None:
+        output_fn(f"Review queue: {queue_path}")
     output_fn(f"completed Case batches: {result.completed_batches}")
     output_fn(f"pending Case batches: {result.pending_batches}")
     return 0

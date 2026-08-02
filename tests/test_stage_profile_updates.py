@@ -873,6 +873,41 @@ def test_staging_records_case_and_key_update_metadata():
     assert "AccountId IN ('account-1')" in case_query[2]
 
 
+def test_staging_retains_older_related_cases_as_prior_activity_references():
+    matching_case = {
+        "Id": "case-1",
+        "CaseNumber": "00010001",
+        "Subject": "Profile Update Received - PU-100",
+        "Status": "Pending",
+        "CreatedDate": "2026-07-15T15:00:00.000+0000",
+        "AccountId": "account-1",
+    }
+    older_case = {
+        **matching_case,
+        "Id": "case-old",
+        "CaseNumber": "00009999",
+        "Subject": "AISC Profile Update for Acme Steel - PU-099 26-06-01",
+        "Status": "Closed",
+        "CreatedDate": "2026-06-01T15:00:00.000+0000",
+    }
+
+    result, _ = stage(
+        [submission()],
+        accounts=[account()],
+        cases=[matching_case, older_case],
+    )
+
+    references = json.loads(result.rows[0]["prior_activity_references"])
+    assert {reference["record_id"] for reference in references} == {
+        "case-1",
+        "case-old",
+    }
+    old_reference = next(
+        reference for reference in references if reference["record_id"] == "case-old"
+    )
+    assert old_reference["status"] == "Closed"
+
+
 def test_staging_matches_aisc_pairs_without_treating_dates_as_update_names():
     records = [
         submission(Name="PU-099"),

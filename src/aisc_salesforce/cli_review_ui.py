@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from .review_queue import QueueStatus, iter_changes
 from .review_ui import (
     AccountHistory,
     AcknowledgementAnswer,
@@ -23,6 +24,7 @@ from .review_ui import (
     ReviewAnswer,
     ReviewEvent,
     ReviewQuestion,
+    ReviewQueueSnapshot,
     ScalarComparison,
     StagedRowSummary,
     StyledText,
@@ -127,6 +129,25 @@ class CLIReviewUI:
             self.output_fn(
                 f"{_section_heading(f'Response email for {event.recipient.value}', '-' * 72)}"
                 f"\n{event.body}"
+            )
+        elif isinstance(event, ReviewQueueSnapshot):
+            changes = list(iter_changes(event.manifest))
+            pending = sum(
+                change.status in {QueueStatus.PENDING, QueueStatus.IN_PROGRESS}
+                for change in changes
+            )
+            next_change = next(
+                (
+                    change
+                    for change in changes
+                    if change.id == event.manifest.default_next_item_id
+                ),
+                None,
+            )
+            next_label = next_change.label if next_change is not None else "none"
+            self.output_fn(
+                f"Review queue: {len(event.manifest.batches)} batch(es), "
+                f"{pending} pending change(s); next: {next_label}"
             )
         else:
             raise UnsupportedReviewInteractionError(

@@ -6,7 +6,7 @@ import csv
 import json
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, time, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -29,6 +29,15 @@ from .queried_fields import (
     CONTACT_REVIEW_FIELDS,
     SUBMISSION_FIELDS,
 )
+from .review_queue import (
+    QueuePhase,
+    QueueStatus,
+    ReviewQueueManifest,
+    ReviewQueueStore,
+    build_review_queue,
+    iter_changes,
+    stable_queue_id,
+)
 from .review_ui import (
     AccountHistory,
     AcknowledgementAnswer,
@@ -50,6 +59,7 @@ from .review_ui import (
     ResponseEmail,
     ReviewChoice,
     ReviewEvent,
+    ReviewQueueSnapshot,
     ReviewUI,
     ScalarComparison,
     StagedRowSummary,
@@ -239,6 +249,7 @@ class ProcessingResult:
     staging_path: Path
     audit_path: Path
     response_path: Path
+    queue_path: Path
     completed_batches: int
     pending_batches: int
     stopped_early: bool = False
@@ -306,6 +317,30 @@ class _ContactWorkItem:
         )
 
 
+class _QueuePublishingClient:
+    """Forward Salesforce calls and bracket every mutation with a snapshot."""
+
+    _MUTATIONS = {"create_record", "update_record", "post_feed_message"}
+
+    def __init__(self, client: Any, publish: Callable[[], None]):
+        self._client = client
+        self._publish = publish
+
+    def __getattr__(self, name: str) -> Any:
+        attribute = getattr(self._client, name)
+        if name not in self._MUTATIONS or not callable(attribute):
+            return attribute
+
+        def mutation(*args: Any, **kwargs: Any) -> Any:
+            self._publish()
+            try:
+                return attribute(*args, **kwargs)
+            finally:
+                self._publish()
+
+        return mutation
+
+
 class ProfileUpdateProcessingWorkflow:
     """Run Case preparation, staging, disk validation, then interactive review."""
 
@@ -328,6 +363,13 @@ class ProfileUpdateProcessingWorkflow:
 
     def run(self, output_dir: Path) -> ProcessingResult | Any:
         """Execute setup in the required order and review the published CSV."""
+        prepare_queue = getattr(self.processor, "prepare_review_queue", None)
+        if prepare_queue is not None:
+            return self._run_with_preflight_queue(output_dir, prepare_queue)
+
+        # Compatibility path for small injected processors that predate the
+        # queue interface.  The production processor always uses the preflight
+        # path above.
         resolve_accounts = getattr(
             self.processor, "resolve_missing_submission_accounts", None
         )
@@ -368,11 +410,105 @@ class ProfileUpdateProcessingWorkflow:
                 staging_path=staging_path,
                 audit_path=result.audit_path,
                 response_path=result.response_path,
+                queue_path=result.queue_path,
                 completed_batches=result.completed_batches,
                 pending_batches=result.pending_batches,
                 stopped_early=result.stopped_early,
             )
         return result
+
+    def _run_with_preflight_queue(
+        self,
+        output_dir: Path,
+        prepare_queue: Callable[[list[dict[str, str]], Path], Any],
+    ) -> ProcessingResult | Any:
+        """Publish a complete queue before the first question or write."""
+        self.output_fn(_section_heading("Read-only Profile Update preflight"))
+        staged: StagingResult = self.staging_service.stage()
+        self.output_fn(f"Preflight staging complete: {len(staged.rows)} row(s).")
+
+        self.output_fn(_section_heading("Publishing preflight artifacts"))
+        staging_path = self.staging_writer(staged.rows, output_dir)
+        csv_path = staging_path / "profile_updates.csv"
+        rows = read_staged_profile_updates(csv_path)
+        prepare_queue(rows, staging_path)
+        self.output_fn(
+            f"Preflight queue published: {staging_path / 'review_queue.json'}"
+        )
+
+        resolve_accounts = getattr(
+            self.processor, "resolve_missing_submission_accounts", None
+        )
+        if resolve_accounts is not None:
+            self.processor.transition_setup(
+                "Company_Profile_Change__c", "Account__c", QueueStatus.IN_PROGRESS
+            )
+            try:
+                repaired = resolve_accounts()
+            except Exception:
+                self.processor.transition_setup(
+                    "Company_Profile_Change__c", "Account__c", QueueStatus.FAILED
+                )
+                raise
+            self.processor.transition_setup(
+                "Company_Profile_Change__c",
+                "Account__c",
+                QueueStatus.COMPLETED,
+                outcome=ActionStatus.APPLIED.value,
+            )
+            self.output_fn(
+                f"Submission Account resolution complete: {repaired} repaired."
+            )
+
+        self.output_fn(_section_heading("Preparing Profile Update Cases"))
+        self.processor.transition_setup("Case", "Case", QueueStatus.IN_PROGRESS)
+        try:
+            counts: AutomationCounts = self._run_case_service_with_snapshots()
+        except Exception:
+            self.processor.transition_setup("Case", "Case", QueueStatus.FAILED)
+            raise
+        if counts.failed:
+            self.processor.transition_setup("Case", "Case", QueueStatus.FAILED)
+            details = "; ".join(getattr(self.case_service, "errors", []))
+            suffix = f": {details}" if details else ""
+            raise ProcessingError(
+                f"{counts.failed} required Case operation(s) failed{suffix}"
+            )
+        self.processor.transition_setup(
+            "Case",
+            "Case",
+            QueueStatus.COMPLETED,
+            outcome=ActionStatus.APPLIED.value,
+        )
+        self.output_fn("Case preparation complete.")
+
+        self.output_fn(_section_heading("Refreshing staged Profile Updates"))
+        refreshed: StagingResult = self.staging_service.stage()
+        _replace_staged_profile_updates(csv_path, refreshed.rows)
+        rows = read_staged_profile_updates(csv_path)
+        self.processor.refresh_review_queue(rows)
+        self.output_fn(f"Staging refresh complete: {len(rows)} row(s).")
+
+        self.output_fn(_section_heading("Starting interactive review"))
+        result = self.processor.review(rows, staging_path)
+        if isinstance(result, ProcessingResult):
+            return replace(
+                result,
+                staging_path=staging_path,
+            )
+        return result
+
+    def _run_case_service_with_snapshots(self) -> AutomationCounts:
+        """Observe writes made inside the separate Case preparation service."""
+        client = getattr(self.case_service, "client", None)
+        publish = getattr(self.processor, "_publish_queue_snapshot", None)
+        if client is None or publish is None:
+            return self.case_service.run()
+        self.case_service.client = _QueuePublishingClient(client, publish)
+        try:
+            return self.case_service.run()
+        finally:
+            self.case_service.client = client
 
 
 def read_staged_profile_updates(path: Path) -> list[dict[str, str]]:
@@ -415,6 +551,22 @@ def read_staged_profile_updates(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+def _replace_staged_profile_updates(path: Path, rows: list[dict[str, str]]) -> None:
+    """Atomically refresh the CSV inside an already-published run folder."""
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("w", newline="", encoding="utf-8") as output:
+            writer = csv.DictWriter(output, fieldnames=CSV_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def build_case_batches(
     rows: list[dict[str, str]], *, now: datetime | None = None
 ) -> list[CaseBatch]:
@@ -437,6 +589,20 @@ def build_case_batches(
 
     batches: list[CaseBatch] = []
     for (account_id, case_id), batch_rows in grouped.items():
+        batch_rows.sort(
+            key=lambda row: (
+                _required_datetime(row.get("earliest_submission_date", "")),
+                tuple(sorted(_json_string_list(row["source_submission_ids"]))),
+                stable_queue_id(
+                    "staged_row",
+                    object_name="Company_Profile_Change__c",
+                    source_submission_ids=tuple(
+                        _json_string_list(row["source_submission_ids"])
+                    ),
+                    target_context=f"account:{account_id}|case:{case_id}",
+                ),
+            )
+        )
         earliest_submission = min(
             _required_datetime(row.get("earliest_submission_date", ""))
             for row in batch_rows
@@ -476,6 +642,12 @@ def build_case_batches(
             batch.earliest_submission,
             batch.account_id,
             batch.case_id,
+            stable_queue_id(
+                "case_batch",
+                object_name="Case",
+                source_submission_ids=batch.source_submission_ids,
+                target_context=(f"account:{batch.account_id}|case:{batch.case_id}"),
+            ),
         )
     )
     return batches
@@ -571,6 +743,75 @@ class InteractiveProfileUpdateProcessor:
         self.ui = ui
         self.now = _aware_datetime(now or datetime.now(UTC))
         self._audit: _AuditWriter | None = None
+        self._queue_store: ReviewQueueStore | None = None
+        self._active_change_id: str | None = None
+
+    def prepare_review_queue(
+        self, rows: list[dict[str, str]], artifact_dir: Path
+    ) -> ReviewQueueManifest:
+        """Build and publish the initial queue before any question or write."""
+        manifest = build_review_queue(rows, now=self.now)
+        self._queue_store = ReviewQueueStore(
+            artifact_dir / "review_queue.json", manifest
+        )
+        self._publish_queue_snapshot()
+        return self._queue_store.manifest
+
+    def refresh_review_queue(self, rows: list[dict[str, str]]) -> ReviewQueueManifest:
+        """Refresh setup references while retaining stable item outcomes."""
+        if self._queue_store is None:
+            raise RuntimeError("Review queue has not been prepared.")
+        self._queue_store.refresh(build_review_queue(rows, now=self.now))
+        self._display_event(ReviewQueueSnapshot(self._queue_store.manifest))
+        return self._queue_store.manifest
+
+    def transition_setup(
+        self,
+        object_name: str,
+        field: str,
+        status: QueueStatus,
+        *,
+        outcome: str | None = None,
+    ) -> None:
+        """Transition every matching setup item and publish each snapshot."""
+        if self._queue_store is None:
+            return
+        item_ids = [
+            change.id
+            for change in iter_changes(self._queue_store.manifest)
+            if change.phase is QueuePhase.SETUP
+            and change.salesforce.object_name == object_name
+            and change.field == field
+        ]
+        for item_id in item_ids:
+            self._queue_store.transition(item_id, status, outcome=outcome)
+        if item_ids:
+            self._display_event(ReviewQueueSnapshot(self._queue_store.manifest))
+
+    def _publish_queue_snapshot(self) -> None:
+        """Persist and send the complete model through the UI-neutral boundary."""
+        if self._queue_store is None:
+            return
+        self._queue_store.publish()
+        self._display_event(ReviewQueueSnapshot(self._queue_store.manifest))
+
+    def _update_record(
+        self, object_name: str, record_id: str, values: dict[str, Any]
+    ) -> None:
+        """Persist queue snapshots immediately around a Salesforce update."""
+        self._publish_queue_snapshot()
+        try:
+            self.client.update_record(object_name, record_id, values)
+        finally:
+            self._publish_queue_snapshot()
+
+    def _create_record(self, object_name: str, values: dict[str, Any]) -> str:
+        """Persist queue snapshots immediately around a Salesforce create."""
+        self._publish_queue_snapshot()
+        try:
+            return self.client.create_record(object_name, values)
+        finally:
+            self._publish_queue_snapshot()
 
     def _display_event(self, event: ReviewEvent) -> None:
         """Send a typed event to the injected renderer."""
@@ -578,6 +819,7 @@ class InteractiveProfileUpdateProcessor:
 
     def _ask_choice(self, question: ChoiceQuestion) -> str:
         """Ask a choice question and reject a mismatched UI answer."""
+        self._publish_queue_snapshot()
         answer = self.ui.ask(question)
         if not isinstance(answer, ChoiceAnswer):
             raise UnsupportedReviewInteractionError(
@@ -592,6 +834,7 @@ class InteractiveProfileUpdateProcessor:
 
     def _ask_free_text(self, question: FreeTextQuestion) -> str:
         """Ask a free-text question and reject a mismatched UI answer."""
+        self._publish_queue_snapshot()
         answer = self.ui.ask(question)
         if not isinstance(answer, FreeTextAnswer):
             raise UnsupportedReviewInteractionError(
@@ -601,6 +844,7 @@ class InteractiveProfileUpdateProcessor:
 
     def _acknowledge(self, question: AcknowledgementQuestion) -> None:
         """Pause for acknowledgement and reject a mismatched UI answer."""
+        self._publish_queue_snapshot()
         answer = self.ui.ask(question)
         if not isinstance(answer, AcknowledgementAnswer):
             raise UnsupportedReviewInteractionError(
@@ -623,7 +867,7 @@ class InteractiveProfileUpdateProcessor:
             profile_id = _display(submission.get("Certification_ID__c")).strip()
             account = self._choose_submission_account(submission_name, profile_id)
             account_id = _required_record_text(account, "Id", "Account ID")
-            self.client.update_record(
+            self._update_record(
                 "Company_Profile_Change__c",
                 submission_id,
                 {"Account__c": account_id},
@@ -727,6 +971,20 @@ class InteractiveProfileUpdateProcessor:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         audit_path = artifact_dir / "review_audit.jsonl"
         response_path = artifact_dir / "response_emails.txt"
+        queue_path = artifact_dir / "review_queue.json"
+        if self._queue_store is None:
+            # Direct callers receive the same public contract as the workflow.
+            self.prepare_review_queue(rows, artifact_dir)
+            for object_name, field in (
+                ("Company_Profile_Change__c", "Account__c"),
+                ("Case", "Case"),
+            ):
+                self.transition_setup(
+                    object_name,
+                    field,
+                    QueueStatus.COMPLETED,
+                    outcome=ActionStatus.NOOP.value,
+                )
         response_writer = _ResponseWriter(response_path)
         batches = build_case_batches(rows, now=self.now)
         completed = 0
@@ -783,6 +1041,7 @@ class InteractiveProfileUpdateProcessor:
             staging_path=artifact_dir,
             audit_path=audit_path,
             response_path=response_path,
+            queue_path=queue_path,
             completed_batches=completed,
             pending_batches=pending,
             stopped_early=stopped_early,
@@ -834,6 +1093,18 @@ class InteractiveProfileUpdateProcessor:
         self._display_event(Heading(styled("Contact Updates"), STAGE_SEPARATOR))
         contact_items, source_mapping = self._collect_contact_work(batch, fresh_by_id)
         contact_items = self._resolve_contact_identities(batch, contact_items)
+        contact_items.sort(
+            key=lambda item: (
+                item.contact_id or item.key,
+                tuple(sorted(item.source_submission_ids)),
+                stable_queue_id(
+                    "contact_work",
+                    object_name="Contact",
+                    source_submission_ids=item.source_submission_ids,
+                    target_context=item.contact_id or item.key,
+                ),
+            )
+        )
         source_mapping = {
             source_key: next(
                 (item.key for item in contact_items if source_key in item.source_keys),
@@ -1493,7 +1764,7 @@ class InteractiveProfileUpdateProcessor:
             result = self._verify_manual_contact(batch, item, proposal)
         elif item.contact_id:
             try:
-                self.client.update_record(
+                self._update_record(
                     "Contact", item.contact_id, dict(item.write_values or {})
                 )
             except SalesforceError as error:
@@ -1517,7 +1788,7 @@ class InteractiveProfileUpdateProcessor:
             self._append_audit(result)
         else:
             try:
-                contact_id = self.client.create_record(
+                contact_id = self._create_record(
                     "Contact", dict(proposal.proposed_value)
                 )
             except SalesforceError as error:
@@ -1950,7 +2221,7 @@ class InteractiveProfileUpdateProcessor:
             resolution=resolution,
         )
         try:
-            self.client.update_record("Case", batch.case_id, {"ContactId": contact_id})
+            self._update_record("Case", batch.case_id, {"ContactId": contact_id})
         except SalesforceError as error:
             result = ActionResult(
                 proposal,
@@ -2650,6 +2921,7 @@ class InteractiveProfileUpdateProcessor:
         action: str = "review",
     ) -> ReviewDecision:
         """Ask for one validated reviewer decision and audit interruptions."""
+        self._transition_proposal(proposal, QueueStatus.IN_PROGRESS)
         try:
             return self._prompt_decision(automatic_allowed=automatic_allowed)
         except (KeyboardInterrupt, EOFError) as error:
@@ -2741,7 +3013,7 @@ class InteractiveProfileUpdateProcessor:
             return result
 
         try:
-            self.client.update_record(
+            self._update_record(
                 proposal.target_object,
                 proposal.target_record_id,
                 {proposal.field_name: proposal.proposed_value},
@@ -2923,7 +3195,7 @@ class InteractiveProfileUpdateProcessor:
             proposed_value=status,
         )
         try:
-            self.client.update_record(object_name, record_id, {field_name: status})
+            self._update_record(object_name, record_id, {field_name: status})
         except SalesforceError as error:
             result = ActionResult(
                 proposal,
@@ -2958,7 +3230,7 @@ class InteractiveProfileUpdateProcessor:
             proposed_value=CaseStatus.PENDING,
         )
         try:
-            self.client.update_record(
+            self._update_record(
                 "Case", batch.case_id, {"Status": CaseStatus.PENDING}
             )
         except SalesforceError as error:
@@ -3017,6 +3289,81 @@ class InteractiveProfileUpdateProcessor:
         if self._audit is None:
             raise RuntimeError("Audit writer is unavailable.")
         self._audit.append(result)
+        if result.status in {
+            ActionStatus.APPLIED,
+            ActionStatus.VERIFIED_MANUAL,
+            ActionStatus.REJECTED,
+            ActionStatus.NOOP,
+        }:
+            status = QueueStatus.COMPLETED
+        elif result.status is ActionStatus.STOPPED_EARLY:
+            status = QueueStatus.STOPPED_EARLY
+        elif result.status in {ActionStatus.FAILED, ActionStatus.INTERRUPTED}:
+            status = QueueStatus.FAILED
+        else:
+            return
+        transitioned = self._transition_proposal(
+            result.proposal,
+            status,
+            outcome=result.status.value,
+        )
+        if not transitioned and result.status in {
+            ActionStatus.STOPPED_EARLY,
+            ActionStatus.FAILED,
+            ActionStatus.INTERRUPTED,
+        }:
+            self._transition_default(status, outcome=result.status.value)
+
+    def _transition_default(
+        self, status: QueueStatus, *, outcome: str | None = None
+    ) -> None:
+        if self._queue_store is None:
+            return
+        item_id = (
+            self._active_change_id or self._queue_store.manifest.default_next_item_id
+        )
+        if item_id is None:
+            return
+        self._queue_store.transition(item_id, status, outcome=outcome)
+        self._active_change_id = None
+        self._display_event(ReviewQueueSnapshot(self._queue_store.manifest))
+
+    def _transition_proposal(
+        self,
+        proposal: ChangeProposal,
+        status: QueueStatus,
+        *,
+        outcome: str | None = None,
+    ) -> bool:
+        """Map an executed proposal back to one or more discovered changes."""
+        if self._queue_store is None:
+            return False
+        changes = list(iter_changes(self._queue_store.manifest))
+        exact_id = stable_queue_id(
+            "proposed_change",
+            object_name=proposal.target_object,
+            source_submission_ids=proposal.source_submission_ids,
+            target_context=proposal.target_record_id,
+            field=proposal.field_name,
+        )
+        item_ids = [change.id for change in changes if change.id == exact_id]
+        if proposal.target_object == "Contact" and proposal.field_name == "Contact":
+            source_ids = set(proposal.source_submission_ids)
+            item_ids.extend(
+                change.id
+                for change in changes
+                if change.phase is QueuePhase.CONTACT
+                and set(change.source_submission_ids) == source_ids
+            )
+        item_ids = list(dict.fromkeys(item_ids))
+        for item_id in item_ids:
+            self._queue_store.transition(item_id, status, outcome=outcome)
+        if item_ids:
+            self._active_change_id = (
+                item_ids[0] if status is QueueStatus.IN_PROGRESS else None
+            )
+            self._display_event(ReviewQueueSnapshot(self._queue_store.manifest))
+        return bool(item_ids)
 
 
 def format_response_emails(

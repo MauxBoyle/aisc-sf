@@ -23,6 +23,7 @@ from aisc_salesforce.process_profile_updates import (
     read_staged_profile_updates,
 )
 from aisc_salesforce.profile_updates import AutomationCounts
+from aisc_salesforce.review_queue import build_review_queue, write_review_queue
 from aisc_salesforce.review_ui import (
     ChoiceAnswer,
     ChoiceQuestion,
@@ -250,6 +251,90 @@ class ResolvingProcessor(CapturingProcessor):
     def resolve_missing_submission_accounts(self):
         self.events.append("resolve_accounts")
         return 1
+
+
+def test_queue_aware_workflow_publishes_preflight_before_setup_and_refreshes(
+    tmp_path,
+):
+    events = []
+    run_folder = tmp_path / "published"
+
+    class SequencedStaging:
+        def __init__(self):
+            self.calls = 0
+
+        def stage(self):
+            self.calls += 1
+            events.append(f"stage-{self.calls}")
+            if self.calls == 1:
+                return StagingResult(
+                    [
+                        staged_row(
+                            account_id="",
+                            case_id="",
+                            case_number="",
+                            case_match_status="missing",
+                        )
+                    ],
+                    1,
+                )
+            return StagingResult([staged_row(account_name="refreshed")], 0)
+
+    class QueueAwareProcessor:
+        def prepare_review_queue(self, rows, artifact_dir):
+            events.append("queue")
+            assert not any(event in events for event in ("resolve", "cases"))
+            write_review_queue(
+                build_review_queue(rows, now=NOW),
+                artifact_dir / "review_queue.json",
+            )
+
+        def transition_setup(self, *args, **kwargs):
+            events.append(f"transition-{args[0]}-{args[2]}")
+
+        def resolve_missing_submission_accounts(self):
+            assert (run_folder / "review_queue.json").exists()
+            events.append("resolve")
+            return 1
+
+        def refresh_review_queue(self, rows):
+            events.append("refresh")
+            assert rows[0]["account_name"] == "refreshed"
+
+        def review(self, rows, artifact_dir):
+            events.append("review")
+            return artifact_dir
+
+    class QueueAwareCaseService:
+        errors = []
+
+        def run(self):
+            assert (run_folder / "review_queue.json").exists()
+            events.append("cases")
+            return AutomationCounts(created=1)
+
+    def writer(rows, output_dir):
+        events.append("write")
+        run_folder.mkdir()
+        with (run_folder / "profile_updates.csv").open(
+            "w", newline="", encoding="utf-8"
+        ) as output:
+            csv_writer = csv.DictWriter(output, fieldnames=CSV_COLUMNS)
+            csv_writer.writeheader()
+            csv_writer.writerows(rows)
+        return run_folder
+
+    workflow = ProfileUpdateProcessingWorkflow(
+        QueueAwareCaseService(),
+        SequencedStaging(),
+        QueueAwareProcessor(),
+        staging_writer=writer,
+        output_fn=lambda message: None,
+    )
+
+    assert workflow.run(tmp_path) == run_folder
+    assert events.index("queue") < events.index("resolve") < events.index("cases")
+    assert events.index("cases") < events.index("stage-2") < events.index("review")
 
 
 def test_workflow_repairs_submission_accounts_before_creating_cases(tmp_path):
@@ -697,6 +782,15 @@ def test_quit_is_audited_preserves_completed_batches_and_returns_success(
     assert stopped["case_id"] == "case-2"
     assert stopped["action"] == "reviewer requested safe stop"
     assert result.response_path.read_text(encoding="utf-8") == ""
+    queue = json.loads(result.queue_path.read_text(encoding="utf-8"))
+    stopped_change = next(
+        change
+        for batch in queue["batches"]
+        for queued_row in batch["rows"]
+        for change in queued_row["changes"]
+        if change["field"] == "Name"
+    )
+    assert stopped_change["status"] == "stopped_early"
 
 
 @pytest.mark.parametrize(
@@ -802,6 +896,18 @@ def test_account_change_uses_fresh_context_audits_and_closes_completed_batch(tmp
     assert "Thank you for updating your information with AISC." in response
     assert "Company Name: Acme Steel LLC" in response
     assert "Replaces Acme Steel" in response
+    assert result.queue_path == tmp_path / "review_queue.json"
+    queue = json.loads(result.queue_path.read_text(encoding="utf-8"))
+    account_change = next(
+        change
+        for batch in queue["batches"]
+        for queued_row in batch["rows"]
+        for change in queued_row["changes"]
+        if change["field"] == "Name"
+    )
+    assert account_change["status"] == "completed"
+    assert account_change["outcome"] == "applied"
+    assert queue["default_next_item_id"] is None
     assert any(item[0] == "Company_Profile_Change__c" for item in client.gets)
     history_query = next(
         query for query in client.queries if query[0] == "AccountHistory"
@@ -833,6 +939,16 @@ def test_current_value_is_an_audited_noop_without_prompt_or_email_item(tmp_path)
     assert any(
         item["result"] == "no-op" and item["field"] == "Name" for item in entries
     )
+    queue = json.loads(result.queue_path.read_text(encoding="utf-8"))
+    account_change = next(
+        change
+        for batch in queue["batches"]
+        for queued_row in batch["rows"]
+        for change in queued_row["changes"]
+        if change["field"] == "Name"
+    )
+    assert account_change["status"] == "completed"
+    assert account_change["outcome"] == "no-op"
     assert "Company Name:" not in result.response_path.read_text(encoding="utf-8")
 
 
@@ -879,6 +995,15 @@ def test_manual_change_mismatch_stops_without_closing_sources(tmp_path):
 
     assert not any(item[0] == "Company_Profile_Change__c" for item in client.updated)
     assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
+    queue = json.loads((tmp_path / "review_queue.json").read_text(encoding="utf-8"))
+    failed = next(
+        change
+        for batch in queue["batches"]
+        for queued_row in batch["rows"]
+        for change in queued_row["changes"]
+        if change["field"] == "Name"
+    )
+    assert failed["status"] == "failed"
 
 
 def test_exact_email_match_is_global_and_each_mismatch_precedes_role_decision(
@@ -1832,7 +1957,7 @@ def test_distinct_emails_in_one_role_stay_separate_until_role_assignment(
                 "LastName": "Person",
                 "Email": "second@example.com",
             },
-        )
+        ),
     ]
     assert (
         "Account",
@@ -2525,6 +2650,15 @@ def test_salesforce_failure_is_audited_and_leaves_batch_retryable(tmp_path):
     assert '"result": "failed"' in audit_text
     assert not any(item[0] == "Company_Profile_Change__c" for item in client.updated)
     assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
+    queue = json.loads((tmp_path / "review_queue.json").read_text(encoding="utf-8"))
+    failed = next(
+        change
+        for batch in queue["batches"]
+        for queued_row in batch["rows"]
+        for change in queued_row["changes"]
+        if change["field"] == "Name"
+    )
+    assert failed["status"] == "failed"
 
 
 def test_interruption_flushes_audit_and_leaves_batch_retryable(tmp_path):
@@ -2547,6 +2681,15 @@ def test_interruption_flushes_audit_and_leaves_batch_retryable(tmp_path):
     assert '"result": "interrupted"' in audit_text
     assert not any(item[0] == "Company_Profile_Change__c" for item in client.updated)
     assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
+    queue = json.loads((tmp_path / "review_queue.json").read_text(encoding="utf-8"))
+    interrupted = next(
+        change
+        for batch in queue["batches"]
+        for queued_row in batch["rows"]
+        for change in queued_row["changes"]
+        if change["field"] == "Name"
+    )
+    assert interrupted["status"] == "failed"
 
 
 def test_interruption_during_email_confirmation_is_also_retryable(tmp_path):
