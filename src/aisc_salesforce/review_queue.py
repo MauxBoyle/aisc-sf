@@ -480,6 +480,48 @@ class ReviewQueueStore:
         self.publish()
         return self.manifest
 
+    def block_batch(
+        self,
+        batch_id: str,
+        blocker: QueueBlocker,
+        *,
+        outcome: str,
+    ) -> ReviewQueueManifest:
+        """Block one Case batch while preserving already-completed setup work."""
+        self.publish()
+        batches: list[CaseBatch] = []
+        for batch in self.manifest.batches:
+            if batch.id != batch_id:
+                batches.append(batch)
+                continue
+            rows: list[StagedRow] = []
+            for row in batch.rows:
+                changes = tuple(
+                    replace(change, status=QueueStatus.BLOCKED, outcome=outcome)
+                    if change.status in {QueueStatus.PENDING, QueueStatus.IN_PROGRESS}
+                    else change
+                    for change in row.changes
+                )
+                rows.append(
+                    replace(
+                        row,
+                        blockers=_unique_blockers((*row.blockers, blocker)),
+                        changes=changes,
+                    )
+                )
+            batches.append(
+                replace(
+                    batch,
+                    blockers=_unique_blockers((*batch.blockers, blocker)),
+                    rows=tuple(rows),
+                )
+            )
+        self.manifest = recompute_manifest(
+            replace(self.manifest, batches=tuple(batches))
+        )
+        self.publish()
+        return self.manifest
+
 
 def iter_changes(manifest: ReviewQueueManifest):
     """Yield changes once in manifest order, despite cross-row references."""
@@ -543,6 +585,17 @@ def _build_row_shell(raw: dict[str, str]) -> StagedRow:
         references.append(
             SalesforceReference("Account", account_id, relationship="target_account")
         )
+    references.extend(
+        SalesforceReference(
+            "Account",
+            affected["id"],
+            relationship="affected_account",
+            label=affected["name"],
+            status=affected["certification_status"],
+        )
+        for affected in _affected_accounts(raw)
+        if affected["id"] != account_id or raw.get("is_parent_account") == "true"
+    )
     if case_id:
         references.append(
             SalesforceReference("Case", case_id, relationship="profile_update_case")
@@ -619,23 +672,37 @@ def _setup_changes(raw: dict[str, str], row: StagedRow) -> list[ProposedChange]:
 
 
 def _account_changes(raw: dict[str, str], row: StagedRow) -> list[ProposedChange]:
-    account_id = raw.get("account_id", "").strip()
+    submitted_parent_fields = _submitted_parent_account_fields(raw)
     return [
         _change(
             row,
             phase=QueuePhase.ACCOUNT,
             object_name="Account",
-            record_id=account_id,
-            target_context=account_id
+            record_id=affected["id"],
+            target_context=affected["id"]
             or f"sources:{','.join(row.source_submission_ids)}",
             field=field,
-            label=label,
+            label=(
+                f"{label} — {affected['name'] or affected['id']}"
+                if raw.get("is_parent_account") == "true"
+                else label
+            ),
             current_value=None,
             proposed_value=proposed,
         )
+        for affected in _affected_accounts(raw)
         for csv_name, field, label in ACCOUNT_PROPOSALS
         if (proposed := raw.get(csv_name, "").strip())
+        and (submitted_parent_fields is None or field in submitted_parent_fields)
     ]
+
+
+def _submitted_parent_account_fields(raw: dict[str, str]) -> set[str] | None:
+    """Return staged submitted fields, or None for ordinary/legacy rows."""
+    value = raw.get("submitted_account_fields", "").strip()
+    if raw.get("is_parent_account") != "true" or not value:
+        return None
+    return set(_json_list(value))
 
 
 def _build_contact_changes(
@@ -758,40 +825,80 @@ def _build_contact_changes(
 
 
 def _role_link_changes(raw: dict[str, str], row: StagedRow) -> list[ProposedChange]:
-    account_id = raw.get("account_id", "").strip()
     changes = []
-    for role in ROLE_DEFINITIONS:
-        if not any(
-            raw.get(f"{role.prefix}_{suffix}", "").strip()
-            for suffix, _ in role.submitted_fields
-        ):
-            continue
-        proposed = raw.get(f"{role.prefix}_salesforce_contact_id", "").strip()
-        action = raw.get(f"{role.prefix}_resolution_action", "").strip()
-        blockers: tuple[QueueBlocker, ...] = ()
-        if not proposed and action != "create_contact":
-            blockers = (
-                QueueBlocker(
-                    "unresolved_role_contact", f"{role.label} Contact is unresolved."
-                ),
+    for affected in _affected_accounts(raw):
+        for role in ROLE_DEFINITIONS:
+            if not any(
+                raw.get(f"{role.prefix}_{suffix}", "").strip()
+                for suffix, _ in role.submitted_fields
+            ):
+                continue
+            proposed = raw.get(f"{role.prefix}_salesforce_contact_id", "").strip()
+            action = raw.get(f"{role.prefix}_resolution_action", "").strip()
+            blockers: tuple[QueueBlocker, ...] = ()
+            if not proposed and action != "create_contact":
+                blockers = (
+                    QueueBlocker(
+                        "unresolved_role_contact",
+                        f"{role.label} Contact is unresolved.",
+                    ),
+                )
+            label = f"{role.label} Contact role"
+            if raw.get("is_parent_account") == "true":
+                label += f" — {affected['name'] or affected['id']}"
+            changes.append(
+                _change(
+                    row,
+                    phase=QueuePhase.ROLE_LINK,
+                    object_name="Account",
+                    record_id=affected["id"],
+                    target_context=affected["id"]
+                    or f"sources:{','.join(row.source_submission_ids)}",
+                    field=role.account_lookup,
+                    label=label,
+                    current_value=None,
+                    proposed_value=proposed
+                    or ("new Contact" if action == "create_contact" else None),
+                    extra_blockers=blockers,
+                )
             )
-        changes.append(
-            _change(
-                row,
-                phase=QueuePhase.ROLE_LINK,
-                object_name="Account",
-                record_id=account_id,
-                target_context=account_id
-                or f"sources:{','.join(row.source_submission_ids)}",
-                field=role.account_lookup,
-                label=f"{role.label} Contact role",
-                current_value=None,
-                proposed_value=proposed
-                or ("new Contact" if action == "create_contact" else None),
-                extra_blockers=blockers,
-            )
-        )
     return changes
+
+
+def _affected_accounts(raw: dict[str, str]) -> list[dict[str, str]]:
+    """Return deterministic Account targets, with legacy-row compatibility."""
+    try:
+        loaded = json.loads(raw.get("affected_accounts", "") or "[]")
+    except (TypeError, ValueError):
+        loaded = []
+    affected: list[dict[str, str]] = []
+    if isinstance(loaded, list):
+        for item in loaded:
+            if not isinstance(item, dict):
+                continue
+            account_id = str(item.get("id", "")).strip()
+            if not account_id:
+                continue
+            affected.append(
+                {
+                    "id": account_id,
+                    "name": str(item.get("name", "")).strip(),
+                    "certification_status": str(
+                        item.get("certification_status", "")
+                    ).strip(),
+                }
+            )
+    if not affected and raw.get("is_parent_account") != "true":
+        account_id = raw.get("account_id", "").strip()
+        if account_id:
+            affected.append(
+                {
+                    "id": account_id,
+                    "name": raw.get("account_name", "").strip(),
+                    "certification_status": "",
+                }
+            )
+    return sorted(affected, key=lambda item: item["id"])
 
 
 def _change(
@@ -845,14 +952,12 @@ def _parent_status(items, blockers: tuple[QueueBlocker, ...]) -> QueueStatus:
         return QueueStatus.FAILED
     if any(status is QueueStatus.STOPPED_EARLY for status in statuses):
         return QueueStatus.STOPPED_EARLY
+    if blockers:
+        return QueueStatus.BLOCKED
     if statuses and all(status is QueueStatus.COMPLETED for status in statuses):
         return QueueStatus.COMPLETED
-    if blockers or (
-        statuses
-        and all(
-            status in {QueueStatus.BLOCKED, QueueStatus.COMPLETED}
-            for status in statuses
-        )
+    if statuses and all(
+        status in {QueueStatus.BLOCKED, QueueStatus.COMPLETED} for status in statuses
     ):
         return QueueStatus.BLOCKED
     if not statuses:

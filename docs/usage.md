@@ -709,7 +709,8 @@ Every batch, row, and change includes an `id`, readable `label`, `status`,
 `warnings`, and `blockers`. Changes also include their phase, source submission
 and row IDs, Salesforce object/record/field reference, current value, proposed
 value, and optional completed `outcome`. Batch and row references retain the
-source Profile Updates, target Account and Case, and related prior Case activity.
+source Profile Updates, target Account and Case, affected direct child Accounts,
+and related prior Case activity.
 Only submissions queried with `Status__c = 'New'` become work; older records are
 context references, not queue items.
 
@@ -863,6 +864,33 @@ when phase one changed the Contact email or created a Contact shared by several
 roles. This phase may update Account role lookup fields only. It performs no
 Contact create or update. Contact identity and field updates therefore finish
 before role assignment can influence an Account lookup.
+
+At the start of every Case batch, the submitted Account and its direct children
+are fetched again. An Account with at least one direct child is treated as a
+Parent Account. Only that first child level is inspected, so grandchildren are
+never selected. Direct children are active only when
+`Cert_Certification_Status__c` is exactly `Certified` or `Initials`; `Dropped`,
+`Suspended`, blank, and all other statuses are excluded.
+
+Before the Case, Contacts, Accounts, role links, or source submissions can be
+changed, active children are compared for the ordinary Account fields and
+Account-role lookups actually submitted in this Case batch. Outer whitespace is
+ignored, null and blank are equal, and other text remains case-sensitive.
+Differences in unsubmitted fields and values on inactive children do not block
+processing. If relevant values agree, Contact reconciliation runs once. A newly
+created Contact keeps the Parent Account as `AccountId`, while the ordinary
+Account proposal and role-link review runs once for each active child.
+
+A relevant conflict produces a typed summary with the field label, requested
+value, and every active child's current name, ID, and value. A Parent with no
+active direct children produces a typed notice listing the direct children's
+statuses. The reviewer acknowledges either message; the processor then writes a
+`deferred manual follow-up` audit event, marks the complete Case batch blocked,
+leaves every included Profile Update and the Case open, performs no Salesforce
+write for that batch, and advances to the next Case. An interruption during the
+acknowledgement also occurs before any Salesforce write. On a later run, staging
+and preflight refetch the hierarchy and values, so manually reconciled work can
+be retried without carrying stale child routing.
 
 Account-role proposals use friendly Contact names and emails for current and
 proposed values. Salesforce IDs remain available internally for record writes

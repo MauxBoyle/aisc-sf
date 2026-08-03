@@ -121,6 +121,7 @@ ACCOUNT_FIELDS = (
     "BillingPostalCode",
     "BillingCountry",
     "ParentId",
+    "Cert_Certification_Status__c",
     "Cert_Certification_Contact__c",
     "Cert_Principal_Contact__c",
     "Cert_Accounting_Contact__c",
@@ -151,6 +152,8 @@ STAGING_CASE_FIELDS = (
 ACCOUNT_REVIEW_FIELDS = (
     "Id",
     "Name",
+    "ParentId",
+    "Cert_Certification_Status__c",
     "Company_Owner__c",
     "BillingStreet",
     "BillingCity",

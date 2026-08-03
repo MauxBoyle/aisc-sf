@@ -15,6 +15,10 @@ from aisc_salesforce.review_ui import (
     ChoiceQuestion,
     MappingComparison,
     MappingComparisonRow,
+    ParentAccountChildValue,
+    ParentAccountConflict,
+    ParentAccountFieldConflict,
+    ParentAccountNoActiveChildren,
     ReviewChoice,
     ReviewQueueSnapshot,
     ScalarComparison,
@@ -75,8 +79,7 @@ def test_cli_renders_scalar_and_mapping_comparisons_compatibly():
     )
 
     assert output == [
-        "\nCompany Name\nCurrent Salesforce value: Acme\n"
-        "Proposed value: Acme Steel",
+        "\nCompany Name\nCurrent Salesforce value: Acme\nProposed value: Acme Steel",
         "\nContact: Alex Smith\nSalesforce changes:\n"
         "Email: old@example.com -> new@example.com",
     ]
@@ -89,6 +92,54 @@ def test_cli_renders_a_concise_summary_from_the_complete_queue_event():
     ui.display(ReviewQueueSnapshot(build_review_queue([])))
 
     assert output == ["Review queue: 0 batch(es), 0 pending change(s); next: none"]
+
+
+def test_cli_renders_parent_conflict_and_no_active_child_events():
+    output = []
+    ui = CLIReviewUI(output_fn=output.append)
+    children = (
+        ParentAccountChildValue(
+            ValueFragment("child-1"),
+            ValueFragment("First Child"),
+            ValueFragment("Old Name"),
+        ),
+        ParentAccountChildValue(
+            ValueFragment("child-2"),
+            ValueFragment("Second Child"),
+            ValueFragment("Other Name"),
+        ),
+    )
+
+    ui.display(
+        ParentAccountConflict(
+            ValueFragment("Parent Account (parent-1)"),
+            (
+                ParentAccountFieldConflict(
+                    "Company Name", ValueFragment("Requested Name"), children
+                ),
+            ),
+        )
+    )
+    ui.display(
+        ParentAccountNoActiveChildren(
+            ValueFragment("Parent Account (parent-1)"),
+            (
+                ParentAccountChildValue(
+                    ValueFragment("child-dropped"),
+                    ValueFragment("Dropped Child"),
+                    ValueFragment("Dropped"),
+                ),
+            ),
+        )
+    )
+
+    rendered = "\n".join(output)
+    assert "Company Name" in rendered
+    assert "Requested value: Requested Name" in rendered
+    assert "First Child (child-1): Old Name" in rendered
+    assert "Second Child (child-2): Other Name" in rendered
+    assert "no direct child with status Certified or Initials" in rendered
+    assert "Dropped Child (child-dropped): Dropped" in rendered
 
 
 def test_cli_retries_invalid_choice_with_question_feedback():
@@ -153,7 +204,9 @@ def test_processor_rejects_mismatched_answer_type():
     ui = RecordingUI(AcknowledgementAnswer())
     processor = InteractiveProfileUpdateProcessor(object(), ui)
 
-    with pytest.raises(UnsupportedReviewInteractionError, match="requires ChoiceAnswer"):
+    with pytest.raises(
+        UnsupportedReviewInteractionError, match="requires ChoiceAnswer"
+    ):
         processor._prompt_yes_no(styled("Continue? "))
 
 

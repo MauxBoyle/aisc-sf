@@ -214,6 +214,10 @@ refreshes Account or Case references.
         - ContactComparison
         - ConflictCandidate
         - ContactFieldConflict
+        - ParentAccountChildValue
+        - ParentAccountFieldConflict
+        - ParentAccountConflict
+        - ParentAccountNoActiveChildren
         - StagedRowSummary
         - AccountHistory
         - ResponseEmail
@@ -282,7 +286,13 @@ Contact ID is only a fallback for a partial proposal without an email. Different
 emails stay separate even when submitted for the same role, unless identity
 review resolves them to the same Salesforce Contact. Reviewer-facing Contact
 comparisons use labeled field lines, while the JSON audit retains structured
-dictionaries. The
+dictionaries. Parent Account preflight refetches only direct children, filters
+them to exact `Certified` and `Initials` statuses, and emits renderer-neutral
+conflict or no-active-child events before any batch write. Safe Account and
+role-link proposals target each active child; Contact work remains shared and a
+new Contact stays owned by the submitted Parent Account. Acknowledged unsafe
+batches use the `DEFERRED_MANUAL` action status, a blocked queue state, and leave
+the source records and Case open for manual follow-up and retry. The
 processor writes `review_audit.jsonl` after every result and
 `response_emails.txt` for successful Account changes and completed submitted
 roles. Profile Update closure and the Case's final status happen only after the

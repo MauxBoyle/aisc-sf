@@ -199,6 +199,50 @@ def test_contact_change_is_shared_across_source_rows():
     assert len(set(contact_ids)) == 1
 
 
+def test_parent_account_and_role_changes_expand_to_active_children_only():
+    affected = json.dumps(
+        [
+            {
+                "id": "child-2",
+                "name": "Second Child",
+                "certification_status": "Initials",
+            },
+            {
+                "id": "child-1",
+                "name": "First Child",
+                "certification_status": "Certified",
+            },
+        ]
+    )
+    row = queue_row(
+        is_parent_account="true",
+        affected_accounts=affected,
+        revised_company_name="New Name",
+        certification_email="cert@example.com",
+        certification_salesforce_contact_id="contact-1",
+        certification_resolution_action="use_existing",
+    )
+
+    manifest = build_review_queue([row], now=NOW)
+    routed = [
+        change
+        for change in iter_changes(manifest)
+        if change.phase in {"account", "role_link"}
+    ]
+
+    assert [change.salesforce.record_id for change in routed] == [
+        "child-1",
+        "child-2",
+        "child-1",
+        "child-2",
+    ]
+    assert {
+        reference.record_id
+        for reference in manifest.batches[0].references
+        if reference.relationship == "affected_account"
+    } == {"child-1", "child-2"}
+
+
 def test_contact_json_is_deterministic_and_prior_cases_remain_references():
     first_resolution = {
         "classification": "ambiguous",

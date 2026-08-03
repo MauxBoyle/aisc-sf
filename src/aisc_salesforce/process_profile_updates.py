@@ -26,10 +26,12 @@ from .contact_resolution import (
 from .profile_updates import AutomationCounts, escape_soql_string
 from .queried_fields import (
     ACCOUNT_HISTORY_FIELDS,
+    ACCOUNT_REVIEW_FIELDS,
     CONTACT_REVIEW_FIELDS,
     SUBMISSION_FIELDS,
 )
 from .review_queue import (
+    QueueBlocker,
     QueuePhase,
     QueueStatus,
     ReviewQueueManifest,
@@ -56,6 +58,10 @@ from .review_ui import (
     MappingComparison,
     MappingComparisonRow,
     Notice,
+    ParentAccountChildValue,
+    ParentAccountConflict,
+    ParentAccountFieldConflict,
+    ParentAccountNoActiveChildren,
     ResponseEmail,
     ReviewChoice,
     ReviewEvent,
@@ -72,6 +78,7 @@ from .review_ui import (
 from .salesforce import SalesforceClient, SalesforceError
 from .salesforce_enums import CaseStatus, ProfileChangeStatus
 from .stage_profile_updates import (
+    ACTIVE_CERTIFICATION_STATUSES,
     CSV_COLUMNS,
     ROLE_DEFINITIONS,
     ProfileUpdateStagingService,
@@ -156,6 +163,10 @@ class ProcessingInterrupted(ProcessingError):
     """The reviewer interrupted processing before the batch was finalized."""
 
 
+class _ParentPreflightInterrupted(ProcessingInterrupted):
+    """The reviewer interrupted before a blocked Parent batch made any write."""
+
+
 class ProcessingStoppedEarly(Exception):
     """The reviewer deliberately stopped before the current row was reviewed."""
 
@@ -178,6 +189,7 @@ class ActionStatus(StrEnum):
     FAILED = "failed"
     INTERRUPTED = "interrupted"
     STOPPED_EARLY = "stopped early"
+    DEFERRED_MANUAL = "deferred manual follow-up"
 
 
 @dataclass(frozen=True)
@@ -240,6 +252,24 @@ class CaseBatch:
                 for source_id in _json_string_list(row["source_submission_ids"])
             )
         )
+
+
+@dataclass(frozen=True)
+class _ParentRouting:
+    """Fresh one-level Account routing selected before a Case batch writes."""
+
+    submitted_account: dict[str, Any]
+    direct_children: tuple[dict[str, Any], ...]
+    target_accounts: tuple[dict[str, Any], ...]
+    conflicts: tuple[ParentAccountFieldConflict, ...] = ()
+
+    @property
+    def is_parent(self) -> bool:
+        return bool(self.direct_children)
+
+    @property
+    def blocked(self) -> bool:
+        return self.is_parent and (not self.target_accounts or bool(self.conflicts))
 
 
 @dataclass(frozen=True)
@@ -745,6 +775,7 @@ class InteractiveProfileUpdateProcessor:
         self._audit: _AuditWriter | None = None
         self._queue_store: ReviewQueueStore | None = None
         self._active_change_id: str | None = None
+        self._review_rows: list[dict[str, str]] | None = None
 
     def prepare_review_queue(
         self, rows: list[dict[str, str]], artifact_dir: Path
@@ -986,6 +1017,7 @@ class InteractiveProfileUpdateProcessor:
                     outcome=ActionStatus.NOOP.value,
                 )
         response_writer = _ResponseWriter(response_path)
+        self._review_rows = rows
         batches = build_case_batches(rows, now=self.now)
         completed = 0
         pending = 0
@@ -1007,6 +1039,10 @@ class InteractiveProfileUpdateProcessor:
                         pending += len(batches) - completed
                         stopped_early = True
                         break
+                    except _ParentPreflightInterrupted:
+                        # The Case and submissions were already open, and parent
+                        # preflight deliberately runs before any Salesforce write.
+                        raise
                     except ProcessingInterrupted:
                         self._keep_case_pending(batch)
                         raise
@@ -1037,6 +1073,7 @@ class InteractiveProfileUpdateProcessor:
                     pending += int(is_pending)
         finally:
             self._audit = None
+            self._review_rows = None
         return ProcessingResult(
             staging_path=artifact_dir,
             audit_path=audit_path,
@@ -1075,6 +1112,9 @@ class InteractiveProfileUpdateProcessor:
         )
         fresh_by_id = self._fresh_case_submissions(batch)
         self._show_case_context(batch, fresh_by_id)
+        routing = self._preflight_parent_routing(batch, fresh_by_id)
+        if routing.blocked:
+            return self._defer_parent_batch(batch, routing)
         self._show_account_history(batch, list(fresh_by_id.values()))
 
         # Every row checkpoint happens before the first Salesforce write.
@@ -1124,31 +1164,53 @@ class InteractiveProfileUpdateProcessor:
 
         self._display_event(Heading(styled("Account Updates"), STAGE_SEPARATOR))
         account_results: list[ActionResult] = []
-        for row in batch.rows:
-            fresh_submissions = [
-                fresh_by_id[source_id]
-                for source_id in _json_string_list(row["source_submission_ids"])
-            ]
-            reviewed = self._review_account_proposals(batch, row, fresh_submissions)
-            account_results.extend(reviewed)
-            results.extend(reviewed)
+        for target_index, target_account in enumerate(routing.target_accounts):
+            target_account_id = _required_record_text(
+                target_account, "Id", "Affected Account ID"
+            )
+            target_account_name = _display(target_account.get("Name"))
+            for row in batch.rows:
+                fresh_submissions = [
+                    fresh_by_id[source_id]
+                    for source_id in _json_string_list(row["source_submission_ids"])
+                ]
+                reviewed = self._review_account_proposals(
+                    batch,
+                    row,
+                    fresh_submissions,
+                    target_account_id=target_account_id,
+                    target_account_name=target_account_name,
+                    parent_routed=routing.is_parent,
+                )
+                if target_index == 0:
+                    account_results.extend(reviewed)
+                results.extend(reviewed)
 
         self._display_event(Heading(styled("Role Links"), STAGE_SEPARATOR))
         role_responses: list[_RoleResponse] = []
-        for row in batch.rows:
-            fresh_submissions = [
-                fresh_by_id[source_id]
-                for source_id in _json_string_list(row["source_submission_ids"])
-            ]
-            reviewed, responses = self._assign_reconciled_roles(
-                batch,
-                row,
-                fresh_submissions,
-                contact_items,
-                source_mapping,
+        for target_index, target_account in enumerate(routing.target_accounts):
+            target_account_id = _required_record_text(
+                target_account, "Id", "Affected Account ID"
             )
-            results.extend(reviewed)
-            role_responses.extend(responses)
+            target_account_name = _display(target_account.get("Name"))
+            for row in batch.rows:
+                fresh_submissions = [
+                    fresh_by_id[source_id]
+                    for source_id in _json_string_list(row["source_submission_ids"])
+                ]
+                reviewed, responses = self._assign_reconciled_roles(
+                    batch,
+                    row,
+                    fresh_submissions,
+                    contact_items,
+                    source_mapping,
+                    target_account_id=target_account_id,
+                    target_account_name=target_account_name,
+                    parent_routed=routing.is_parent,
+                )
+                results.extend(reviewed)
+                if target_index == 0:
+                    role_responses.extend(responses)
 
         return self._finish_batch(
             batch,
@@ -1707,7 +1769,9 @@ class InteractiveProfileUpdateProcessor:
                 action="reconciled Contact already current",
             )
             self._append_audit(item.result)
-            self._display_event(Notice(styled("Contact is already current; no change needed.")))
+            self._display_event(
+                Notice(styled("Contact is already current; no change needed."))
+            )
             return
         has_last_name = bool((item.reconciled or {}).get("last_name"))
         if not item.contact_id and not has_last_name:
@@ -2103,9 +2167,7 @@ class InteractiveProfileUpdateProcessor:
             Heading(
                 styled(
                     "Contact resolution for ",
-                    ValueFragment(
-                        resolution.normalized_email or "(invalid email)"
-                    ),
+                    ValueFragment(resolution.normalized_email or "(invalid email)"),
                 ),
                 ITEM_SEPARATOR,
             )
@@ -2113,13 +2175,13 @@ class InteractiveProfileUpdateProcessor:
         for index, candidate in enumerate(resolution.candidates, start=1):
             self._show_contact_details(f"Candidate {index}", candidate)
         while True:
-            candidate_range = f"1-{len(resolution.candidates)}, " if resolution.candidates else ""
+            candidate_range = (
+                f"1-{len(resolution.candidates)}, " if resolution.candidates else ""
+            )
             try:
                 answer = self._ask_choice(
                     ChoiceQuestion(
-                        styled(
-                            f"Contact choice [{candidate_range}create/ignore]: "
-                        ),
+                        styled(f"Contact choice [{candidate_range}create/ignore]: "),
                         tuple(
                             ReviewChoice(str(index), f"Candidate {index}")
                             for index in range(1, len(resolution.candidates) + 1)
@@ -2248,6 +2310,10 @@ class InteractiveProfileUpdateProcessor:
         submissions: list[dict[str, Any]],
         items: list[_ContactWorkItem],
         source_mapping: dict[tuple[str, str, str], str],
+        *,
+        target_account_id: str,
+        target_account_name: str,
+        parent_routed: bool,
     ) -> tuple[list[ActionResult], list[_RoleResponse]]:
         """Link roles using the preserved source mapping; never mutate Contacts."""
         results: list[ActionResult] = []
@@ -2258,7 +2324,7 @@ class InteractiveProfileUpdateProcessor:
             if not any(submitted.values()):
                 continue
             original_id, original_contact = self._fresh_role_contact(
-                batch, role.account_lookup
+                target_account_id, role.account_lookup
             )
             item: _ContactWorkItem | None = None
             for submission in reversed(submissions):
@@ -2298,9 +2364,14 @@ class InteractiveProfileUpdateProcessor:
                     batch,
                     row,
                     target_object="Account",
-                    target_record_id=batch.account_id,
+                    target_record_id=target_account_id,
                     field_name=role.account_lookup,
-                    label=f"{role.label} Account Role",
+                    label=(
+                        f"{role.label} Account Role — "
+                        f"{target_account_name or target_account_id}"
+                        if parent_routed
+                        else f"{role.label} Account Role"
+                    ),
                     proposed_value=item.contact_id,
                     resolution=item.resolution,
                 ),
@@ -2370,9 +2441,7 @@ class InteractiveProfileUpdateProcessor:
         all_sent = True
         for email, text in emails.items():
             response_writer.append(batch.case_id, email, text)
-            self._display_event(
-                ResponseEmail(ValueFragment(email), text)
-            )
+            self._display_event(ResponseEmail(ValueFragment(email), text))
             sent = self._prompt_yes_no(
                 styled(
                     "Was the response email to ",
@@ -2459,6 +2528,222 @@ class InteractiveProfileUpdateProcessor:
             for source_id in batch.source_submission_ids
         }
 
+    def _preflight_parent_routing(
+        self,
+        batch: CaseBatch,
+        submissions_by_id: dict[str, dict[str, Any]],
+    ) -> _ParentRouting:
+        """Refetch one direct child level and validate all child-specific work."""
+        account = self.client.get_record(
+            "Account", batch.account_id, ACCOUNT_REVIEW_FIELDS
+        )
+        queried_children = self.client.query_records(
+            "Account",
+            ACCOUNT_REVIEW_FIELDS,
+            where=(f"ParentId = '{escape_soql_string(batch.account_id)}'"),
+            order_by="Id ASC",
+        )
+        direct_children = tuple(
+            sorted(
+                (
+                    child
+                    for child in queried_children
+                    if not _display(child.get("ParentId"))
+                    or _display(child.get("ParentId")) == batch.account_id
+                ),
+                key=lambda child: _display(child.get("Id")),
+            )
+        )
+        if not direct_children:
+            routing = _ParentRouting(account, (), (account,))
+            self._refresh_affected_account_queue(batch, routing)
+            return routing
+
+        active_children = tuple(
+            child
+            for child in direct_children
+            if _display(child.get("Cert_Certification_Status__c"))
+            in ACTIVE_CERTIFICATION_STATUSES
+        )
+        conflicts: list[ParentAccountFieldConflict] = []
+        if active_children:
+            seen: set[tuple[str, str]] = set()
+            for field_name, label, requested in self._parent_field_requests(
+                batch, submissions_by_id
+            ):
+                identity = (field_name, requested)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                values = [child.get(field_name) for child in active_children]
+                if all(_values_equal(values[0], value) for value in values[1:]):
+                    continue
+                conflicts.append(
+                    ParentAccountFieldConflict(
+                        label,
+                        ValueFragment(requested),
+                        tuple(
+                            ParentAccountChildValue(
+                                ValueFragment(_display(child.get("Id"))),
+                                ValueFragment(
+                                    _display(child.get("Name")) or "(unnamed)"
+                                ),
+                                ValueFragment(_display(child.get(field_name))),
+                            )
+                            for child in active_children
+                        ),
+                    )
+                )
+        routing = _ParentRouting(
+            account,
+            direct_children,
+            active_children,
+            tuple(conflicts),
+        )
+        self._refresh_affected_account_queue(batch, routing)
+        return routing
+
+    def _refresh_affected_account_queue(
+        self,
+        batch: CaseBatch,
+        routing: _ParentRouting,
+    ) -> None:
+        """Keep child references and child-specific queue IDs fresh before writes."""
+        affected_accounts = json.dumps(
+            [
+                {
+                    "id": _display(account.get("Id")),
+                    "name": _display(account.get("Name")),
+                    "certification_status": _display(
+                        account.get("Cert_Certification_Status__c")
+                    ),
+                }
+                for account in routing.target_accounts
+                if _display(account.get("Id"))
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        for row in batch.rows:
+            row["is_parent_account"] = "true" if routing.is_parent else "false"
+            row["affected_accounts"] = affected_accounts
+        if self._queue_store is None or self._review_rows is None:
+            return
+        self._queue_store.refresh(build_review_queue(self._review_rows, now=self.now))
+        self._display_event(ReviewQueueSnapshot(self._queue_store.manifest))
+
+    def _parent_field_requests(
+        self,
+        batch: CaseBatch,
+        submissions_by_id: dict[str, dict[str, Any]],
+    ) -> list[tuple[str, str, str]]:
+        """Return only Account fields and role lookups actually submitted."""
+        requests: list[tuple[str, str, str]] = []
+        for row in batch.rows:
+            submissions = [
+                submissions_by_id[source_id]
+                for source_id in _json_string_list(row["source_submission_ids"])
+            ]
+            for _, source_field, account_field, label in ACCOUNT_PROPOSALS:
+                requested = _latest_nonblank(submissions, source_field)
+                if requested:
+                    requests.append((account_field, label, requested))
+            for role in ROLE_DEFINITIONS:
+                submitted = _submitted_role_values(submissions, row, role)
+                has_fresh_role_value = any(
+                    _latest_nonblank(submissions, source_field)
+                    for _, source_field in role.submitted_fields
+                )
+                if not has_fresh_role_value:
+                    continue
+                requested = row.get(f"{role.prefix}_salesforce_contact_id", "").strip()
+                if not requested:
+                    name = " ".join(
+                        value
+                        for value in (
+                            submitted.get("first_name", ""),
+                            submitted.get("last_name", ""),
+                        )
+                        if value
+                    )
+                    email = submitted.get("email", "")
+                    requested = (
+                        f"{name} <{email}>"
+                        if name and email
+                        else name or email or "new Contact"
+                    )
+                requests.append(
+                    (
+                        role.account_lookup,
+                        f"{role.label} Account Role",
+                        requested,
+                    )
+                )
+        return requests
+
+    def _defer_parent_batch(
+        self,
+        batch: CaseBatch,
+        routing: _ParentRouting,
+    ) -> bool:
+        """Explain, acknowledge, audit, and defer one unsafe Parent batch."""
+        parent = routing.submitted_account
+        parent_label = _display(parent.get("Name")) or batch.rows[0].get(
+            "account_name", ""
+        )
+        parent_display = f"{parent_label or '(unnamed)'} ({batch.account_id})"
+        if routing.conflicts:
+            self._display_event(
+                ParentAccountConflict(
+                    ValueFragment(parent_display),
+                    routing.conflicts,
+                )
+            )
+            reason = "Active direct child Account values conflict."
+        else:
+            self._display_event(
+                ParentAccountNoActiveChildren(
+                    ValueFragment(parent_display),
+                    tuple(
+                        ParentAccountChildValue(
+                            ValueFragment(_display(child.get("Id"))),
+                            ValueFragment(_display(child.get("Name")) or "(unnamed)"),
+                            ValueFragment(
+                                _display(child.get("Cert_Certification_Status__c"))
+                            ),
+                        )
+                        for child in routing.direct_children
+                    ),
+                )
+            )
+            reason = "Parent Account has no active direct children."
+        try:
+            self._acknowledge(
+                AcknowledgementQuestion(
+                    styled(
+                        "This Case batch needs manual follow-up and will remain "
+                        "open. Press Enter to acknowledge and continue: "
+                    )
+                )
+            )
+        except (KeyboardInterrupt, EOFError) as error:
+            self._append_batch_event(
+                batch,
+                ActionStatus.INTERRUPTED,
+                action="acknowledge deferred parent Account batch",
+                error="Reviewer interrupted processing.",
+            )
+            raise _ParentPreflightInterrupted(
+                "Profile Update review was interrupted during parent preflight."
+            ) from error
+        self._append_batch_event(
+            batch,
+            ActionStatus.DEFERRED_MANUAL,
+            action="defer parent Account batch for manual follow-up",
+            error=reason,
+        )
+        return True
+
     def _show_case_context(
         self,
         batch: CaseBatch,
@@ -2472,9 +2757,7 @@ class InteractiveProfileUpdateProcessor:
             ),
             batch.account_id,
         )
-        self._display_event(
-            ContextLine("Account", (ValueFragment(account_name),))
-        )
+        self._display_event(ContextLine("Account", (ValueFragment(account_name),)))
         submitters = dict.fromkeys(
             (
                 row.get("submitter_name", "").strip(),
@@ -2507,9 +2790,7 @@ class InteractiveProfileUpdateProcessor:
             comments = _display(submission.get("Comments__c"))
             notes = _display(submission.get("Other_Personnel_Notes__c"))
             if comments:
-                self._display_event(
-                    ContextLine("Comments", (ValueFragment(comments),))
-                )
+                self._display_event(ContextLine("Comments", (ValueFragment(comments),)))
             if notes:
                 self._display_event(
                     ContextLine("Other Personnel notes", (ValueFragment(notes),))
@@ -2575,6 +2856,10 @@ class InteractiveProfileUpdateProcessor:
         batch: CaseBatch,
         row: dict[str, str],
         submissions: list[dict[str, Any]],
+        *,
+        target_account_id: str,
+        target_account_name: str,
+        parent_routed: bool,
     ) -> list[ActionResult]:
         results = []
         for csv_name, source_field, account_field, label in ACCOUNT_PROPOSALS:
@@ -2582,15 +2867,22 @@ class InteractiveProfileUpdateProcessor:
             fresh_value = _latest_nonblank(submissions, source_field)
             if fresh_value:
                 proposed = fresh_value
+            elif parent_routed:
+                # Parent routing intentionally leaves unsubmitted child fields alone.
+                continue
             if not proposed:
                 continue
             proposal = self._proposal(
                 batch,
                 row,
                 target_object="Account",
-                target_record_id=batch.account_id,
+                target_record_id=target_account_id,
                 field_name=account_field,
-                label=label,
+                label=(
+                    f"{label} — {target_account_name or target_account_id}"
+                    if parent_routed
+                    else label
+                ),
                 proposed_value=proposed,
             )
             results.append(self._review_proposal(proposal))
@@ -2598,12 +2890,12 @@ class InteractiveProfileUpdateProcessor:
 
     def _fresh_role_contact(
         self,
-        batch: CaseBatch,
+        account_id: str,
         account_lookup: str,
     ) -> tuple[str, dict[str, Any] | None]:
         account = self.client.get_record(
             "Account",
-            batch.account_id,
+            account_id,
             ["Id", account_lookup],
         )
         contact_id = _display(account.get(account_lookup))
@@ -2658,7 +2950,9 @@ class InteractiveProfileUpdateProcessor:
         )
         self._display_event(
             Notice(
-                styled("Salesforce blocked this Contact create as a possible duplicate.")
+                styled(
+                    "Salesforce blocked this Contact create as a possible duplicate."
+                )
             )
         )
         while True:
@@ -2671,9 +2965,7 @@ class InteractiveProfileUpdateProcessor:
                         "4/ignore this entry]: "
                     ),
                     (
-                        ReviewChoice(
-                            "create_manually", "create manually", ("1",)
-                        ),
+                        ReviewChoice("create_manually", "create manually", ("1",)),
                         ReviewChoice(
                             "update_manually",
                             "update an existing Contact manually",
@@ -3142,8 +3434,7 @@ class InteractiveProfileUpdateProcessor:
                 ),
                 choices,
                 styled(
-                    "Enter A, M, or N, or one of the three complete decision "
-                    "phrases."
+                    "Enter A, M, or N, or one of the three complete decision phrases."
                     if automatic_allowed
                     else "This incomplete Contact cannot be created automatically; "
                     "choose make manually or will not be made."
@@ -3230,9 +3521,7 @@ class InteractiveProfileUpdateProcessor:
             proposed_value=CaseStatus.PENDING,
         )
         try:
-            self._update_record(
-                "Case", batch.case_id, {"Status": CaseStatus.PENDING}
-            )
+            self._update_record("Case", batch.case_id, {"Status": CaseStatus.PENDING})
         except SalesforceError as error:
             self._append_audit(
                 ActionResult(
@@ -3300,7 +3589,15 @@ class InteractiveProfileUpdateProcessor:
             status = QueueStatus.STOPPED_EARLY
         elif result.status in {ActionStatus.FAILED, ActionStatus.INTERRUPTED}:
             status = QueueStatus.FAILED
+        elif result.status is ActionStatus.DEFERRED_MANUAL:
+            status = QueueStatus.BLOCKED
         else:
+            return
+        if (
+            result.status is ActionStatus.DEFERRED_MANUAL
+            and result.proposal.target_object == "CaseBatch"
+        ):
+            self._block_queue_batch(result.proposal, outcome=result.status.value)
             return
         transitioned = self._transition_proposal(
             result.proposal,
@@ -3311,8 +3608,46 @@ class InteractiveProfileUpdateProcessor:
             ActionStatus.STOPPED_EARLY,
             ActionStatus.FAILED,
             ActionStatus.INTERRUPTED,
+            ActionStatus.DEFERRED_MANUAL,
         }:
             self._transition_default(status, outcome=result.status.value)
+
+    def _block_queue_batch(
+        self,
+        proposal: ChangeProposal,
+        *,
+        outcome: str,
+    ) -> None:
+        """Map a manual-follow-up audit event to an explicit blocked batch."""
+        if self._queue_store is None:
+            return
+        source_ids = set(proposal.source_submission_ids)
+        batch = next(
+            (
+                queued
+                for queued in self._queue_store.manifest.batches
+                if queued.case.record_id == proposal.case_id
+                and {
+                    source_id
+                    for row in queued.rows
+                    for source_id in row.source_submission_ids
+                }
+                == source_ids
+            ),
+            None,
+        )
+        if batch is None:
+            return
+        self._queue_store.block_batch(
+            batch.id,
+            QueueBlocker(
+                "parent_account_manual_follow_up",
+                "Parent Account routing requires manual follow-up.",
+            ),
+            outcome=outcome,
+        )
+        self._active_change_id = None
+        self._display_event(ReviewQueueSnapshot(self._queue_store.manifest))
 
     def _transition_default(
         self, status: QueueStatus, *, outcome: str | None = None

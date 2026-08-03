@@ -20,6 +20,8 @@ from .review_ui import (
     Heading,
     MappingComparison,
     Notice,
+    ParentAccountConflict,
+    ParentAccountNoActiveChildren,
     ResponseEmail,
     ReviewAnswer,
     ReviewEvent,
@@ -61,7 +63,9 @@ class CLIReviewUI:
                 f"Proposed value: {_value(event.proposed)}"
             )
         elif isinstance(event, MappingComparison):
-            heading = "New Salesforce values:" if event.is_new else "Salesforce changes:"
+            heading = (
+                "New Salesforce values:" if event.is_new else "Salesforce changes:"
+            )
             lines = [f"\n{event.label}", heading]
             for row in event.rows:
                 if event.is_new:
@@ -101,6 +105,42 @@ class CLIReviewUI:
                     f"   Sources: {candidate.sources.value}"
                 )
             self.output_fn(f"current. {_value(event.current)}")
+        elif isinstance(event, ParentAccountConflict):
+            lines = [
+                _section_heading(
+                    f"Parent Account needs manual follow-up: {event.parent.value}",
+                    "-" * 72,
+                ),
+                "Active direct child values conflict, so this entire Case batch "
+                "will remain open:",
+            ]
+            for field in event.fields:
+                lines.extend(
+                    (f"\n{field.label}", f"Requested value: {_value(field.requested)}")
+                )
+                lines.extend(
+                    f"{child.account_name.value or '(unnamed)'} "
+                    f"({child.account_id.value}): {_value(child.current)}"
+                    for child in field.children
+                )
+            self.output_fn("\n".join(lines))
+        elif isinstance(event, ParentAccountNoActiveChildren):
+            lines = [
+                _section_heading(
+                    f"Parent Account needs manual follow-up: {event.parent.value}",
+                    "-" * 72,
+                ),
+                "This Parent Account has no direct child with status Certified or "
+                "Initials, so this entire Case batch will remain open.",
+            ]
+            if event.children:
+                lines.append("Direct children:")
+                lines.extend(
+                    f"{child.account_name.value or '(unnamed)'} "
+                    f"({child.account_id.value}): {_value(child.current)}"
+                    for child in event.children
+                )
+            self.output_fn("\n".join(lines))
         elif isinstance(event, StagedRowSummary):
             heading = (
                 "Staged row\n"
@@ -115,9 +155,7 @@ class CLIReviewUI:
                     "contact information."
                 )
             if event.has_no_update_content:
-                heading += (
-                    "\nNote: this combined profile update has no submitted update content."
-                )
+                heading += "\nNote: this combined profile update has no submitted update content."
             self.output_fn(_section_heading(heading, "-" * 72))
         elif isinstance(event, AccountHistory):
             self.output_fn(
