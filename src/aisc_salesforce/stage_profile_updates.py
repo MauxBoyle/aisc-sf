@@ -66,6 +66,8 @@ KEY_UPDATE_FIELDS = [
     *(api_name for api_name, _ in KEY_ANSWER_FIELDS),
 ]
 
+ACTIVE_CERTIFICATION_STATUSES = frozenset({"Certified", "Initials"})
+
 
 @dataclass(frozen=True)
 class RoleDefinition:
@@ -158,6 +160,9 @@ SHARED_COLUMNS = [
     "latest_submission_date",
     "account_id",
     "account_name",
+    "is_parent_account",
+    "affected_accounts",
+    "submitted_account_fields",
     "case_id",
     "case_number",
     "case_status",
@@ -256,13 +261,20 @@ class ProfileUpdateStagingService:
             if (account_id := _clean_text(record.get("Id")))
         }
 
+        direct_children = self._query_accounts("ParentId", requested_account_ids)
+        direct_children_by_parent: dict[str, list[dict[str, Any]]] = {}
+        for child in direct_children:
+            parent_id = _clean_text(child.get("ParentId"))
+            if parent_id in requested_account_ids:
+                direct_children_by_parent.setdefault(parent_id, []).append(child)
+
         parent_ids = _unique_text_values(
             account.get("ParentId") for account in accounts
         )
         parents = self._query_accounts("Id", parent_ids)
         siblings = self._query_accounts("ParentId", parent_ids)
         all_accounts_by_id = dict(accounts_by_id)
-        for family_account in [*parents, *siblings]:
+        for family_account in [*parents, *siblings, *direct_children]:
             family_account_id = _clean_text(family_account.get("Id"))
             if family_account_id:
                 all_accounts_by_id.setdefault(family_account_id, family_account)
@@ -275,6 +287,7 @@ class ProfileUpdateStagingService:
                 records,
                 accounts_by_id,
                 all_accounts_by_id,
+                direct_children_by_parent,
                 contacts,
                 cases,
             )
@@ -344,6 +357,7 @@ class ProfileUpdateStagingService:
         records: list[dict[str, Any]],
         accounts_by_id: dict[str, dict[str, Any]],
         all_accounts_by_id: dict[str, dict[str, Any]],
+        direct_children_by_parent: dict[str, list[dict[str, Any]]],
         contacts: list[dict[str, Any]],
         cases: list[dict[str, Any]],
     ) -> dict[str, str]:
@@ -353,6 +367,20 @@ class ProfileUpdateStagingService:
 
         account_id = _clean_text(merged.get("Account__c"))
         account = accounts_by_id.get(account_id)
+        direct_children = sorted(
+            direct_children_by_parent.get(account_id, []),
+            key=lambda child: _clean_text(child.get("Id")),
+        )
+        affected_accounts = (
+            [
+                child
+                for child in direct_children
+                if _clean_text(child.get("Cert_Certification_Status__c"))
+                in ACTIVE_CERTIFICATION_STATUSES
+            ]
+            if direct_children
+            else ([account] if account is not None else [])
+        )
         key_records = [record for record in records if _is_key_update(record)]
         row.update(
             {
@@ -368,6 +396,37 @@ class ProfileUpdateStagingService:
                 "latest_submission_date": _clean_text(records[-1].get("CreatedDate")),
                 "account_id": account_id,
                 "account_name": _account_name(account, merged),
+                "is_parent_account": "true" if direct_children else "false",
+                "affected_accounts": json.dumps(
+                    [
+                        {
+                            "id": _clean_text(affected.get("Id")),
+                            "name": _clean_text(affected.get("Name")),
+                            "certification_status": _clean_text(
+                                affected.get("Cert_Certification_Status__c")
+                            ),
+                        }
+                        for affected in affected_accounts
+                        if _clean_text(affected.get("Id"))
+                    ],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                "submitted_account_fields": json.dumps(
+                    [
+                        account_field
+                        for source_field, account_field in (
+                            ("Revised_Company_Name__c", "Name"),
+                            ("Revised_Company_Owner__c", "Company_Owner__c"),
+                            *(
+                                (source_field, account_field)
+                                for _, source_field, account_field in ADDRESS_FIELDS
+                            ),
+                        )
+                        if _has_value(merged.get(source_field))
+                    ],
+                    ensure_ascii=False,
+                ),
                 "has_key_updates": "true" if key_records else "false",
                 "earliest_key_update_date": (
                     _clean_text(key_records[0].get("CreatedDate"))

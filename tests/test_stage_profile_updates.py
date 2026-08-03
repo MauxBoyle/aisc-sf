@@ -56,12 +56,14 @@ class FakeClient:
         submissions,
         accounts=None,
         siblings=None,
+        direct_children=None,
         contacts=None,
         cases=None,
     ):
         self.submissions = submissions
         self.accounts = accounts or []
         self.siblings = siblings or []
+        self.direct_children = direct_children or []
         self.contacts = contacts or []
         self.cases = (
             cases
@@ -93,6 +95,8 @@ class FakeClient:
         if object_name == "Company_Profile_Change__c":
             return list(self.submissions)
         if object_name == "Account":
+            if where == "ParentId IN ('account-1')":
+                return list(self.direct_children)
             if where and where.startswith("Id IN"):
                 return list(self.accounts)
             return list(self.siblings)
@@ -103,8 +107,18 @@ class FakeClient:
         raise AssertionError(object_name)
 
 
-def stage(submissions, *, accounts=None, siblings=None, contacts=None, cases=None):
-    client = FakeClient(submissions, accounts, siblings, contacts, cases)
+def stage(
+    submissions,
+    *,
+    accounts=None,
+    siblings=None,
+    direct_children=None,
+    contacts=None,
+    cases=None,
+):
+    client = FakeClient(
+        submissions, accounts, siblings, direct_children, contacts, cases
+    )
     result = ProfileUpdateStagingService(client).stage()
     return result, client
 
@@ -275,6 +289,61 @@ def test_staging_queries_the_parent_account_as_part_of_the_family():
     account_queries = [query for query in client.queries if query[0] == "Account"]
     assert any(query[2] == "Id IN ('parent-1')" for query in account_queries)
     assert any(query[2] == "ParentId IN ('parent-1')" for query in account_queries)
+
+
+def test_staging_records_only_direct_active_children_as_affected_accounts():
+    children = [
+        account(
+            Id="child-certified",
+            Name="Certified Child",
+            ParentId="account-1",
+            Cert_Certification_Status__c="Certified",
+        ),
+        account(
+            Id="child-initials",
+            Name="Initials Child",
+            ParentId="account-1",
+            Cert_Certification_Status__c="Initials",
+        ),
+        account(
+            Id="child-dropped",
+            Name="Dropped Child",
+            ParentId="account-1",
+            Cert_Certification_Status__c="Dropped",
+        ),
+        account(
+            Id="grandchild",
+            Name="Grandchild",
+            ParentId="child-certified",
+            Cert_Certification_Status__c="Certified",
+        ),
+    ]
+
+    result, client = stage(
+        [submission()],
+        accounts=[account(ParentId="")],
+        direct_children=children,
+    )
+
+    row = result.rows[0]
+    assert row["is_parent_account"] == "true"
+    assert json.loads(row["affected_accounts"]) == [
+        {
+            "id": "child-certified",
+            "name": "Certified Child",
+            "certification_status": "Certified",
+        },
+        {
+            "id": "child-initials",
+            "name": "Initials Child",
+            "certification_status": "Initials",
+        },
+    ]
+    assert any(
+        query[2] == "ParentId IN ('account-1')"
+        for query in client.queries
+        if query[0] == "Account"
+    )
 
 
 def test_merges_all_nonblank_notes_in_submission_order():

@@ -144,6 +144,40 @@ class ContactFieldConflict:
 
 
 @dataclass(frozen=True)
+class ParentAccountChildValue:
+    """One direct child Account and the value relevant to a blocked review."""
+
+    account_id: ValueFragment
+    account_name: ValueFragment
+    current: ValueFragment
+
+
+@dataclass(frozen=True)
+class ParentAccountFieldConflict:
+    """A requested Account value that differs across active direct children."""
+
+    label: str
+    requested: ValueFragment
+    children: tuple[ParentAccountChildValue, ...]
+
+
+@dataclass(frozen=True)
+class ParentAccountConflict:
+    """All child-value conflicts that block one Parent Account Case batch."""
+
+    parent: ValueFragment
+    fields: tuple[ParentAccountFieldConflict, ...]
+
+
+@dataclass(frozen=True)
+class ParentAccountNoActiveChildren:
+    """A Parent Account whose direct children are all inactive."""
+
+    parent: ValueFragment
+    children: tuple[ParentAccountChildValue, ...]
+
+
+@dataclass(frozen=True)
 class StagedRowSummary:
     """The safe-stop checkpoint shown before Salesforce writes."""
 
@@ -190,6 +224,8 @@ type ReviewEvent = (
     | ContactCard
     | ContactComparison
     | ContactFieldConflict
+    | ParentAccountConflict
+    | ParentAccountNoActiveChildren
     | StagedRowSummary
     | AccountHistory
     | ResponseEmail

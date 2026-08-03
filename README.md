@@ -418,6 +418,32 @@ values; warnings and blockers; statuses; prior Case activity; and
 identity keys. The CLI prints a short summary from each complete queue snapshot,
 while another `ReviewUI` implementation can use the full model for navigation.
 
+Parent Accounts are detected from fresh, direct-child Account records at the
+start of each Case batch. Traversal stops after that one level; grandchildren
+are never targets. Only direct children whose certification status is exactly
+`Certified` or `Initials` receive Account field changes or Account-role links.
+The staging CSV records this affected-Account context, and the queue expands
+child-specific Account and role-link entries to those child IDs while keeping
+Contact work shared.
+
+Before any Salesforce write in the batch, the processor compares the active
+children only for Account fields and role lookups actually submitted. Displayed
+values are compared after outer whitespace is trimmed, and null equals blank;
+remaining text is case-sensitive. When all relevant child values agree,
+Contacts are reconciled once, newly created Contacts remain owned by the Parent
+Account, and each active child follows the normal Account and role review path.
+Inactive children are not updated.
+
+If active child values conflict, the CLI shows every conflicting field, its
+requested value, and every active child's current name, ID, and value. If the
+Parent has direct children but none are active, it shows their statuses instead.
+Either condition requires acknowledgement, records a `deferred manual
+follow-up` audit outcome, marks the whole Case batch `blocked` in the queue,
+leaves every source Profile Update and the Case open, and continues to the next
+Case. No Contact, Account, role, Case, or submission write occurs for that
+blocked batch. A later retry restages and refetches Salesforce, so processing
+can continue normally after manual reconciliation.
+
 Use `--output-dir` the same way as the staging command:
 
 ```bash
@@ -538,7 +564,9 @@ The queue is deterministic for unchanged staged input and contains no run
 timestamp. Its ordered work phases are setup, Contact, Account, and role link.
 Statuses are `pending`, `in_progress`, `blocked`, `completed`, `failed`, and
 `stopped_early`; a completed change also keeps its audit outcome, such as
-`applied`, `verified manually`, `rejected`, or `no-op`. The default-next pointer
+`applied`, `verified manually`, `rejected`, or `no-op`. Parent work deferred to
+manual processing keeps the `deferred manual follow-up` outcome on blocked queue
+work. The default-next pointer
 is the first unblocked pending change and becomes `null` when none remains.
 
 The JSON Lines audit is flushed after every decision and Salesforce result.
