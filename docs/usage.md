@@ -546,6 +546,7 @@ Each row contains these groups of columns:
 |---|---|
 | Source and dates | `source_submission_ids`, `source_submission_names`, `earliest_submission_date`, `latest_submission_date` |
 | Account and submitter | `account_id`, `account_name`, `certification_id`, `submitter_name`, `submitter_email`, `submitter_phone` |
+| Case context | `case_id`, `case_number`, `case_status`, `case_match_status`, `prior_activity_references` JSON list |
 | Contact resolution | `contact_resolutions` JSON list |
 | Notes and review | `comments`, `personnel_notes`, `has_contact_derived_values`, `has_no_update_content`, `has_warnings`, `warnings` |
 | Key Data | `effective_date`, revised company name/owner, five revised address columns, and `key_answers` |
@@ -652,24 +653,27 @@ uv run aisc_salesforce process-profile-updates \
   --output-dir /secure/staged-profile-updates
 ```
 
-The command has no dry-run option. A staged recommendation alone never causes
-a Salesforce data change. Before Case preparation, the command repairs each New
-Profile Update whose Submission Account is blank. It looks up Accounts using
-the submitted Profile ID and presents the matches as a typed choice. Press
-Enter to select the first Account, enter another displayed number to choose
-that Account, or enter `P` to supply a different Profile ID. The selected
-Account is saved on the Profile Update, after which `ProfileUpdateService`
-creates or reuses its Case. If that Case operation fails, the command stops
-before staging or review.
+The command has no dry-run option. It first performs a read-only staging pass
+over New Profile Updates and atomically publishes both `profile_updates.csv`
+and `review_queue.json`. This happens before the first reviewer question or
+Salesforce write. The initial queue can therefore show missing Accounts,
+missing or ambiguous Cases, and other unreviewable work explicitly. Account
+repair and Case preparation are setup changes rather than hidden prerequisites.
 
-The command then publishes and validates a new CSV and groups all rows with the
-same Account and Case. Batches containing a Key Update strictly older than
-seven days are reviewed first, followed by the remaining batches from oldest
-to newest. A Key Update exactly seven days old remains in the normal
-oldest-to-newest group.
+After publication, the command repairs each New Profile Update whose Submission
+Account is blank. It looks up Accounts using the submitted Profile ID and
+presents the matches as a typed choice. Press Enter to select the first Account,
+enter another displayed number to choose that Account, or enter `P` to supply a
+different Profile ID. The selected Account is saved on the Profile Update,
+after which `ProfileUpdateService` creates or reuses its Case. A second read-only
+staging pass atomically refreshes the CSV and queue hierarchy with the resolved
+Account and Case references. Setup outcomes and source-submission references
+survive that refresh. If a required setup operation fails, the affected queue
+item is marked `failed` and processing stops before interactive change review.
 
-Progress messages appear around authentication, Submission Account resolution,
-Case preparation, staging, CSV publication, CSV validation, and review startup.
+Progress messages appear around authentication, read-only preflight, queue and
+CSV publication, Submission Account resolution, Case preparation, staging
+refresh, and review startup.
 Progress output belongs to the CLI workflow, while reviewer interactions cross
 a separate typed `ReviewUI` boundary. The Account selection, including its
 first-choice default, is represented by the same `ChoiceQuestion` used by other
@@ -681,12 +685,63 @@ For another front end, implement `ReviewUI.display(event)` and
 `ReviewUI.ask(question)`, then pass that object to
 `InteractiveProfileUpdateProcessor`. Events include headings, notices, scalar
 and mapping comparisons, Contact cards, validation feedback, and generated
-response emails. Questions are deliberately split into choice, free-text, and
+response emails. A `ReviewQueueSnapshot` event carries the complete immutable
+manifest; the CLI adapter turns it into a concise batch/pending/next summary.
+Questions are deliberately split into choice, free-text, and
 acknowledgement shapes, with matching answer dataclasses. A choice question
 lists only allowed `ReviewChoice` values; for example, an incomplete Contact
 does not include automatic creation. The processor still owns email and Contact
 ID validation, Salesforce refreshes and writes, audit entries, and safe-stop or
 interruption handling.
+
+### Stable review queue contract
+
+The JSON contract starts with `schema_version: 1` and has this hierarchy:
+
+```text
+manifest
+└── batches[]
+    └── rows[]
+        └── changes[]
+```
+
+Every batch, row, and change includes an `id`, readable `label`, `status`,
+`warnings`, and `blockers`. Changes also include their phase, source submission
+and row IDs, Salesforce object/record/field reference, current value, proposed
+value, and optional completed `outcome`. Batch and row references retain the
+source Profile Updates, target Account and Case, and related prior Case activity.
+Only submissions queried with `Status__c = 'New'` become work; older records are
+context references, not queue items.
+
+IDs are deterministic UUID5 values. Their canonical input uses the item type,
+Salesforce object context, sorted source submission IDs, target record or stable
+target context, and field. Display labels are deliberately excluded. The JSON
+also omits a run timestamp because the timestamped parent folder already records
+run time. Rebuilding from unchanged input therefore produces the same IDs and
+bytes.
+
+Ordering uses these tie-breakers:
+
+1. Batches with a Key Update strictly older than seven days come first.
+2. Batches then use earliest submission, Account ID, Case ID, and stable ID.
+3. Rows use earliest submission, sorted source submission IDs, and stable ID.
+4. Changes use setup, Contact, Account, then role-link phase, followed by target
+   identity, field, and stable ID.
+
+The allowed statuses are `pending`, `in_progress`, `blocked`, `completed`,
+`failed`, and `stopped_early`. Warnings are informational. A blocker prevents a
+change from being selected automatically. Parent row and batch statuses are
+recomputed after every child transition. `default_next_item_id` is always the
+first unblocked change whose status is `pending`; it advances after completion
+or becomes `null` when no reviewable pending change remains. Empty queues also
+use `null`.
+
+The file is replaced atomically, not edited in place. A snapshot is persisted
+before and after each queue transition or Salesforce mutation and immediately
+before each reviewer question. On a failure, interruption, or deliberate safe
+stop, the last valid JSON remains readable with the affected item marked
+`failed` or `stopped_early`. Consumers should accept fields added in later
+schema-compatible releases and reject unsupported `schema_version` values.
 
 ### What the reviewer sees
 
@@ -840,6 +895,7 @@ Each timestamped run folder contains:
 | File | Purpose |
 |---|---|
 | `profile_updates.csv` | Exact published staging input used by the reviewer |
+| `review_queue.json` | Atomic, versioned navigation and status snapshot |
 | `review_audit.jsonl` | One immediately flushed JSON object per decision/result |
 | `response_emails.txt` | Generated response text grouped by submitter email |
 
@@ -890,7 +946,7 @@ reviewer's request and reports completed and pending batch counts.
 
 !!! warning
 
-    All three artifacts can contain sensitive personal and Salesforce data.
+    All four artifacts can contain sensitive personal and Salesforce data.
     Git ignores their default location and generated filenames. Store custom
     output directories securely, limit access, and do not attach these files
     to public issues or commits.

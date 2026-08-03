@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from .review_queue import ReviewQueueManifest
+
 
 class UnsupportedReviewInteractionError(RuntimeError):
     """A review UI received an interaction shape it does not support."""
@@ -171,6 +173,13 @@ class ResponseEmail:
     body: str
 
 
+@dataclass(frozen=True)
+class ReviewQueueSnapshot:
+    """Complete navigation state for a CLI, TUI, or other review front end."""
+
+    manifest: ReviewQueueManifest
+
+
 type ReviewEvent = (
     Heading
     | Notice
@@ -184,6 +193,7 @@ type ReviewEvent = (
     | StagedRowSummary
     | AccountHistory
     | ResponseEmail
+    | ReviewQueueSnapshot
 )
 
 

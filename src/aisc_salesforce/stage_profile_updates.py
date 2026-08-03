@@ -162,6 +162,7 @@ SHARED_COLUMNS = [
     "case_number",
     "case_status",
     "case_match_status",
+    "prior_activity_references",
     "certification_id",
     "submitter_name",
     "submitter_email",
@@ -470,6 +471,22 @@ class ProfileUpdateStagingService:
         account_cases = [
             case for case in cases if _clean_text(case.get("AccountId")) == account_id
         ]
+        row["prior_activity_references"] = json.dumps(
+            [
+                {
+                    "object_name": "Case",
+                    "record_id": _clean_text(case.get("Id")),
+                    "label": _clean_text(case.get("CaseNumber"))
+                    or _clean_text(case.get("Subject")),
+                    "status": _clean_text(case.get("Status")),
+                    "relationship": "prior_activity",
+                }
+                for case in account_cases
+                if _clean_text(case.get("Id"))
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
         matches = [
             case
             for case in account_cases

@@ -373,12 +373,18 @@ succeeds, so a failed run cannot leave a partial snapshot.
 `process-profile-updates` performs the complete processing workflow in this
 order:
 
-1. Repair blank Submission Accounts through the review interface.
-2. Run the existing Case automation.
-3. Stop if any required Case operation fails.
-4. Publish a fresh `profile_updates.csv`.
-5. Read that published file back from disk.
-6. Review rows in Account-and-Case batches.
+1. Read-only stage every New Profile Update.
+2. Publish `profile_updates.csv` and a complete `review_queue.json`.
+3. Repair blank Submission Accounts through the review interface.
+4. Run the existing Case automation and stop if a required operation fails.
+5. Refresh the staged CSV and queue references after setup.
+6. Review changes in the queue's deterministic order.
+
+The initial queue therefore exists before the first reviewer question or
+Salesforce write. Account repair and Case preparation appear as setup changes,
+so missing records and ambiguous matches remain visible instead of preventing
+the preflight artifact from being created. Queue snapshots are atomically
+replaced before and after lifecycle transitions and Salesforce mutations.
 
 For a New Profile Update with a blank Account, the command looks up Accounts
 using the submitted Profile ID. It presents every match as a structured choice;
@@ -403,6 +409,14 @@ are carried as `ValueFragment` objects, and each choice question contains only
 the actions that are actually available. This boundary is the extension point
 for a future TUI; Salesforce writes, validation, auditing, and status changes
 remain in `InteractiveProfileUpdateProcessor`.
+
+`review_queue.json` starts at schema version `1`. It contains ordered Case
+batches, staged rows, and field changes; UUID5-based item IDs; readable labels;
+explicit Salesforce object, record, and field references; current and proposed
+values; warnings and blockers; statuses; prior Case activity; and
+`default_next_item_id`. Labels are presentation only and are never used as
+identity keys. The CLI prints a short summary from each complete queue snapshot,
+while another `ReviewUI` implementation can use the full model for navigation.
 
 Use `--output-dir` the same way as the staging command:
 
@@ -515,9 +529,17 @@ The timestamped staging folder contains:
 
 ```text
 profile_updates.csv
+review_queue.json
 review_audit.jsonl
 response_emails.txt
 ```
+
+The queue is deterministic for unchanged staged input and contains no run
+timestamp. Its ordered work phases are setup, Contact, Account, and role link.
+Statuses are `pending`, `in_progress`, `blocked`, `completed`, `failed`, and
+`stopped_early`; a completed change also keeps its audit outcome, such as
+`applied`, `verified manually`, `rejected`, or `no-op`. The default-next pointer
+is the first unblocked pending change and becomes `null` when none remains.
 
 The JSON Lines audit is flushed after every decision and Salesforce result.
 Contact events include classification, comparison key, candidates, selected
@@ -550,7 +572,7 @@ unfinalized Profile Updates open and the Case Pending. On any retry, previously
 applied Salesforce values are fetched again and recorded as no-ops.
 
 > [!WARNING]
-> Staging, audit, and response files contain personal and Salesforce data.
+> Staging, queue, audit, and response files contain personal and Salesforce data.
 > They are ignored by Git, but they must still be stored in an
 > access-controlled location and shared only through approved secure channels.
 

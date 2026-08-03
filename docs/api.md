@@ -165,6 +165,34 @@ test.
 
 ## Interactive Profile Update processing
 
+::: aisc_salesforce.review_queue
+    options:
+      show_root_heading: true
+      members:
+        - QueueStatus
+        - QueuePhase
+        - QueueWarning
+        - QueueBlocker
+        - SalesforceReference
+        - ProposedChange
+        - StagedRow
+        - CaseBatch
+        - ReviewQueueManifest
+        - ReviewQueueStore
+        - stable_queue_id
+        - build_review_queue
+        - recompute_manifest
+        - transition_item
+        - manifest_json
+        - write_review_queue
+        - iter_changes
+
+The queue module is read-only during discovery and uses frozen dataclasses for
+its public model. UUID5 IDs and explicit ordering rules make identical input
+serialize to identical JSON bytes. `ReviewQueueStore` atomically replaces the
+published snapshot around transitions and preserves stable outcomes when setup
+refreshes Account or Case references.
+
 ::: aisc_salesforce.review_ui
     options:
       show_root_heading: true
@@ -189,6 +217,7 @@ test.
         - StagedRowSummary
         - AccountHistory
         - ResponseEmail
+        - ReviewQueueSnapshot
         - ChoiceQuestion
         - FreeTextQuestion
         - AcknowledgementQuestion
@@ -262,6 +291,7 @@ results in their field-level format while combining each submitted Contact role
 into one response line; the underlying field decisions remain separate audit
 entries.
 
+`ProcessingResult.queue_path` identifies the published `review_queue.json`.
 `ProcessingResult.stopped_early` distinguishes a deliberate `Q`/`Quit` from a
 failure or keyboard interruption. A deliberate stop is handled inside
 `review()`: it writes a `stopped early` batch event, keeps the current Case
