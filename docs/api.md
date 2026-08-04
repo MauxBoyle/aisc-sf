@@ -274,6 +274,9 @@ the three session operations. `run()` composes them in `stage → prepare →
 review` order. `publish_staging_session()` makes the CSV and queue visible with
 one directory rename; `load_staging_session()` accepts only a generated direct
 child ID and checks both artifacts agree before write-capable phases begin.
+During `review`, a captured submission with a blank Account is repaired and
+verified through a scoped refresh before its ID is included in Case
+preparation. The normal staging refresh and interactive review then continue.
 
 `ProfileUpdateService.run(submission_ids=...)` prepares only captured
 submissions with Accounts and does not process audit work. Calling `run()`

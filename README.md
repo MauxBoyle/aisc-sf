@@ -423,6 +423,9 @@ using the submitted Profile ID. It presents every match as a structured choice;
 press Enter to use the first Account, enter its displayed number to choose a
 different match, or enter `P` to look up a different Profile ID. The Account is
 saved on the Profile Update before Case preparation begins.
+After a scoped Salesforce refresh verifies the repaired submission now has an
+Account, `review` includes that submission in Case preparation before the final
+staging refresh and interactive review.
 
 Batches containing a Key Update strictly older than seven days are reviewed
 first. The remaining batches are reviewed from oldest to newest.

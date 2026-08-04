@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+import aisc_salesforce.process_profile_updates as profile_update_processing
 from aisc_salesforce.contact_resolution import (
     ContactResolution,
     ContactResolutionClassification,
@@ -495,6 +496,100 @@ def test_review_skips_case_setup_completed_by_prepare(tmp_path):
 
     assert calls == [{"submission-1"}]
     assert result.stopped_early is True
+
+
+def test_review_prepares_case_for_submission_after_account_repair(
+    tmp_path, monkeypatch
+):
+    blank_account_row = staged_row(
+        account_id="",
+        account_name="",
+        case_id="",
+        case_number="",
+        case_status="",
+        case_match_status="missing",
+    )
+    repaired_row = staged_row(
+        case_id="",
+        case_number="",
+        case_status="",
+        case_match_status="missing",
+    )
+    session = publish_staging_session([blank_account_row], tmp_path, now=NOW)
+    events = []
+    case_calls = []
+
+    class RepairingProcessor:
+        now = NOW
+
+        def load_review_queue(self, rows, artifact_dir, *, resume=False):
+            return read_review_queue(artifact_dir / "review_queue.json")
+
+        def transition_setup(self, object_name, field, status, **kwargs):
+            if object_name == "Case" and status is QueueStatus.IN_PROGRESS:
+                events.append("case_transition")
+
+        def resolve_missing_submission_accounts(self, submission_ids):
+            assert set(submission_ids) == {"submission-1"}
+            events.append("repair_account")
+            return 1
+
+        def refresh_review_queue(self, rows):
+            events.append("refresh_queue")
+
+        def review(self, rows, artifact_dir):
+            events.append("review")
+            return "reviewed"
+
+    class RefreshingStagingService:
+        def stage(self, submission_ids):
+            assert set(submission_ids) == {"submission-1"}
+            event = (
+                "verify_account" if "verify_account" not in events else "final_refresh"
+            )
+            events.append(event)
+            return StagingResult([repaired_row], 0)
+
+    class CapturingCaseService:
+        errors = []
+
+        def run(self, submission_ids):
+            events.append("prepare_case")
+            case_calls.append(set(submission_ids))
+            return AutomationCounts(created=1)
+
+    def unfinished_ids_after_account_verification(manifest, object_name, field):
+        assert "verify_account" in events
+        assert object_name == field == "Case"
+        events.append("find_unfinished_cases")
+        return set()
+
+    monkeypatch.setattr(
+        profile_update_processing,
+        "_unfinished_setup_submission_ids",
+        unfinished_ids_after_account_verification,
+    )
+    workflow = ProfileUpdateProcessingWorkflow(
+        CapturingCaseService(),
+        RefreshingStagingService(),
+        RepairingProcessor(),
+        output_fn=lambda message: None,
+    )
+
+    result = workflow.review(session.session_id, tmp_path)
+
+    assert result == "reviewed"
+    assert case_calls == [{"submission-1"}]
+    assert events == [
+        "repair_account",
+        "verify_account",
+        "find_unfinished_cases",
+        "case_transition",
+        "prepare_case",
+        "final_refresh",
+        "refresh_queue",
+        "review",
+    ]
 
 
 def test_workflow_repairs_submission_accounts_before_creating_cases(tmp_path):

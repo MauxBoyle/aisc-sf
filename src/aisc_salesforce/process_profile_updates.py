@@ -576,8 +576,8 @@ class ProfileUpdateProcessingWorkflow:
             )
 
         captured_ids = _submission_ids(rows)
-        case_submission_ids = _unfinished_setup_submission_ids(manifest, "Case", "Case")
         missing_account_ids = _submission_ids(rows, require_missing_account=True)
+        verified_repaired_ids: set[str] = set()
         if missing_account_ids:
             self.processor.transition_setup(
                 "Company_Profile_Change__c",
@@ -603,6 +603,7 @@ class ProfileUpdateProcessingWorkflow:
                     raise ProcessingError(
                         "Not every captured submission with a blank Account was repaired."
                     )
+                verified_repaired_ids = missing_account_ids - unresolved_ids
             except Exception:
                 self.processor.transition_setup(
                     "Company_Profile_Change__c",
@@ -624,6 +625,9 @@ class ProfileUpdateProcessingWorkflow:
                 f"Submission Account resolution complete: {repaired} repaired."
             )
 
+        case_submission_ids = _unfinished_setup_submission_ids(
+            manifest, "Case", "Case"
+        ).union(verified_repaired_ids)
         if case_submission_ids:
             self.processor.transition_setup(
                 "Case",

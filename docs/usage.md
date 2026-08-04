@@ -677,8 +677,10 @@ Salesforce write, allowing a reviewer or TUI to inspect a stable queue.
 reuses Cases only for captured submissions that already have Accounts. It does
 not repair blank Accounts. `review SESSION_ID` loads the saved CSV and queue,
 repairs blank Accounts only among captured submissions, prepares newly possible
-Cases, and refreshes the same session before interactive review. A submission
-that arrives after `stage` is never silently added.
+Cases, and refreshes the same session before interactive review. The Case step
+includes a repaired submission only after a scoped Salesforce refresh confirms
+that it now has an Account. A submission that arrives after `stage` is never
+silently added.
 
 The session ID must be the exact direct-child folder name printed by `stage`.
 Absolute paths, separators, `..`, missing sessions, symlinked sessions or
