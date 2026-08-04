@@ -20,10 +20,19 @@ from aisc_salesforce.process_profile_updates import (
     ReviewDecision,
     build_case_batches,
     format_response_emails,
+    load_staging_session,
+    publish_staging_session,
     read_staged_profile_updates,
 )
 from aisc_salesforce.profile_updates import AutomationCounts
-from aisc_salesforce.review_queue import build_review_queue, write_review_queue
+from aisc_salesforce.review_queue import (
+    QueueStatus,
+    ReviewQueueStore,
+    build_review_queue,
+    iter_changes,
+    read_review_queue,
+    write_review_queue,
+)
 from aisc_salesforce.review_ui import (
     ChoiceAnswer,
     ChoiceQuestion,
@@ -352,6 +361,140 @@ def test_queue_aware_workflow_publishes_preflight_before_setup_and_refreshes(
     assert workflow.run(tmp_path) == run_folder
     assert events.index("queue") < events.index("resolve") < events.index("cases")
     assert events.index("cases") < events.index("stage-2") < events.index("review")
+
+
+def test_session_publication_writes_csv_and_queue_under_one_generated_id(tmp_path):
+    result = publish_staging_session([staged_row()], tmp_path, now=NOW)
+    collision = publish_staging_session([staged_row()], tmp_path, now=NOW)
+
+    assert result.session_id == "2026-07-17T18-00-00Z"
+    assert collision.session_id == "2026-07-17T18-00-00Z-01"
+    assert result.path == tmp_path / result.session_id
+    assert result.csv_path.is_file()
+    assert result.queue_path.is_file()
+    loaded, rows, manifest = load_staging_session(tmp_path, result.session_id)
+    assert loaded == result
+    assert rows == [staged_row()]
+    assert manifest.batches
+
+
+def test_session_publication_exposes_nothing_when_queue_write_fails(
+    tmp_path, monkeypatch
+):
+    def fail(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(
+        "aisc_salesforce.process_profile_updates.write_review_queue", fail
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        publish_staging_session([staged_row()], tmp_path, now=NOW)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "session_id",
+    [
+        "../outside",
+        "/absolute",
+        "nested/session",
+        "..",
+        "not-a-session",
+        "2026-99-04T15-30-00Z",
+    ],
+)
+def test_session_loader_rejects_unsafe_or_malformed_ids(tmp_path, session_id):
+    with pytest.raises(ProcessingError, match="Invalid staging session ID"):
+        load_staging_session(tmp_path, session_id)
+
+
+def test_session_loader_rejects_csv_queue_submission_mismatch(tmp_path):
+    result = publish_staging_session([staged_row()], tmp_path, now=NOW)
+    rows = [staged_row(source_submission_ids='["different"]')]
+    with result.csv_path.open("w", newline="", encoding="utf-8") as output:
+        writer = csv.DictWriter(output, fieldnames=CSV_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    with pytest.raises(ProcessingError, match="different submission IDs"):
+        load_staging_session(tmp_path, result.session_id)
+
+
+def test_completed_session_review_is_a_noop(tmp_path):
+    session = publish_staging_session([staged_row()], tmp_path, now=NOW)
+    store = ReviewQueueStore(session.queue_path, read_review_queue(session.queue_path))
+    for change in tuple(iter_changes(store.manifest)):
+        store.transition(change.id, QueueStatus.COMPLETED, outcome="applied")
+    (session.path / "review_audit.jsonl").write_text(
+        json.dumps(
+            {
+                "target_object": "Company_Profile_Change__c",
+                "target_record_id": "submission-1",
+                "field": "Status__c",
+                "proposed_value": "Closed",
+                "result": "applied",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output = []
+
+    class MustNotRun:
+        def run(self, *args):
+            raise AssertionError("completed Case preparation ran again")
+
+        def stage(self, *args):
+            raise AssertionError("completed session was refreshed")
+
+    processor = InteractiveProfileUpdateProcessor(
+        FakeClient(), input_fn=Feeder([]), output_fn=output.append, now=NOW
+    )
+    workflow = ProfileUpdateProcessingWorkflow(
+        MustNotRun(), MustNotRun(), processor, output_fn=output.append
+    )
+
+    result = workflow.review(session.session_id, tmp_path)
+
+    assert result.completed_batches == 1
+    assert result.pending_batches == 0
+    assert any("already complete" in message for message in output)
+
+
+def test_review_skips_case_setup_completed_by_prepare(tmp_path):
+    row = staged_row()
+    session = publish_staging_session([row], tmp_path, now=NOW)
+    calls = []
+
+    class SessionCaseService:
+        errors = []
+
+        def run(self, submission_ids):
+            calls.append(set(submission_ids))
+            return AutomationCounts(reused=1)
+
+    class SessionStagingService:
+        def stage(self, submission_ids):
+            assert set(submission_ids) == {"submission-1"}
+            return StagingResult([row], 0)
+
+    processor = InteractiveProfileUpdateProcessor(
+        FakeClient(),
+        input_fn=Feeder([], row_answers=["q"]),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+    workflow = ProfileUpdateProcessingWorkflow(
+        SessionCaseService(), SessionStagingService(), processor
+    )
+
+    workflow.prepare(session.session_id, tmp_path)
+    result = workflow.review(session.session_id, tmp_path)
+
+    assert calls == [{"submission-1"}]
+    assert result.stopped_early is True
 
 
 def test_workflow_repairs_submission_accounts_before_creating_cases(tmp_path):

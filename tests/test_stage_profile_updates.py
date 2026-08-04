@@ -158,6 +158,18 @@ def test_merges_same_account_and_email_with_later_nonblank_values():
     assert contact_query[1] == CONTACT_FIELDS
 
 
+def test_session_refresh_queries_only_captured_submission_ids():
+    captured = submission()
+    later = submission(Id="submission-later", Name="PU-999")
+    client = FakeClient([captured, later], accounts=[account()])
+
+    result = ProfileUpdateStagingService(client).stage({"submission-1"})
+
+    assert json.loads(result.rows[0]["source_submission_ids"]) == ["submission-1"]
+    submission_query = client.queries[0]
+    assert submission_query[2] == "Id IN ('submission-1')"
+
+
 def test_staging_publishes_deduplicated_contact_resolution_contract():
     record = submission(
         Email__c=" Alex.Smith@Example.com ",

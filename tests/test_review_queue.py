@@ -10,6 +10,7 @@ from aisc_salesforce.review_queue import (
     build_review_queue,
     iter_changes,
     manifest_json,
+    read_review_queue,
     transition_item,
     write_review_queue,
 )
@@ -317,6 +318,39 @@ def test_json_publish_replaces_atomically_and_store_preserves_queue_path(
 
     store = ReviewQueueStore(path, manifest)
     assert store.path == path
+
+
+def test_published_queue_round_trips_through_typed_validation(tmp_path):
+    manifest = build_review_queue([queue_row(revised_company_name="New Name")], now=NOW)
+    path = write_review_queue(manifest, tmp_path / "review_queue.json")
+
+    assert read_review_queue(path) == manifest
+
+
+def test_queue_loader_rejects_unsupported_schema_before_use(tmp_path):
+    manifest = build_review_queue([queue_row()], now=NOW)
+    path = write_review_queue(manifest, tmp_path / "review_queue.json")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["schema_version"] = 999
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Unsupported review queue schema"):
+        read_review_queue(path)
+
+
+def test_resume_preserves_completed_and_blocked_but_resets_failed(tmp_path):
+    manifest = build_review_queue([queue_row(revised_company_name="New Name")], now=NOW)
+    store = ReviewQueueStore(tmp_path / "review_queue.json", manifest)
+    changes = list(iter_changes(store.manifest))
+    store.transition(changes[0].id, QueueStatus.COMPLETED, outcome="applied")
+    store.transition(changes[1].id, QueueStatus.FAILED, outcome="failed")
+
+    store.resume()
+
+    resumed = {change.id: change for change in iter_changes(store.manifest)}
+    assert resumed[changes[0].id].status is QueueStatus.COMPLETED
+    assert resumed[changes[1].id].status is QueueStatus.PENDING
+    assert resumed[changes[1].id].outcome is None
 
 
 def test_refresh_preserves_completed_setup_but_recomputes_resolved_blockers(tmp_path):

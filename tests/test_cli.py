@@ -432,6 +432,66 @@ def test_process_profile_updates_cli_injects_interactive_io_and_output_dir(
     assert prompts == []
 
 
+def test_process_profile_update_nested_operations_route_session_and_output_dir(
+    monkeypatch, tmp_path
+):
+    calls = []
+    monkeypatch.setattr(
+        app,
+        "_run_stage_profile_update_session",
+        lambda output_dir, **kwargs: calls.append(("stage", None, output_dir)) or 0,
+    )
+    monkeypatch.setattr(
+        app,
+        "_run_prepare_profile_update_session",
+        lambda session_id, output_dir, **kwargs: (
+            calls.append(("prepare", session_id, output_dir)) or 0
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "_run_review_profile_update_session",
+        lambda session_id, output_dir, **kwargs: (
+            calls.append(("review", session_id, output_dir)) or 0
+        ),
+    )
+    session_id = "2026-08-04T15-30-00Z"
+
+    assert (
+        app.main(["process-profile-updates", "stage", "--output-dir", str(tmp_path)])
+        == 0
+    )
+    assert (
+        app.main(
+            [
+                "process-profile-updates",
+                "prepare",
+                session_id,
+                "--output-dir",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    assert (
+        app.main(
+            [
+                "process-profile-updates",
+                "review",
+                session_id,
+                "--output-dir",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    assert calls == [
+        ("stage", None, tmp_path),
+        ("prepare", session_id, tmp_path),
+        ("review", session_id, tmp_path),
+    ]
+
+
 def test_process_profile_updates_reports_authentication_and_safe_stop(
     monkeypatch, tmp_path
 ):

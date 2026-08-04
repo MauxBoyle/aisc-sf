@@ -5,12 +5,15 @@ from __future__ import annotations
 import csv
 import json
 import os
-from collections.abc import Callable
+import re
+import shutil
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, time, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, TextIO
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from .contact_normalization import normalize_contact_value
@@ -38,7 +41,9 @@ from .review_queue import (
     ReviewQueueStore,
     build_review_queue,
     iter_changes,
+    read_review_queue,
     stable_queue_id,
+    write_review_queue,
 )
 from .review_ui import (
     AccountHistory,
@@ -286,6 +291,21 @@ class ProcessingResult:
 
 
 @dataclass(frozen=True)
+class StagingSession:
+    """One atomically published, identifiable review data set."""
+
+    session_id: str
+    path: Path
+    csv_path: Path
+    queue_path: Path
+    row_count: int
+    warning_count: int
+
+
+SESSION_ID_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z(?:-\d{2,})?$")
+
+
+@dataclass(frozen=True)
 class _RoleResponse:
     """One completed submitted role, consolidated for response-email text."""
 
@@ -372,7 +392,7 @@ class _QueuePublishingClient:
 
 
 class ProfileUpdateProcessingWorkflow:
-    """Run Case preparation, staging, disk validation, then interactive review."""
+    """Expose session staging, Case preparation, and interactive review."""
 
     def __init__(
         self,
@@ -392,7 +412,14 @@ class ProfileUpdateProcessingWorkflow:
         self.output_fn = output_fn
 
     def run(self, output_dir: Path) -> ProcessingResult | Any:
-        """Execute setup in the required order and review the published CSV."""
+        """Compose the production workflow as stage, prepare, then review."""
+        if self.staging_writer is write_staged_profile_updates:
+            session = self.stage(output_dir)
+            self.prepare(session.session_id, output_dir)
+            return self.review(session.session_id, output_dir)
+
+        # Preserve compatibility for injected pre-session test adapters and
+        # third-party callers that provide the older CSV-only writer contract.
         prepare_queue = getattr(self.processor, "prepare_review_queue", None)
         if prepare_queue is not None:
             return self._run_with_preflight_queue(output_dir, prepare_queue)
@@ -446,6 +473,216 @@ class ProfileUpdateProcessingWorkflow:
                 stopped_early=result.stopped_early,
             )
         return result
+
+    def stage(self, output_dir: Path) -> StagingSession:
+        """Capture current New submissions and atomically publish both artifacts."""
+        self.output_fn(_section_heading("Staging Profile Update session"))
+        staged: StagingResult = self.staging_service.stage()
+        session = publish_staging_session(
+            staged.rows,
+            output_dir,
+            warning_count=staged.warning_count,
+            now=getattr(self.processor, "now", None),
+        )
+        self.output_fn(f"Staging session published: {session.session_id}")
+        self.output_fn(f"Staging CSV: {session.csv_path}")
+        self.output_fn(f"Review queue: {session.queue_path}")
+        return session
+
+    def prepare(self, session_id: str, output_dir: Path) -> AutomationCounts:
+        """Create or reuse Cases for captured submissions that have Accounts."""
+        session, rows, manifest = load_staging_session(output_dir, session_id)
+        self._load_processor_queue(rows, session.path, resume=True)
+        eligible_ids = _submission_ids(rows, require_account=True).intersection(
+            _unfinished_setup_submission_ids(manifest, "Case", "Case")
+        )
+        if not eligible_ids:
+            self.output_fn(
+                "No captured submissions with Accounts need Case preparation."
+            )
+            return AutomationCounts()
+
+        self.output_fn(_section_heading("Preparing Profile Update Cases"))
+        self.processor.transition_setup(
+            "Case",
+            "Case",
+            QueueStatus.IN_PROGRESS,
+            submission_ids=eligible_ids,
+            preserve_completed=True,
+        )
+        try:
+            counts = self._run_case_service_with_snapshots(eligible_ids)
+        except Exception:
+            self.processor.transition_setup(
+                "Case",
+                "Case",
+                QueueStatus.FAILED,
+                submission_ids=eligible_ids,
+                preserve_completed=True,
+            )
+            raise
+        if counts.failed:
+            self.processor.transition_setup(
+                "Case",
+                "Case",
+                QueueStatus.FAILED,
+                submission_ids=eligible_ids,
+                preserve_completed=True,
+            )
+            details = "; ".join(getattr(self.case_service, "errors", []))
+            suffix = f": {details}" if details else ""
+            raise ProcessingError(
+                f"{counts.failed} required Case operation(s) failed{suffix}"
+            )
+        self.processor.transition_setup(
+            "Case",
+            "Case",
+            QueueStatus.COMPLETED,
+            outcome=ActionStatus.APPLIED.value,
+            submission_ids=eligible_ids,
+            preserve_completed=True,
+        )
+        self.output_fn(
+            "Case preparation complete: "
+            f"{counts.created} created, {counts.reused} reused, "
+            f"{counts.skipped} skipped."
+        )
+        return counts
+
+    def review(self, session_id: str, output_dir: Path) -> ProcessingResult:
+        """Resume and review one exact, already-published staging session."""
+        session, rows, manifest = load_staging_session(output_dir, session_id)
+        self._load_processor_queue(rows, session.path, resume=True)
+        completed_submission_ids = _completed_submission_ids_from_audit(
+            session.path / "review_audit.jsonl"
+        )
+        if manifest.batches and all(
+            batch.status is QueueStatus.COMPLETED
+            and {
+                source_id
+                for row in batch.rows
+                for source_id in row.source_submission_ids
+            }.issubset(completed_submission_ids)
+            for batch in manifest.batches
+        ):
+            self.output_fn(f"Staging session {session_id} is already complete.")
+            return ProcessingResult(
+                staging_path=session.path,
+                audit_path=session.path / "review_audit.jsonl",
+                response_path=session.path / "response_emails.txt",
+                queue_path=session.queue_path,
+                completed_batches=len(manifest.batches),
+                pending_batches=0,
+            )
+
+        captured_ids = _submission_ids(rows)
+        case_submission_ids = _unfinished_setup_submission_ids(manifest, "Case", "Case")
+        missing_account_ids = _submission_ids(rows, require_missing_account=True)
+        if missing_account_ids:
+            self.processor.transition_setup(
+                "Company_Profile_Change__c",
+                "Account__c",
+                QueueStatus.IN_PROGRESS,
+                submission_ids=missing_account_ids,
+                preserve_completed=True,
+            )
+            try:
+                repaired = self.processor.resolve_missing_submission_accounts(
+                    missing_account_ids
+                )
+                account_check: StagingResult = self.staging_service.stage(captured_ids)
+                if _submission_ids(account_check.rows) != captured_ids:
+                    raise ProcessingError(
+                        "Salesforce Account verification did not return the exact "
+                        "captured submission IDs."
+                    )
+                unresolved_ids = _submission_ids(
+                    account_check.rows, require_missing_account=True
+                ).intersection(missing_account_ids)
+                if unresolved_ids:
+                    raise ProcessingError(
+                        "Not every captured submission with a blank Account was repaired."
+                    )
+            except Exception:
+                self.processor.transition_setup(
+                    "Company_Profile_Change__c",
+                    "Account__c",
+                    QueueStatus.FAILED,
+                    submission_ids=missing_account_ids,
+                    preserve_completed=True,
+                )
+                raise
+            self.processor.transition_setup(
+                "Company_Profile_Change__c",
+                "Account__c",
+                QueueStatus.COMPLETED,
+                outcome=ActionStatus.APPLIED.value,
+                submission_ids=missing_account_ids,
+                preserve_completed=True,
+            )
+            self.output_fn(
+                f"Submission Account resolution complete: {repaired} repaired."
+            )
+
+        if case_submission_ids:
+            self.processor.transition_setup(
+                "Case",
+                "Case",
+                QueueStatus.IN_PROGRESS,
+                submission_ids=case_submission_ids,
+                preserve_completed=True,
+            )
+            try:
+                counts = self._run_case_service_with_snapshots(case_submission_ids)
+            except Exception:
+                self.processor.transition_setup(
+                    "Case",
+                    "Case",
+                    QueueStatus.FAILED,
+                    submission_ids=case_submission_ids,
+                    preserve_completed=True,
+                )
+                raise
+            if counts.failed:
+                self.processor.transition_setup(
+                    "Case",
+                    "Case",
+                    QueueStatus.FAILED,
+                    submission_ids=case_submission_ids,
+                    preserve_completed=True,
+                )
+                details = "; ".join(getattr(self.case_service, "errors", []))
+                suffix = f": {details}" if details else ""
+                raise ProcessingError(
+                    f"{counts.failed} required Case operation(s) failed{suffix}"
+                )
+            self.processor.transition_setup(
+                "Case",
+                "Case",
+                QueueStatus.COMPLETED,
+                outcome=ActionStatus.APPLIED.value,
+                submission_ids=case_submission_ids,
+                preserve_completed=True,
+            )
+
+        refreshed: StagingResult = self.staging_service.stage(captured_ids)
+        refreshed_ids = _submission_ids(refreshed.rows)
+        if refreshed_ids != captured_ids:
+            raise ProcessingError(
+                "Salesforce refresh did not return the exact captured submission IDs."
+            )
+        _replace_staged_profile_updates(session.csv_path, refreshed.rows)
+        rows = read_staged_profile_updates(session.csv_path)
+        self.processor.refresh_review_queue(rows)
+        return self.processor.review(rows, session.path)
+
+    def _load_processor_queue(
+        self, rows: list[dict[str, str]], artifact_dir: Path, *, resume: bool
+    ) -> ReviewQueueManifest:
+        loader = getattr(self.processor, "load_review_queue", None)
+        if loader is None:
+            return self.processor.prepare_review_queue(rows, artifact_dir)
+        return loader(rows, artifact_dir, resume=resume)
 
     def _run_with_preflight_queue(
         self,
@@ -528,31 +765,227 @@ class ProfileUpdateProcessingWorkflow:
             )
         return result
 
-    def _run_case_service_with_snapshots(self) -> AutomationCounts:
+    def _run_case_service_with_snapshots(
+        self, submission_ids: set[str] | None = None
+    ) -> AutomationCounts:
         """Observe writes made inside the separate Case preparation service."""
         client = getattr(self.case_service, "client", None)
         publish = getattr(self.processor, "_publish_queue_snapshot", None)
         if client is None or publish is None:
-            return self.case_service.run()
+            return (
+                self.case_service.run()
+                if submission_ids is None
+                else self.case_service.run(submission_ids)
+            )
         self.case_service.client = _QueuePublishingClient(client, publish)
         try:
-            return self.case_service.run()
+            return (
+                self.case_service.run()
+                if submission_ids is None
+                else self.case_service.run(submission_ids)
+            )
         finally:
             self.case_service.client = client
 
 
+def publish_staging_session(
+    rows: list[dict[str, str]],
+    output_dir: Path,
+    *,
+    warning_count: int = 0,
+    now: datetime | None = None,
+) -> StagingSession:
+    """Publish the CSV and queue together using one final directory rename."""
+    timestamp = _aware_datetime(now or datetime.now(UTC)).astimezone(UTC)
+    base_session_id = timestamp.strftime("%Y-%m-%dT%H-%M-%SZ")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    final_path = output_dir / base_session_id
+    suffix = 1
+    while final_path.exists():
+        final_path = output_dir / f"{base_session_id}-{suffix:02d}"
+        suffix += 1
+    session_id = final_path.name
+    temporary_path = output_dir / f".{session_id}-{uuid4().hex}.tmp"
+    try:
+        temporary_path.mkdir()
+        csv_path = temporary_path / "profile_updates.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as output:
+            writer = csv.DictWriter(output, fieldnames=CSV_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+            output.flush()
+            os.fsync(output.fileno())
+        write_review_queue(
+            build_review_queue(rows, now=timestamp),
+            temporary_path / "review_queue.json",
+        )
+        directory_fd = os.open(temporary_path, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        os.replace(temporary_path, final_path)
+        parent_fd = os.open(output_dir, os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except Exception:
+        shutil.rmtree(temporary_path, ignore_errors=True)
+        raise
+    return StagingSession(
+        session_id=session_id,
+        path=final_path,
+        csv_path=final_path / "profile_updates.csv",
+        queue_path=final_path / "review_queue.json",
+        row_count=len(rows),
+        warning_count=warning_count,
+    )
+
+
+def load_staging_session(
+    output_dir: Path, session_id: str
+) -> tuple[StagingSession, list[dict[str, str]], ReviewQueueManifest]:
+    """Resolve one direct-child session and validate its two linked artifacts."""
+    try:
+        valid_timestamp = datetime.strptime(session_id[:20], "%Y-%m-%dT%H-%M-%SZ")
+    except ValueError:
+        valid_timestamp = None
+    if not SESSION_ID_PATTERN.fullmatch(session_id) or valid_timestamp is None:
+        raise ProcessingError(
+            "Invalid staging session ID. Use the exact ID printed by the stage command."
+        )
+    root = output_dir.resolve()
+    path = output_dir / session_id
+    if not path.exists() or not path.is_dir() or path.is_symlink():
+        raise ProcessingError(f"Staging session does not exist: {session_id}")
+    if path.resolve().parent != root:
+        raise ProcessingError("Staging session must be a direct child of --output-dir.")
+    csv_path = path / "profile_updates.csv"
+    queue_path = path / "review_queue.json"
+    for artifact in (csv_path, queue_path):
+        if not artifact.is_file() or artifact.is_symlink():
+            raise ProcessingError(
+                f"Staging session artifact is missing: {artifact.name}"
+            )
+    rows = read_staged_profile_updates(csv_path)
+    try:
+        manifest = read_review_queue(queue_path)
+    except ValueError as error:
+        raise ProcessingError(str(error)) from error
+    csv_ids = _submission_ids(rows)
+    queue_ids = {
+        source_id
+        for batch in manifest.batches
+        for row in batch.rows
+        for source_id in row.source_submission_ids
+    }
+    if csv_ids != queue_ids:
+        raise ProcessingError(
+            "Staging CSV and review queue contain different submission IDs."
+        )
+    warning_count = sum(
+        len(row.get("warnings", "").splitlines())
+        for row in rows
+        if row.get("warnings", "")
+    )
+    return (
+        StagingSession(
+            session_id=session_id,
+            path=path,
+            csv_path=csv_path,
+            queue_path=queue_path,
+            row_count=len(rows),
+            warning_count=warning_count,
+        ),
+        rows,
+        manifest,
+    )
+
+
+def _submission_ids(
+    rows: list[dict[str, str]],
+    *,
+    require_account: bool = False,
+    require_missing_account: bool = False,
+) -> set[str]:
+    selected: set[str] = set()
+    for row in rows:
+        has_account = bool(row.get("account_id", "").strip())
+        if require_account and not has_account:
+            continue
+        if require_missing_account and has_account:
+            continue
+        selected.update(_json_string_list(row["source_submission_ids"]))
+    return selected
+
+
+def _unfinished_setup_submission_ids(
+    manifest: ReviewQueueManifest, object_name: str, field: str
+) -> set[str]:
+    return {
+        source_id
+        for change in iter_changes(manifest)
+        if change.phase is QueuePhase.SETUP
+        and change.salesforce.object_name == object_name
+        and change.field == field
+        and change.status is not QueueStatus.COMPLETED
+        for source_id in change.source_submission_ids
+    }
+
+
+def _completed_submission_ids_from_audit(path: Path) -> set[str]:
+    """Return submissions with a durable successful review-finalization entry."""
+    if not path.is_file():
+        return set()
+    completed: set[str] = set()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise ProcessingError(f"Review audit could not be read: {error}") from error
+    for number, line in enumerate(lines, start=1):
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ProcessingError(
+                f"Review audit line {number} is not valid JSON."
+            ) from error
+        if not isinstance(entry, dict):
+            raise ProcessingError(f"Review audit line {number} is not a JSON object.")
+        if (
+            entry.get("target_object") == "Company_Profile_Change__c"
+            and entry.get("field") == "Status__c"
+            and entry.get("proposed_value") == ProfileChangeStatus.CLOSED
+            and entry.get("result")
+            in {
+                ActionStatus.APPLIED.value,
+                ActionStatus.NOOP.value,
+                ActionStatus.VERIFIED_MANUAL.value,
+            }
+        ):
+            record_id = entry.get("target_record_id")
+            if isinstance(record_id, str) and record_id:
+                completed.add(record_id)
+    return completed
+
+
 def read_staged_profile_updates(path: Path) -> list[dict[str, str]]:
     """Read and validate the exact CSV that was published for review."""
-    with path.open(newline="", encoding="utf-8") as source:
-        reader = csv.DictReader(source)
-        missing = [
-            column for column in CSV_COLUMNS if column not in (reader.fieldnames or [])
-        ]
-        if missing:
-            raise ProcessingError(
-                "Staging CSV is missing required columns: " + ", ".join(missing)
-            )
-        rows = list(reader)
+    try:
+        with path.open(newline="", encoding="utf-8") as source:
+            reader = csv.DictReader(source, strict=True)
+            missing = [
+                column
+                for column in CSV_COLUMNS
+                if column not in (reader.fieldnames or [])
+            ]
+            if missing:
+                raise ProcessingError(
+                    "Staging CSV is missing required columns: " + ", ".join(missing)
+                )
+            rows = list(reader)
+    except (OSError, UnicodeError, csv.Error) as error:
+        raise ProcessingError(f"Staging CSV could not be read: {error}") from error
     for number, row in enumerate(rows, start=2):
         try:
             source_ids = _json_string_list(row["source_submission_ids"])
@@ -564,7 +997,12 @@ def read_staged_profile_updates(path: Path) -> list[dict[str, str]]:
             raise ProcessingError(
                 f"Staging CSV row {number} has no source submission IDs."
             )
-        contact_resolutions = row.get("contact_resolutions", "").strip()
+        raw_contact_resolutions = row.get("contact_resolutions", "")
+        if not isinstance(raw_contact_resolutions, str):
+            raise ProcessingError(
+                f"Staging CSV row {number} has invalid Contact resolutions."
+            )
+        contact_resolutions = raw_contact_resolutions.strip()
         if contact_resolutions:
             try:
                 raw_resolutions = json.loads(contact_resolutions)
@@ -739,11 +1177,15 @@ class _ResponseWriter:
         self.path = path
         self.path.touch()
 
-    def append(self, case_id: str, email: str, text: str) -> None:
+    def append(self, case_id: str, email: str, text: str) -> bool:
+        block = f"Case {case_id}\nTo: {email}\n\n{text}\n\n"
+        if block in self.path.read_text(encoding="utf-8"):
+            return False
         with self.path.open("a", encoding="utf-8") as output:
-            output.write(f"Case {case_id}\nTo: {email}\n\n{text}\n\n")
+            output.write(block)
             output.flush()
             os.fsync(output.fileno())
+        return True
 
 
 class InteractiveProfileUpdateProcessor:
@@ -776,6 +1218,7 @@ class InteractiveProfileUpdateProcessor:
         self._queue_store: ReviewQueueStore | None = None
         self._active_change_id: str | None = None
         self._review_rows: list[dict[str, str]] | None = None
+        self._resuming_session = False
 
     def prepare_review_queue(
         self, rows: list[dict[str, str]], artifact_dir: Path
@@ -785,7 +1228,37 @@ class InteractiveProfileUpdateProcessor:
         self._queue_store = ReviewQueueStore(
             artifact_dir / "review_queue.json", manifest
         )
+        self._resuming_session = False
         self._publish_queue_snapshot()
+        return self._queue_store.manifest
+
+    def load_review_queue(
+        self,
+        rows: list[dict[str, str]],
+        artifact_dir: Path,
+        *,
+        resume: bool = False,
+    ) -> ReviewQueueManifest:
+        """Load the saved queue exactly, optionally resetting interrupted work."""
+        manifest = read_review_queue(artifact_dir / "review_queue.json")
+        row_ids = _submission_ids(rows)
+        queue_ids = {
+            source_id
+            for batch in manifest.batches
+            for row in batch.rows
+            for source_id in row.source_submission_ids
+        }
+        if row_ids != queue_ids:
+            raise ProcessingError(
+                "Staging CSV and review queue contain different submission IDs."
+            )
+        self._queue_store = ReviewQueueStore(
+            artifact_dir / "review_queue.json", manifest
+        )
+        self._resuming_session = True
+        if resume:
+            self._queue_store.resume()
+        self._display_event(ReviewQueueSnapshot(self._queue_store.manifest))
         return self._queue_store.manifest
 
     def refresh_review_queue(self, rows: list[dict[str, str]]) -> ReviewQueueManifest:
@@ -803,16 +1276,24 @@ class InteractiveProfileUpdateProcessor:
         status: QueueStatus,
         *,
         outcome: str | None = None,
+        submission_ids: Collection[str] | None = None,
+        preserve_completed: bool = False,
     ) -> None:
         """Transition every matching setup item and publish each snapshot."""
         if self._queue_store is None:
             return
+        selected_ids = set(submission_ids or ())
         item_ids = [
             change.id
             for change in iter_changes(self._queue_store.manifest)
             if change.phase is QueuePhase.SETUP
             and change.salesforce.object_name == object_name
             and change.field == field
+            and (
+                submission_ids is None
+                or bool(selected_ids.intersection(change.source_submission_ids))
+            )
+            and not (preserve_completed and change.status is QueueStatus.COMPLETED)
         ]
         for item_id in item_ids:
             self._queue_store.transition(item_id, status, outcome=outcome)
@@ -883,14 +1364,32 @@ class InteractiveProfileUpdateProcessor:
                 f"{type(answer).__name__}."
             )
 
-    def resolve_missing_submission_accounts(self) -> int:
+    def resolve_missing_submission_accounts(
+        self, submission_ids: Collection[str] | None = None
+    ) -> int:
         """Let the reviewer repair blank Account lookups before Case creation."""
+        selected_ids = set(submission_ids or ())
+        where = f"Status__c = '{ProfileChangeStatus.NEW}' AND Account__c = NULL"
+        if submission_ids is not None:
+            if not selected_ids:
+                return 0
+            quoted_ids = ", ".join(
+                f"'{escape_soql_string(record_id)}'"
+                for record_id in sorted(selected_ids)
+            )
+            where += f" AND Id IN ({quoted_ids})"
         submissions = self.client.query_records(
             "Company_Profile_Change__c",
             ["Id", "Name", "CreatedDate", "Account__c", "Certification_ID__c"],
-            where=(f"Status__c = '{ProfileChangeStatus.NEW}' AND Account__c = NULL"),
+            where=where,
             order_by="CreatedDate ASC, Id ASC",
         )
+        if submission_ids is not None:
+            submissions = [
+                submission
+                for submission in submissions
+                if _display(submission.get("Id")) in selected_ids
+            ]
         repaired = 0
         for submission in submissions:
             submission_id = _required_record_text(submission, "Id", "Profile Update ID")
@@ -1026,6 +1525,13 @@ class InteractiveProfileUpdateProcessor:
             with _AuditWriter(audit_path, lambda: datetime.now(UTC)) as audit:
                 self._audit = audit
                 for batch in batches:
+                    queued_status = self._queued_batch_status(batch)
+                    if queued_status is QueueStatus.COMPLETED:
+                        completed += 1
+                        continue
+                    if queued_status is QueueStatus.BLOCKED:
+                        pending += 1
+                        continue
                     try:
                         is_pending = self._review_batch(batch, response_writer)
                     except ProcessingStoppedEarly:
@@ -1082,6 +1588,38 @@ class InteractiveProfileUpdateProcessor:
             completed_batches=completed,
             pending_batches=pending,
             stopped_early=stopped_early,
+        )
+
+    def _queued_batch_status(self, batch: CaseBatch) -> QueueStatus | None:
+        """Find the durable queue batch that represents one runtime batch."""
+        if self._queue_store is None or not self._resuming_session:
+            return None
+        source_ids = set(batch.source_submission_ids)
+        queued = next(
+            (
+                item
+                for item in self._queue_store.manifest.batches
+                if item.case.record_id == batch.case_id
+                and {
+                    source_id
+                    for row in item.rows
+                    for source_id in row.source_submission_ids
+                }
+                == source_ids
+            ),
+            None,
+        )
+        if queued is None:
+            return None
+        if queued.status is not QueueStatus.COMPLETED:
+            return queued.status
+        completed_ids = _completed_submission_ids_from_audit(
+            self._queue_store.path.parent / "review_audit.jsonl"
+        )
+        return (
+            QueueStatus.COMPLETED
+            if set(batch.source_submission_ids).issubset(completed_ids)
+            else None
         )
 
     def _review_batch(self, batch: CaseBatch, response_writer: _ResponseWriter) -> bool:

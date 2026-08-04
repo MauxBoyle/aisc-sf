@@ -110,6 +110,28 @@ def test_audit_window_is_inclusive_and_excludes_future_dates():
     )
 
 
+def test_session_case_preparation_excludes_audits_later_submissions_and_missing_accounts():
+    captured = submission()
+    client = FakeClient(
+        audits=[audit()],
+        submissions=[
+            captured,
+            submission(Id="submission-later", Name="PU-999"),
+            submission(Id="submission-missing", Account__c=""),
+        ],
+    )
+
+    counts = service(client).run({"submission-1", "submission-missing"})
+
+    assert counts.created == 1
+    assert not any(query[0] == "Cert_Audit__c" for query in client.queries)
+    submission_query = next(
+        query for query in client.queries if query[0] == "Company_Profile_Change__c"
+    )
+    assert "Id IN ('submission-1', 'submission-missing')" in submission_query[2]
+    assert len(client.created) == 1
+
+
 def test_audit_creates_expected_case_and_posts_exact_messages():
     client = FakeClient(audits=[audit()])
 

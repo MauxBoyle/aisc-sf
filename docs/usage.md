@@ -645,7 +645,8 @@ Populated Key Data fields remain visible in their normal CSV columns and in
 
 ## Process Profile Updates command
 
-Run the Case preparation, fresh staging, and interactive review as one command:
+Run staging, Case preparation, and interactive review as one convenience
+command:
 
 ```bash
 uv run aisc_salesforce process-profile-updates
@@ -653,23 +654,50 @@ uv run aisc_salesforce process-profile-updates \
   --output-dir /secure/staged-profile-updates
 ```
 
-The command has no dry-run option. It first performs a read-only staging pass
-over New Profile Updates and atomically publishes both `profile_updates.csv`
-and `review_queue.json`. This happens before the first reviewer question or
-Salesforce write. The initial queue can therefore show missing Accounts,
-missing or ambiguous Cases, and other unreviewable work explicitly. Account
-repair and Case preparation are setup changes rather than hidden prerequisites.
+The same phases can be run separately:
 
-After publication, the command repairs each New Profile Update whose Submission
-Account is blank. It looks up Accounts using the submitted Profile ID and
-presents the matches as a typed choice. Press Enter to select the first Account,
-enter another displayed number to choose that Account, or enter `P` to supply a
-different Profile ID. The selected Account is saved on the Profile Update,
-after which `ProfileUpdateService` creates or reuses its Case. A second read-only
-staging pass atomically refreshes the CSV and queue hierarchy with the resolved
-Account and Case references. Setup outcomes and source-submission references
-survive that refresh. If a required setup operation fails, the affected queue
-item is marked `failed` and processing stops before interactive change review.
+```bash
+uv run aisc_salesforce process-profile-updates stage \
+  --output-dir /secure/staged-profile-updates
+uv run aisc_salesforce process-profile-updates prepare \
+  2026-08-04T15-30-00Z \
+  --output-dir /secure/staged-profile-updates
+uv run aisc_salesforce process-profile-updates review \
+  2026-08-04T15-30-00Z \
+  --output-dir /secure/staged-profile-updates
+```
+
+`stage` reads New submissions and publishes both `profile_updates.csv` and
+`review_queue.json` through one temporary directory and one final rename. The
+printed UTC timestamp folder name is the session ID. Same-second collisions use
+the existing `-01`, `-02`, and later suffixes. Publication finishes before any
+Salesforce write, allowing a reviewer or TUI to inspect a stable queue.
+
+`prepare SESSION_ID` loads and validates that saved session, then creates or
+reuses Cases only for captured submissions that already have Accounts. It does
+not repair blank Accounts. `review SESSION_ID` loads the saved CSV and queue,
+repairs blank Accounts only among captured submissions, prepares newly possible
+Cases, and refreshes the same session before interactive review. A submission
+that arrives after `stage` is never silently added.
+
+The session ID must be the exact direct-child folder name printed by `stage`.
+Absolute paths, separators, `..`, missing sessions, symlinked sessions or
+artifacts, malformed CSVs, unsupported queue schemas, and mismatched CSV/queue
+submission IDs fail before writes.
+
+For blank Submission Accounts, review looks up Accounts using the submitted
+Profile ID and presents typed choices. Press Enter for the first Account, enter
+another displayed number, or enter `P` for a different Profile ID. Setup
+outcomes and source-submission references survive the following refresh. A
+required setup failure marks the affected queue item `failed` and stops before
+change review.
+
+Sessions are safely resumable. Completed and blocked work stays durable;
+interrupted, failed, `in_progress`, and `stopped_early` work resets to pending
+only on explicit `prepare` or `review`. Completed Case batches are skipped,
+unfinished batches begin with fresh Salesforce reads, audit entries append to
+`review_audit.jsonl`, and an identical response-email block is not appended
+twice. Reviewing a fully completed session succeeds as a no-op.
 
 Progress messages appear around authentication, read-only preflight, queue and
 CSV publication, Submission Account resolution, Case preparation, staging
@@ -711,8 +739,10 @@ and row IDs, Salesforce object/record/field reference, current value, proposed
 value, and optional completed `outcome`. Batch and row references retain the
 source Profile Updates, target Account and Case, affected direct child Accounts,
 and related prior Case activity.
-Only submissions queried with `Status__c = 'New'` become work; older records are
-context references, not queue items.
+Only submissions captured as New by `stage` become work. Later refreshes query
+those exact IDs so completed items remain auditable and newer submissions do not
+enter the session. Older related records are context references, not queue
+items.
 
 IDs are deterministic UUID5 values. Their canonical input uses the item type,
 Salesforce object context, sorted source submission IDs, target record or stable
@@ -961,9 +991,10 @@ assignments are separate, immediately flushed events.
 
 On interruption, an unrelated Salesforce failure, or a manual value that does not verify,
 the audit is flushed, unfinalized source Profile Updates stay open, the Case is
-kept Pending, and the command exits nonzero. Retrying restages open records.
-Values applied before the interruption are fetched again and recorded as
-no-ops, so they are not applied or emailed twice.
+kept Pending, and the command exits nonzero. Retry with `review SESSION_ID` to
+reload the saved artifacts and refresh only the captured records. Values
+applied before the interruption are fetched again and recorded as no-ops, so
+they are not applied or emailed twice.
 
 `Q` or `Quit` is different from an error or keyboard interruption. It writes a
 `stopped early` audit event, keeps the current Case Pending, leaves that Case's

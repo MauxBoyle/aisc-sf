@@ -6,6 +6,7 @@ import csv
 import json
 import os
 import shutil
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -241,14 +242,33 @@ class ProfileUpdateStagingService:
     def __init__(self, client: SalesforceClient):
         self.client = client
 
-    def stage(self) -> StagingResult:
-        """Return deterministic CSV-ready rows for all New submissions."""
+    def stage(self, submission_ids: Collection[str] | None = None) -> StagingResult:
+        """Return CSV-ready rows for New submissions, optionally ID-scoped."""
+        selected_ids = (
+            sorted({value.strip() for value in submission_ids if value.strip()})
+            if submission_ids is not None
+            else None
+        )
+        if selected_ids == []:
+            return StagingResult([], 0)
+        where = (
+            f"Status__c = '{ProfileChangeStatus.NEW}'"
+            if selected_ids is None
+            else _where_in("Id", selected_ids)
+        )
         submissions = self.client.query_records(
             "Company_Profile_Change__c",
             SUBMISSION_FIELDS,
-            where=f"Status__c = '{ProfileChangeStatus.NEW}'",
+            where=where,
             order_by="CreatedDate ASC, Id ASC",
         )
+        if selected_ids is not None:
+            allowed = set(selected_ids)
+            submissions = [
+                record
+                for record in submissions
+                if _clean_text(record.get("Id")) in allowed
+            ]
         submissions = sorted(submissions, key=_submission_sort_key)
 
         requested_account_ids = _unique_text_values(

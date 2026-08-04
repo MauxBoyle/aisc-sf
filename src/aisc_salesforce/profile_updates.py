@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -172,28 +173,53 @@ class ProfileUpdateService:
         self._case_cache: dict[str, list[dict[str, Any]]] = {}
         self._feed_cache: dict[str, list[str]] = {}
 
-    def run(self) -> AutomationCounts:
-        """Process eligible audits and New submissions and return outcome counts."""
+    def run(self, submission_ids: Collection[str] | None = None) -> AutomationCounts:
+        """Process normal work, or only the captured submissions when IDs are given."""
         self.errors.clear()
         self._case_cache.clear()
         self._feed_cache.clear()
-        start = self.today - timedelta(days=30)
-        audits = self.client.query_records(
-            "Cert_Audit__c",
-            AUDIT_FIELDS,
-            where=(
-                f"Cert_Audit_Date__c >= {start.isoformat()} AND "
-                f"Cert_Audit_Date__c <= {self.today.isoformat()} AND "
-                "Company_Profile_Change_Form__c = TRUE"
-            ),
-            order_by="Cert_Audit_Date__c ASC, Id ASC",
+        selected_ids = (
+            sorted({value.strip() for value in submission_ids if value.strip()})
+            if submission_ids is not None
+            else None
         )
-        submissions = self.client.query_records(
-            "Company_Profile_Change__c",
-            SUBMISSION_FIELDS,
-            where=f"Status__c = '{ProfileChangeStatus.NEW}'",
-            order_by="CreatedDate ASC, Id ASC",
+        audits = []
+        if selected_ids is None:
+            start = self.today - timedelta(days=30)
+            audits = self.client.query_records(
+                "Cert_Audit__c",
+                AUDIT_FIELDS,
+                where=(
+                    f"Cert_Audit_Date__c >= {start.isoformat()} AND "
+                    f"Cert_Audit_Date__c <= {self.today.isoformat()} AND "
+                    "Company_Profile_Change_Form__c = TRUE"
+                ),
+                order_by="Cert_Audit_Date__c ASC, Id ASC",
+            )
+        submission_where = f"Status__c = '{ProfileChangeStatus.NEW}'"
+        if selected_ids:
+            quoted_ids = ", ".join(
+                f"'{escape_soql_string(record_id)}'" for record_id in selected_ids
+            )
+            submission_where += f" AND Id IN ({quoted_ids})"
+        submissions = (
+            self.client.query_records(
+                "Company_Profile_Change__c",
+                SUBMISSION_FIELDS,
+                where=submission_where,
+                order_by="CreatedDate ASC, Id ASC",
+            )
+            if selected_ids != []
+            else []
         )
+        if selected_ids is not None:
+            allowed = set(selected_ids)
+            submissions = [
+                record
+                for record in submissions
+                if _clean_text(record.get("Id")) in allowed
+                and _clean_text(record.get("Account__c"))
+            ]
 
         counts = AutomationCounts()
         for record in audits:
