@@ -114,7 +114,7 @@ def main(
         operation_parser.add_argument(
             "--output-dir",
             type=Path,
-            default=Path("staged_profile_updates"),
+            default=argparse.SUPPRESS,
             help="Directory containing Profile Update staging sessions.",
         )
     rename_parser = subparsers.add_parser(

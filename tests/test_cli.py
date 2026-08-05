@@ -492,6 +492,25 @@ def test_process_profile_update_nested_operations_route_session_and_output_dir(
     ]
 
 
+def test_process_profile_update_nested_operation_preserves_parent_output_dir(
+    monkeypatch, tmp_path
+):
+    calls = []
+    monkeypatch.setattr(
+        app,
+        "_run_stage_profile_update_session",
+        lambda output_dir, **kwargs: calls.append(output_dir) or 0,
+    )
+
+    assert (
+        app.main(
+            ["process-profile-updates", "--output-dir", str(tmp_path), "stage"]
+        )
+        == 0
+    )
+    assert calls == [tmp_path]
+
+
 def test_process_profile_updates_reports_authentication_and_safe_stop(
     monkeypatch, tmp_path
 ):
