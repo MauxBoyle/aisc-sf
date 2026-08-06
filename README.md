@@ -370,15 +370,47 @@ succeeds, so a failed run cannot leave a partial snapshot.
 
 ### Interactive Profile Update processing
 
-`process-profile-updates` performs the complete processing workflow in this
-order:
+`process-profile-updates` keeps the complete convenience workflow and now
+composes three independently callable session phases in this order:
 
 1. Read-only stage every New Profile Update.
-2. Publish `profile_updates.csv` and a complete `review_queue.json`.
-3. Repair blank Submission Accounts through the review interface.
-4. Run the existing Case automation and stop if a required operation fails.
-5. Refresh the staged CSV and queue references after setup.
-6. Review changes in the queue's deterministic order.
+2. Atomically publish `profile_updates.csv` and `review_queue.json` in one
+   timestamp-named session folder.
+3. Prepare Cases for captured submissions that already have Accounts.
+4. During review, repair blank Submission Accounts, prepare their newly
+   possible Cases, refresh the same captured data set, and review changes in
+   deterministic order.
+
+Run the phases separately when a person or TUI needs to inspect the stable
+artifacts before any Salesforce write or before interactive review:
+
+```bash
+uv run aisc_salesforce process-profile-updates stage \
+  --output-dir /secure/staged-profile-updates
+# Example printed ID: 2026-08-04T15-30-00Z
+
+uv run aisc_salesforce process-profile-updates prepare \
+  2026-08-04T15-30-00Z \
+  --output-dir /secure/staged-profile-updates
+
+uv run aisc_salesforce process-profile-updates review \
+  2026-08-04T15-30-00Z \
+  --output-dir /secure/staged-profile-updates
+```
+
+The combined form remains:
+
+```bash
+uv run aisc_salesforce process-profile-updates \
+  --output-dir /secure/staged-profile-updates
+```
+
+`stage` prints the generated session ID and both artifact paths. If two stages
+start in the same UTC second, later IDs use `-01`, `-02`, and so on. `prepare`
+and `review` accept only that exact folder name as a direct child of
+`--output-dir`; absolute paths, separators, `..`, symlinks, missing files,
+unsupported queue schemas, malformed CSV data, and CSV/queue submission-ID
+mismatches are rejected before Salesforce writes.
 
 The initial queue therefore exists before the first reviewer question or
 Salesforce write. Account repair and Case preparation appear as setup changes,
@@ -391,14 +423,25 @@ using the submitted Profile ID. It presents every match as a structured choice;
 press Enter to use the first Account, enter its displayed number to choose a
 different match, or enter `P` to look up a different Profile ID. The Account is
 saved on the Profile Update before Case preparation begins.
+After a scoped Salesforce refresh verifies the repaired submission now has an
+Account, `review` includes that submission in Case preparation before the final
+staging refresh and interactive review.
 
 Batches containing a Key Update strictly older than seven days are reviewed
 first. The remaining batches are reviewed from oldest to newest.
 
-The command prints progress before and after authentication, Submission Account
-resolution, Case preparation, staging, CSV publication, CSV validation, and
-review startup. Section separators make workflow stages, Cases, staged rows,
-individual Contact reviews, and response emails easier to distinguish.
+The session stores an append-only `review_audit.jsonl` and deduplicated
+`response_emails.txt`. Explicitly resuming `prepare` or `review` keeps completed
+and blocked work, resets interrupted, failed, `in_progress`, and
+`stopped_early` work to pending, skips completed Case batches, and refetches
+Salesforce before retrying unfinished batches. A fully completed session is a
+successful no-op with a clear message. Submissions arriving after `stage` are
+excluded from every later phase of that session.
+
+The commands print progress around authentication, publication, Account
+resolution, Case preparation, refresh, and review. Section separators make
+workflow stages, Cases, staged rows, Contact reviews, and response emails
+easier to distinguish.
 
 The review processor is renderer-neutral: it exchanges frozen Python
 dataclasses with a `ReviewUI` implementation instead of calling `print()` or
@@ -441,15 +484,9 @@ Either condition requires acknowledgement, records a `deferred manual
 follow-up` audit outcome, marks the whole Case batch `blocked` in the queue,
 leaves every source Profile Update and the Case open, and continues to the next
 Case. No Contact, Account, role, Case, or submission write occurs for that
-blocked batch. A later retry restages and refetches Salesforce, so processing
-can continue normally after manual reconciliation.
-
-Use `--output-dir` the same way as the staging command:
-
-```bash
-uv run aisc_salesforce process-profile-updates \
-  --output-dir /secure/staged-profile-updates
-```
+blocked batch. A later retry refetches Salesforce, so processing can continue
+normally after manual reconciliation. Rerun `review SESSION_ID`; the refresh
+stays limited to that captured session.
 
 Before each staged CSV row, the command shows the Account, submitter, and source
 Profile Update names. It also notes when contact details were supplemented or

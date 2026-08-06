@@ -394,6 +394,276 @@ def manifest_json(manifest: ReviewQueueManifest) -> str:
     )
 
 
+def read_review_queue(path: Path) -> ReviewQueueManifest:
+    """Load and strictly validate one published review queue.
+
+    A queue can authorize Salesforce writes, so malformed or newer queue data
+    is rejected instead of being guessed at.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"Review queue could not be read: {error}") from error
+    root = _mapping(raw, "review queue")
+    _exact_fields(
+        root, {"schema_version", "default_next_item_id", "batches"}, "review queue"
+    )
+    version = root["schema_version"]
+    if type(version) is not int or version != SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported review queue schema version {version!r}; "
+            f"expected {SCHEMA_VERSION}."
+        )
+    default_next = _optional_string(
+        root["default_next_item_id"], "review queue default_next_item_id"
+    )
+    batches = tuple(
+        _case_batch(item, f"review queue batches[{index}]")
+        for index, item in enumerate(_list(root["batches"], "review queue batches"))
+    )
+    return ReviewQueueManifest(version, default_next, batches)
+
+
+def _case_batch(raw: Any, context: str) -> CaseBatch:
+    value = _mapping(raw, context)
+    _exact_fields(
+        value,
+        {
+            "id",
+            "label",
+            "status",
+            "warnings",
+            "blockers",
+            "account",
+            "case",
+            "earliest_submission",
+            "earliest_key_update",
+            "rows",
+            "references",
+        },
+        context,
+    )
+    return CaseBatch(
+        id=_nonblank_string(value["id"], f"{context} id"),
+        label=_string(value["label"], f"{context} label"),
+        status=_queue_status(value["status"], f"{context} status"),
+        warnings=_warnings(value["warnings"], f"{context} warnings"),
+        blockers=_blockers(value["blockers"], f"{context} blockers"),
+        account=_salesforce_reference(value["account"], f"{context} account"),
+        case=_salesforce_reference(value["case"], f"{context} case"),
+        earliest_submission=_string(
+            value["earliest_submission"], f"{context} earliest_submission"
+        ),
+        earliest_key_update=_optional_string(
+            value["earliest_key_update"], f"{context} earliest_key_update"
+        ),
+        rows=tuple(
+            _staged_row(item, f"{context} rows[{index}]")
+            for index, item in enumerate(_list(value["rows"], f"{context} rows"))
+        ),
+        references=_references(value["references"], f"{context} references"),
+    )
+
+
+def _staged_row(raw: Any, context: str) -> StagedRow:
+    value = _mapping(raw, context)
+    _exact_fields(
+        value,
+        {
+            "id",
+            "label",
+            "status",
+            "warnings",
+            "blockers",
+            "source_submission_ids",
+            "earliest_submission",
+            "changes",
+            "references",
+        },
+        context,
+    )
+    source_ids = _string_tuple(
+        value["source_submission_ids"], f"{context} source_submission_ids"
+    )
+    if not source_ids:
+        raise ValueError(f"{context} source_submission_ids cannot be empty.")
+    return StagedRow(
+        id=_nonblank_string(value["id"], f"{context} id"),
+        label=_string(value["label"], f"{context} label"),
+        status=_queue_status(value["status"], f"{context} status"),
+        warnings=_warnings(value["warnings"], f"{context} warnings"),
+        blockers=_blockers(value["blockers"], f"{context} blockers"),
+        source_submission_ids=source_ids,
+        earliest_submission=_string(
+            value["earliest_submission"], f"{context} earliest_submission"
+        ),
+        changes=tuple(
+            _proposed_change(item, f"{context} changes[{index}]")
+            for index, item in enumerate(_list(value["changes"], f"{context} changes"))
+        ),
+        references=_references(value["references"], f"{context} references"),
+    )
+
+
+def _proposed_change(raw: Any, context: str) -> ProposedChange:
+    value = _mapping(raw, context)
+    _exact_fields(
+        value,
+        {
+            "id",
+            "label",
+            "status",
+            "warnings",
+            "blockers",
+            "phase",
+            "source_submission_ids",
+            "source_row_ids",
+            "salesforce",
+            "field",
+            "current_value",
+            "proposed_value",
+            "outcome",
+            "context",
+        },
+        context,
+    )
+    try:
+        phase = QueuePhase(_string(value["phase"], f"{context} phase"))
+    except ValueError as error:
+        raise ValueError(f"{context} phase is invalid.") from error
+    return ProposedChange(
+        id=_nonblank_string(value["id"], f"{context} id"),
+        label=_string(value["label"], f"{context} label"),
+        status=_queue_status(value["status"], f"{context} status"),
+        warnings=_warnings(value["warnings"], f"{context} warnings"),
+        blockers=_blockers(value["blockers"], f"{context} blockers"),
+        phase=phase,
+        source_submission_ids=_string_tuple(
+            value["source_submission_ids"], f"{context} source_submission_ids"
+        ),
+        source_row_ids=_string_tuple(
+            value["source_row_ids"], f"{context} source_row_ids"
+        ),
+        salesforce=_salesforce_reference(value["salesforce"], f"{context} salesforce"),
+        field=_string(value["field"], f"{context} field"),
+        current_value=value["current_value"],
+        proposed_value=value["proposed_value"],
+        outcome=_optional_string(value["outcome"], f"{context} outcome"),
+        context=_string(value["context"], f"{context} context"),
+    )
+
+
+def _warnings(raw: Any, context: str) -> tuple[QueueWarning, ...]:
+    warnings = []
+    for index, item in enumerate(_list(raw, context)):
+        item_context = f"{context}[{index}]"
+        value = _mapping(item, item_context)
+        _exact_fields(value, {"code", "message"}, item_context)
+        warnings.append(
+            QueueWarning(
+                _nonblank_string(value["code"], f"{item_context} code"),
+                _string(value["message"], f"{item_context} message"),
+            )
+        )
+    return tuple(warnings)
+
+
+def _blockers(raw: Any, context: str) -> tuple[QueueBlocker, ...]:
+    blockers = []
+    for index, item in enumerate(_list(raw, context)):
+        item_context = f"{context}[{index}]"
+        value = _mapping(item, item_context)
+        _exact_fields(value, {"code", "message"}, item_context)
+        blockers.append(
+            QueueBlocker(
+                _nonblank_string(value["code"], f"{item_context} code"),
+                _string(value["message"], f"{item_context} message"),
+            )
+        )
+    return tuple(blockers)
+
+
+def _references(raw: Any, context: str) -> tuple[SalesforceReference, ...]:
+    return tuple(
+        _salesforce_reference(item, f"{context}[{index}]")
+        for index, item in enumerate(_list(raw, context))
+    )
+
+
+def _salesforce_reference(raw: Any, context: str) -> SalesforceReference:
+    value = _mapping(raw, context)
+    _exact_fields(
+        value,
+        {"object_name", "record_id", "field_name", "relationship", "label", "status"},
+        context,
+    )
+    return SalesforceReference(
+        object_name=_nonblank_string(value["object_name"], f"{context} object_name"),
+        record_id=_string(value["record_id"], f"{context} record_id"),
+        field_name=_string(value["field_name"], f"{context} field_name"),
+        relationship=_string(value["relationship"], f"{context} relationship"),
+        label=_string(value["label"], f"{context} label"),
+        status=_string(value["status"], f"{context} status"),
+    )
+
+
+def _queue_status(raw: Any, context: str) -> QueueStatus:
+    try:
+        return QueueStatus(_string(raw, context))
+    except ValueError as error:
+        raise ValueError(f"{context} is invalid.") from error
+
+
+def _mapping(raw: Any, context: str) -> dict[str, Any]:
+    if not isinstance(raw, dict) or not all(isinstance(key, str) for key in raw):
+        raise ValueError(f"{context} must be a JSON object.")
+    return raw
+
+
+def _list(raw: Any, context: str) -> list[Any]:
+    if not isinstance(raw, list):
+        raise ValueError(f"{context} must be a JSON list.")
+    return raw
+
+
+def _exact_fields(value: dict[str, Any], expected: set[str], context: str) -> None:
+    missing = expected - value.keys()
+    extra = value.keys() - expected
+    if missing or extra:
+        details = []
+        if missing:
+            details.append("missing " + ", ".join(sorted(missing)))
+        if extra:
+            details.append("unexpected " + ", ".join(sorted(extra)))
+        raise ValueError(f"{context} has invalid fields ({'; '.join(details)}).")
+
+
+def _string(raw: Any, context: str) -> str:
+    if not isinstance(raw, str):
+        raise ValueError(f"{context} must be a string.")
+    return raw
+
+
+def _nonblank_string(raw: Any, context: str) -> str:
+    value = _string(raw, context)
+    if not value.strip():
+        raise ValueError(f"{context} cannot be blank.")
+    return value
+
+
+def _optional_string(raw: Any, context: str) -> str | None:
+    if raw is None:
+        return None
+    return _string(raw, context)
+
+
+def _string_tuple(raw: Any, context: str) -> tuple[str, ...]:
+    return tuple(
+        _nonblank_string(item, f"{context}[{index}]")
+        for index, item in enumerate(_list(raw, context))
+    )
+
+
 def write_review_queue(manifest: ReviewQueueManifest, path: Path) -> Path:
     """Atomically replace ``path`` with a fully flushed queue snapshot."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -477,6 +747,26 @@ class ReviewQueueStore:
                     refreshed, change.id, status, outcome=outcome
                 )
         self.manifest = recompute_manifest(refreshed)
+        self.publish()
+        return self.manifest
+
+    def resume(self) -> ReviewQueueManifest:
+        """Reset unfinished work while retaining durable terminal outcomes."""
+        reset_statuses = {
+            QueueStatus.IN_PROGRESS,
+            QueueStatus.FAILED,
+            QueueStatus.STOPPED_EARLY,
+        }
+        manifest = self.manifest
+        for change in tuple(iter_changes(manifest)):
+            if change.status in reset_statuses:
+                manifest = transition_item(
+                    manifest,
+                    change.id,
+                    QueueStatus.PENDING,
+                    outcome=None,
+                )
+        self.manifest = recompute_manifest(manifest)
         self.publish()
         return self.manifest
 

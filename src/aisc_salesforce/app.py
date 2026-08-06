@@ -26,6 +26,7 @@ from .process_profile_updates import (
     InteractiveProfileUpdateProcessor,
     ProcessingError,
     ProfileUpdateProcessingWorkflow,
+    publish_staging_session,
 )
 from .profile_updates import ProfileUpdateService
 from .queried_fields import FieldInventoryError, build_queried_field_inventory
@@ -91,7 +92,7 @@ def main(
     )
     process_parser = subparsers.add_parser(
         "process-profile-updates",
-        help="Create/reuse Cases, stage submissions, and review changes interactively.",
+        help="Stage a session, prepare Cases, and review changes interactively.",
     )
     process_parser.add_argument(
         "--output-dir",
@@ -99,6 +100,23 @@ def main(
         default=Path("staged_profile_updates"),
         help="Directory to contain staging, audit, and response artifacts.",
     )
+    process_operations = process_parser.add_subparsers(dest="process_operation")
+    for operation in ("stage", "prepare", "review"):
+        operation_parser = process_operations.add_parser(
+            operation,
+            help=f"Run only the {operation} phase of a staging session.",
+        )
+        if operation != "stage":
+            operation_parser.add_argument(
+                "session_id",
+                help="Exact staging-session ID printed by the stage command.",
+            )
+        operation_parser.add_argument(
+            "--output-dir",
+            type=Path,
+            default=argparse.SUPPRESS,
+            help="Directory containing Profile Update staging sessions.",
+        )
     rename_parser = subparsers.add_parser(
         "rename-profile-update-cases",
         help="Preview corrections to recent legacy Profile Update Case subjects.",
@@ -152,6 +170,24 @@ def main(
             return 1
     if args.command == "process-profile-updates":
         try:
+            if args.process_operation == "stage":
+                return _run_stage_profile_update_session(
+                    args.output_dir,
+                    output_fn=output_fn,
+                )
+            if args.process_operation == "prepare":
+                return _run_prepare_profile_update_session(
+                    args.session_id,
+                    args.output_dir,
+                    output_fn=output_fn,
+                )
+            if args.process_operation == "review":
+                return _run_review_profile_update_session(
+                    args.session_id,
+                    args.output_dir,
+                    input_fn=input_fn,
+                    output_fn=output_fn,
+                )
             return _run_process_profile_updates(
                 args.output_dir,
                 input_fn=input_fn,
@@ -372,6 +408,114 @@ def _run_process_profile_updates(
     output_fn(f"completed Case batches: {result.completed_batches}")
     output_fn(f"pending Case batches: {result.pending_batches}")
     return 0
+
+
+def _run_stage_profile_update_session(
+    output_dir: Path,
+    *,
+    output_fn: Callable[[str], None] = print,
+) -> int:
+    """Authenticate, capture New submissions, and publish one stable session."""
+    client = _profile_update_client(output_fn)
+    staged = ProfileUpdateStagingService(client).stage()
+    session = publish_staging_session(
+        staged.rows,
+        output_dir,
+        warning_count=staged.warning_count,
+    )
+    output_fn(f"Staging session published: {session.session_id}")
+    output_fn(f"Staging CSV: {session.csv_path}")
+    output_fn(f"Review queue: {session.queue_path}")
+    output_fn(f"staged rows: {session.row_count}")
+    output_fn(f"warnings: {session.warning_count}")
+    return 0
+
+
+def _run_prepare_profile_update_session(
+    session_id: str,
+    output_dir: Path,
+    *,
+    output_fn: Callable[[str], None] = print,
+) -> int:
+    """Authenticate and prepare Cases for one published session."""
+    client, queue_id, responder_id = _profile_update_client_with_configuration(
+        output_fn
+    )
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        CLIReviewUI(input_fn=input, output_fn=output_fn),
+    )
+    workflow = ProfileUpdateProcessingWorkflow(
+        ProfileUpdateService(client, queue_id, responder_id),
+        ProfileUpdateStagingService(client),
+        processor,
+        output_fn=output_fn,
+    )
+    workflow.prepare(session_id, output_dir)
+    output_fn(f"Prepared staging session: {session_id}")
+    return 0
+
+
+def _run_review_profile_update_session(
+    session_id: str,
+    output_dir: Path,
+    *,
+    input_fn: Callable[[str], str] = input,
+    output_fn: Callable[[str], None] = print,
+) -> int:
+    """Authenticate and resume interactive review for one published session."""
+    client, queue_id, responder_id = _profile_update_client_with_configuration(
+        output_fn
+    )
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        CLIReviewUI(input_fn=input_fn, output_fn=output_fn),
+    )
+    workflow = ProfileUpdateProcessingWorkflow(
+        ProfileUpdateService(client, queue_id, responder_id),
+        ProfileUpdateStagingService(client),
+        processor,
+        output_fn=output_fn,
+    )
+    result = workflow.review(session_id, output_dir)
+    if result.stopped_early:
+        output_fn("Review stopped early at your request.")
+    else:
+        output_fn("Interactive review complete.")
+    output_fn(f"Reviewed staging session: {session_id}")
+    output_fn(f"Audit trail: {result.audit_path}")
+    output_fn(f"Response emails: {result.response_path}")
+    output_fn(f"Review queue: {result.queue_path}")
+    output_fn(f"completed Case batches: {result.completed_batches}")
+    output_fn(f"pending Case batches: {result.pending_batches}")
+    return 0
+
+
+def _profile_update_client(output_fn: Callable[[str], None]) -> SalesforceClient:
+    """Load configuration and authenticate one Profile Update operation."""
+    _load_dotenv(Path(".env"))
+    environment = dict(os.environ)
+    output_fn("Authenticating with Salesforce...")
+    credentials = get_credentials(environment)
+    auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
+    client = SalesforceClient(auth)
+    output_fn("Salesforce authentication complete.")
+    return client
+
+
+def _profile_update_client_with_configuration(
+    output_fn: Callable[[str], None],
+) -> tuple[SalesforceClient, str, str]:
+    """Authenticate and return the Case configuration used by write phases."""
+    _load_dotenv(Path(".env"))
+    environment = dict(os.environ)
+    queue_id, responder_id = get_profile_update_configuration(environment)
+    output_fn("Authenticating with Salesforce...")
+    credentials = get_credentials(environment)
+    auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
+    client = SalesforceClient(auth)
+    output_fn("Salesforce authentication complete.")
+    return client, queue_id, responder_id
 
 
 def _run_rename_profile_update_cases(

@@ -141,7 +141,8 @@ with the target record supplied as `subjectId`.
 `ProfileUpdateStagingService` only reads Salesforce data. The writer publishes
 the resulting rows atomically in a timestamped directory. Rows include
 blocking-safe Case match fields plus Key Update presence and earliest-date
-metadata.
+metadata. Passing `submission_ids` to `stage()` scopes a session refresh to
+those exact captured records; omitting it preserves the legacy all-New query.
 
 ## Contact resolution
 
@@ -184,6 +185,7 @@ test.
         - recompute_manifest
         - transition_item
         - manifest_json
+        - read_review_queue
         - write_review_queue
         - iter_changes
 
@@ -191,7 +193,9 @@ The queue module is read-only during discovery and uses frozen dataclasses for
 its public model. UUID5 IDs and explicit ordering rules make identical input
 serialize to identical JSON bytes. `ReviewQueueStore` atomically replaces the
 published snapshot around transitions and preserves stable outcomes when setup
-refreshes Account or Case references.
+refreshes Account or Case references. `read_review_queue()` performs strict,
+typed schema and field validation. `ReviewQueueStore.resume()` retains
+completed and blocked outcomes while resetting interrupted statuses to pending.
 
 ::: aisc_salesforce.review_ui
     options:
@@ -256,8 +260,27 @@ It contains no Salesforce or audit logic.
     options:
       show_root_heading: true
       members:
+        - ProcessingError
+        - ProcessingResult
+        - StagingSession
+        - ProfileUpdateProcessingWorkflow
+        - publish_staging_session
+        - load_staging_session
         - ChangeProposal
         - ReviewDecision
+
+`ProfileUpdateProcessingWorkflow.stage()`, `.prepare()`, and `.review()` expose
+the three session operations. `run()` composes them in `stage → prepare →
+review` order. `publish_staging_session()` makes the CSV and queue visible with
+one directory rename; `load_staging_session()` accepts only a generated direct
+child ID and checks both artifacts agree before write-capable phases begin.
+During `review`, a captured submission with a blank Account is repaired and
+verified through a scoped refresh before its ID is included in Case
+preparation. The normal staging refresh and interactive review then continue.
+
+`ProfileUpdateService.run(submission_ids=...)` prepares only captured
+submissions with Accounts and does not process audit work. Calling `run()`
+without IDs retains the legacy eligible-audit plus all-New-submission behavior.
         - ActionResult
         - ActionStatus
         - CaseBatch
