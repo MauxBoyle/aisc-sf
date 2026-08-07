@@ -418,6 +418,12 @@ so missing records and ambiguous matches remain visible instead of preventing
 the preflight artifact from being created. Queue snapshots are atomically
 replaced before and after lifecycle transitions and Salesforce mutations.
 
+Every platform flushes staged CSV and review-queue file data with `flush()` and
+`os.fsync()` before publication. POSIX systems also sync the containing
+directories so rename metadata is durable. Windows safely skips directory
+syncing because it does not support opening directories this way; file flushing
+and atomic replacement still occur.
+
 For a New Profile Update with a blank Account, the command looks up Accounts
 using the submitted Profile ID. It presents every match as a structured choice;
 press Enter to use the first Account, enter its displayed number to choose a

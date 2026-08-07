@@ -379,6 +379,31 @@ def test_session_publication_writes_csv_and_queue_under_one_generated_id(tmp_pat
     assert manifest.batches
 
 
+def test_session_publication_syncs_before_and_after_directory_rename(
+    tmp_path, monkeypatch
+):
+    events = []
+    real_replace = profile_update_processing.os.replace
+
+    def recording_sync(path):
+        events.append(("sync", path, path.exists()))
+
+    def recording_replace(source, target):
+        if source.is_dir():
+            events.append(("rename", source, target))
+        real_replace(source, target)
+
+    monkeypatch.setattr(profile_update_processing, "sync_directory", recording_sync)
+    monkeypatch.setattr(profile_update_processing.os, "replace", recording_replace)
+
+    result = publish_staging_session([staged_row()], tmp_path, now=NOW)
+
+    temporary_sync, rename, output_sync = events
+    assert temporary_sync == ("sync", rename[1], True)
+    assert rename == ("rename", rename[1], result.path)
+    assert output_sync == ("sync", tmp_path, True)
+
+
 def test_session_publication_exposes_nothing_when_queue_write_fails(
     tmp_path, monkeypatch
 ):

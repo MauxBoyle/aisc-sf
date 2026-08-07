@@ -206,6 +206,9 @@ htmlcov/
 .env.test
 data/imis
 
+# Windows download metadata accidentally copied as ordinary files on POSIX.
+*:Zone.Identifier
+
 # iMIS CSContactBasic exports and derived files contain personal data.
 imis_contactbasic/
 **/Full_CSContactBasic_*.csv
