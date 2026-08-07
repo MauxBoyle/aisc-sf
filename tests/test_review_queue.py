@@ -320,6 +320,20 @@ def test_json_publish_replaces_atomically_and_store_preserves_queue_path(
     assert store.path == path
 
 
+def test_json_publish_syncs_parent_directory(tmp_path, monkeypatch):
+    synced = []
+    monkeypatch.setattr(
+        "aisc_salesforce.review_queue.sync_directory", synced.append
+    )
+
+    write_review_queue(
+        build_review_queue([queue_row(revised_company_name="New Name")], now=NOW),
+        tmp_path / "review_queue.json",
+    )
+
+    assert synced == [tmp_path]
+
+
 def test_published_queue_round_trips_through_typed_validation(tmp_path):
     manifest = build_review_queue([queue_row(revised_company_name="New Name")], now=NOW)
     path = write_review_queue(manifest, tmp_path / "review_queue.json")

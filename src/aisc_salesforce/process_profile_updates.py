@@ -26,6 +26,7 @@ from .contact_resolution import (
     normalize_email,
     resolve_contact,
 )
+from .filesystem import sync_directory
 from .profile_updates import AutomationCounts, escape_soql_string
 from .queried_fields import (
     ACCOUNT_HISTORY_FIELDS,
@@ -823,17 +824,9 @@ def publish_staging_session(
             build_review_queue(rows, now=timestamp),
             temporary_path / "review_queue.json",
         )
-        directory_fd = os.open(temporary_path, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        sync_directory(temporary_path)
         os.replace(temporary_path, final_path)
-        parent_fd = os.open(output_dir, os.O_RDONLY)
-        try:
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
+        sync_directory(output_dir)
     except Exception:
         shutil.rmtree(temporary_path, ignore_errors=True)
         raise

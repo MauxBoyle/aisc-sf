@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid5
 
+from .filesystem import sync_directory
 from .stage_profile_updates import ROLE_DEFINITIONS
 
 SCHEMA_VERSION = 1
@@ -674,11 +675,7 @@ def write_review_queue(manifest: ReviewQueueManifest, path: Path) -> Path:
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        sync_directory(path.parent)
     finally:
         if temporary.exists():
             temporary.unlink()

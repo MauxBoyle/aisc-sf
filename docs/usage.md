@@ -673,6 +673,12 @@ printed UTC timestamp folder name is the session ID. Same-second collisions use
 the existing `-01`, `-02`, and later suffixes. Publication finishes before any
 Salesforce write, allowing a reviewer or TUI to inspect a stable queue.
 
+File contents are flushed with `flush()` and `os.fsync()` on every supported
+platform before they are published. On POSIX, the temporary and output
+directories are also synced to make the rename metadata durable. Windows skips
+that unsupported directory-handle operation while keeping the file flushes and
+atomic rename.
+
 `prepare SESSION_ID` loads and validates that saved session, then creates or
 reuses Cases only for captured submissions that already have Accounts. It does
 not repair blank Accounts. `review SESSION_ID` loads the saved CSV and queue,

@@ -1,0 +1,22 @@
+name: Windows
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - name: Install locked dependencies
+        run: uv sync --locked
+      - name: Run tests
+        run: uv run --locked pytest
+      - name: Run Ruff
+        run: uv run --locked ruff check src tests
