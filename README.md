@@ -429,9 +429,11 @@ directories being on the same filesystem; POSIX refuses a non-empty destination
 directory and Windows refuses any existing destination.
 
 For a New Profile Update with a blank Account, the command looks up Accounts
-using the submitted Profile ID. It presents every match as a structured choice;
-press Enter to use the first Account, enter its displayed number to choose a
-different match, or enter `P` to look up a different Profile ID. The Account is
+using the submitted Certification ID. If exactly one Account matches, it is
+linked automatically. Ambiguous matches are presented as a structured choice;
+enter the displayed number, or enter `P` to look up a different Certification
+ID. If the submitted ID is missing or has no match, review requests a
+Certification ID specifically to find the Salesforce Account. The Account is
 saved on the Profile Update before Case preparation begins.
 After a scoped Salesforce refresh verifies the repaired submission now has an
 Account, `review` includes that submission in Case preparation before the final

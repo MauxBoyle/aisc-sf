@@ -935,7 +935,10 @@ def _setup_changes(raw: dict[str, str], row: StagedRow) -> list[ProposedChange]:
                     label="Resolve Submission Account",
                     current_value=None,
                     proposed_value=raw.get("certification_id", "").strip() or None,
-                    context="Proposed value is the Profile ID used to choose an Account.",
+                    context=(
+                        "Proposed value is the Certification ID used to find the "
+                        "Salesforce Account."
+                    ),
                     ignore_parent_blockers={"missing_account", "missing_case"},
                 )
             )

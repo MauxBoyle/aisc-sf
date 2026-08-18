@@ -1,5 +1,6 @@
 import csv
 import json
+import re
 from datetime import UTC, datetime
 
 import pytest
@@ -821,8 +822,8 @@ def test_key_update_exactly_seven_days_old_is_not_in_the_priority_group():
 
 
 class AccountResolutionUI:
-    def __init__(self, *, entered_profile_id=""):
-        self.entered_profile_id = entered_profile_id
+    def __init__(self, *, entered_certification_ids=()):
+        self.entered_certification_ids = iter(entered_certification_ids)
         self.events = []
         self.questions = []
 
@@ -832,15 +833,16 @@ class AccountResolutionUI:
     def ask(self, question):
         self.questions.append(question)
         if isinstance(question, FreeTextQuestion):
-            return FreeTextAnswer(self.entered_profile_id)
+            return FreeTextAnswer(next(self.entered_certification_ids))
         if isinstance(question, ChoiceQuestion):
             return ChoiceAnswer(question.choices[0])
         raise AssertionError(type(question))
 
 
 class AccountResolutionClient:
-    def __init__(self, *, profile_id="C-100"):
-        self.profile_id = profile_id
+    def __init__(self, *, certification_id="C-100", accounts_by_certification_id=None):
+        self.certification_id = certification_id
+        self.accounts_by_certification_id = accounts_by_certification_id
         self.queries = []
         self.updated = []
 
@@ -853,20 +855,29 @@ class AccountResolutionClient:
                     "Name": "PU-100",
                     "CreatedDate": "2026-07-15T14:30:00.000+0000",
                     "Account__c": None,
-                    "Certification_ID__c": self.profile_id,
+                    "Certification_ID__c": self.certification_id,
                 }
             ]
         if object_name == "Account":
+            if self.accounts_by_certification_id is not None:
+                certification_ids = re.findall(r"'([^']*)'", where)
+                return [
+                    account
+                    for certification_id in certification_ids
+                    for account in self.accounts_by_certification_id.get(
+                        certification_id, []
+                    )
+                ]
             return [
                 {
                     "Id": "account-1",
                     "Name": "Acme Steel",
-                    "Certification_ID__c": self.profile_id or "C-200",
+                    "Certification_ID__c": self.certification_id or "C-200",
                 },
                 {
                     "Id": "account-2",
                     "Name": "Beta Steel",
-                    "Certification_ID__c": self.profile_id or "C-200",
+                    "Certification_ID__c": self.certification_id or "C-200",
                 },
             ]
         raise AssertionError(object_name)
@@ -875,8 +886,14 @@ class AccountResolutionClient:
         self.updated.append((object_name, record_id, values))
 
 
-def test_missing_submission_account_defaults_to_first_profile_id_match():
-    client = AccountResolutionClient()
+def test_missing_submission_account_unique_certification_id_is_assigned_automatically():
+    client = AccountResolutionClient(
+        accounts_by_certification_id={
+            "C-100": [
+                {"Id": "account-1", "Name": "Acme Steel", "Certification_ID__c": "C-100"}
+            ]
+        }
+    )
     ui = AccountResolutionUI()
     processor = InteractiveProfileUpdateProcessor(client, ui, now=NOW)
 
@@ -893,27 +910,111 @@ def test_missing_submission_account_defaults_to_first_profile_id_match():
     account_query = next(query for query in client.queries if query[0] == "Account")
     assert account_query[2] == "Certification_ID__c = 'C-100'"
     assert account_query[3] == "Name ASC, Id ASC"
-    question = next(
-        question for question in ui.questions if isinstance(question, ChoiceQuestion)
+    assert ui.questions == []
+    assignment = "".join(
+        fragment.value if hasattr(fragment, "value") else fragment.text
+        for fragment in ui.events[0].message
     )
-    assert question.default_key == "1"
-    assert [choice.key for choice in question.choices] == [
-        "1",
-        "2",
-        "different_profile_id",
+    assert assignment == "Assigned Profile Update PU-100 to Acme Steel."
+
+
+def test_multiple_submission_account_matches_offer_numbered_certification_id_choices():
+    client = AccountResolutionClient()
+    ui = AccountResolutionUI()
+    processor = InteractiveProfileUpdateProcessor(client, ui, now=NOW)
+
+    processor.resolve_missing_submission_accounts()
+
+    question = next(question for question in ui.questions if isinstance(question, ChoiceQuestion))
+    assert [choice.key for choice in question.choices] == ["1", "2", "different_certification_id"]
+    assert [choice.label for choice in question.choices[:2]] == [
+        "Acme Steel (Certification ID C-100)",
+        "Beta Steel (Certification ID C-100)",
     ]
 
 
-def test_missing_submission_account_accepts_profile_id_when_form_value_is_blank():
-    client = AccountResolutionClient(profile_id="")
-    ui = AccountResolutionUI(entered_profile_id="C-200")
+def test_submission_account_lookup_zero_pads_certification_id_sections():
+    client = AccountResolutionClient(
+        certification_id="2015-9-11-3893F",
+        accounts_by_certification_id={
+            "2015-09-11-003893F": [
+                {
+                    "Id": "account-1",
+                    "Name": "Acme Steel",
+                    "Certification_ID__c": "2015-09-11-003893F",
+                }
+            ]
+        },
+    )
+    ui = AccountResolutionUI()
+    processor = InteractiveProfileUpdateProcessor(client, ui, now=NOW)
+
+    processor.resolve_missing_submission_accounts()
+
+    account_query = next(query for query in client.queries if query[0] == "Account")
+    assert account_query[2] == (
+        "Certification_ID__c IN ('2015-9-11-3893F', '2015-09-11-003893F')"
+    )
+    assert client.updated[0][2] == {"Account__c": "account-1"}
+    assert ui.questions == []
+
+
+def test_certification_id_lookup_candidates_include_known_o_suffix_replacements():
+    assert profile_update_processing._certification_id_lookup_candidates(
+        "2015-9-11-3893O"
+    ) == (
+        "2015-9-11-3893O",
+        "2015-09-11-003893O",
+        "2015-09-11-003893F",
+        "2015-09-11-003893E",
+        "2015-09-11-003893P",
+    )
+
+
+def test_missing_submission_certification_id_requests_and_validates_certification_id():
+    client = AccountResolutionClient(
+        certification_id="",
+        accounts_by_certification_id={
+            "C-200": [
+                {"Id": "account-2", "Name": "Beta Steel", "Certification_ID__c": "C-200"}
+            ]
+        },
+    )
+    ui = AccountResolutionUI(entered_certification_ids=("", "C-200"))
     processor = InteractiveProfileUpdateProcessor(client, ui, now=NOW)
 
     processor.resolve_missing_submission_accounts()
 
     account_query = next(query for query in client.queries if query[0] == "Account")
     assert account_query[2] == "Certification_ID__c = 'C-200'"
-    assert isinstance(ui.questions[0], FreeTextQuestion)
+    assert len(ui.questions) == 2
+    assert all(isinstance(question, FreeTextQuestion) for question in ui.questions)
+    prompt = "".join(fragment.text for fragment in ui.questions[0].prompt if hasattr(fragment, "text"))
+    assert "Certification ID" in prompt
+    feedback = "".join(fragment.text for fragment in ui.events[0].message if hasattr(fragment, "text"))
+    assert feedback == "Certification ID cannot be blank."
+
+
+def test_unmatched_certification_id_reports_and_allows_retry():
+    client = AccountResolutionClient(
+        certification_id="C-missing",
+        accounts_by_certification_id={
+            "C-missing": [],
+            "C-200": [
+                {"Id": "account-2", "Name": "Beta Steel", "Certification_ID__c": "C-200"}
+            ],
+        },
+    )
+    ui = AccountResolutionUI(entered_certification_ids=("C-200",))
+    processor = InteractiveProfileUpdateProcessor(client, ui, now=NOW)
+
+    processor.resolve_missing_submission_accounts()
+
+    assert client.updated[0][2] == {"Account__c": "account-2"}
+    feedback = "".join(fragment.value if hasattr(fragment, "value") else fragment.text for fragment in ui.events[0].message)
+    assert feedback == "No Account was found for Certification ID C-missing."
+    prompt = "".join(fragment.text for fragment in ui.questions[0].prompt if hasattr(fragment, "text"))
+    assert "to find the Salesforce Account" in prompt
 
 
 def test_blocking_case_match_is_never_guessed():
