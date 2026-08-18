@@ -379,22 +379,45 @@ def test_session_publication_writes_csv_and_queue_under_one_generated_id(tmp_pat
     assert manifest.batches
 
 
+def test_session_publication_retries_when_publication_collides(tmp_path, monkeypatch):
+    real_rename = profile_update_processing.os.rename
+    base_path = tmp_path / "2026-07-17T18-00-00Z"
+
+    def collide_before_first_publication(source, target):
+        if target == base_path and not target.exists():
+            base_path.mkdir()
+            (base_path / "published-by-other-process").write_text("claimed")
+        real_rename(source, target)
+
+    monkeypatch.setattr(
+        profile_update_processing.os, "rename", collide_before_first_publication
+    )
+
+    result = publish_staging_session([staged_row()], tmp_path, now=NOW)
+
+    assert result.session_id == "2026-07-17T18-00-00Z-01"
+    assert (base_path / "published-by-other-process").read_text() == "claimed"
+    assert result.csv_path.is_file()
+    assert result.queue_path.is_file()
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
 def test_session_publication_syncs_before_and_after_directory_rename(
     tmp_path, monkeypatch
 ):
     events = []
-    real_replace = profile_update_processing.os.replace
+    real_rename = profile_update_processing.os.rename
 
     def recording_sync(path):
         events.append(("sync", path, path.exists()))
 
-    def recording_replace(source, target):
+    def recording_rename(source, target):
         if source.is_dir():
             events.append(("rename", source, target))
-        real_replace(source, target)
+        real_rename(source, target)
 
     monkeypatch.setattr(profile_update_processing, "sync_directory", recording_sync)
-    monkeypatch.setattr(profile_update_processing.os, "replace", recording_replace)
+    monkeypatch.setattr(profile_update_processing.os, "rename", recording_rename)
 
     result = publish_staging_session([staged_row()], tmp_path, now=NOW)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import errno
 import json
 import os
 import re
@@ -800,44 +801,60 @@ def publish_staging_session(
     warning_count: int = 0,
     now: datetime | None = None,
 ) -> StagingSession:
-    """Publish the CSV and queue together using one final directory rename."""
+    """Publish a complete session with an atomically claimed ID.
+
+    On POSIX, ``os.rename`` atomically publishes a directory and refuses to
+    replace a non-empty destination. On Windows, it refuses every existing
+    destination. Published sessions are non-empty, so a collision can safely
+    retry the next suffix. The temporary and output directories must share a
+    filesystem.
+    """
     timestamp = _aware_datetime(now or datetime.now(UTC)).astimezone(UTC)
     base_session_id = timestamp.strftime("%Y-%m-%dT%H-%M-%SZ")
     output_dir.mkdir(parents=True, exist_ok=True)
-    final_path = output_dir / base_session_id
-    suffix = 1
-    while final_path.exists():
-        final_path = output_dir / f"{base_session_id}-{suffix:02d}"
-        suffix += 1
-    session_id = final_path.name
-    temporary_path = output_dir / f".{session_id}-{uuid4().hex}.tmp"
-    try:
-        temporary_path.mkdir()
-        csv_path = temporary_path / "profile_updates.csv"
-        with csv_path.open("w", newline="", encoding="utf-8") as output:
-            writer = csv.DictWriter(output, fieldnames=CSV_COLUMNS)
-            writer.writeheader()
-            writer.writerows(rows)
-            output.flush()
-            os.fsync(output.fileno())
-        write_review_queue(
-            build_review_queue(rows, now=timestamp),
-            temporary_path / "review_queue.json",
+    suffix = 0
+    while True:
+        session_id = (
+            base_session_id if suffix == 0 else f"{base_session_id}-{suffix:02d}"
         )
-        sync_directory(temporary_path)
-        os.replace(temporary_path, final_path)
+        final_path = output_dir / session_id
+        temporary_path = output_dir / f".{session_id}-{uuid4().hex}.tmp"
+        try:
+            temporary_path.mkdir()
+            csv_path = temporary_path / "profile_updates.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as output:
+                writer = csv.DictWriter(output, fieldnames=CSV_COLUMNS)
+                writer.writeheader()
+                writer.writerows(rows)
+                output.flush()
+                os.fsync(output.fileno())
+            write_review_queue(
+                build_review_queue(rows, now=timestamp),
+                temporary_path / "review_queue.json",
+            )
+            sync_directory(temporary_path)
+        except Exception:
+            shutil.rmtree(temporary_path, ignore_errors=True)
+            raise
+
+        try:
+            os.rename(temporary_path, final_path)
+        except OSError as error:
+            shutil.rmtree(temporary_path, ignore_errors=True)
+            if error.errno in {errno.EEXIST, errno.ENOTEMPTY}:
+                suffix += 1
+                continue
+            raise
+
         sync_directory(output_dir)
-    except Exception:
-        shutil.rmtree(temporary_path, ignore_errors=True)
-        raise
-    return StagingSession(
-        session_id=session_id,
-        path=final_path,
-        csv_path=final_path / "profile_updates.csv",
-        queue_path=final_path / "review_queue.json",
-        row_count=len(rows),
-        warning_count=warning_count,
-    )
+        return StagingSession(
+            session_id=session_id,
+            path=final_path,
+            csv_path=final_path / "profile_updates.csv",
+            queue_path=final_path / "review_queue.json",
+            row_count=len(rows),
+            warning_count=warning_count,
+        )
 
 
 def load_staging_session(
