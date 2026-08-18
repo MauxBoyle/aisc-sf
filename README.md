@@ -406,7 +406,9 @@ uv run aisc_salesforce process-profile-updates \
 ```
 
 `stage` prints the generated session ID and both artifact paths. If two stages
-start in the same UTC second, later IDs use `-01`, `-02`, and so on. `prepare`
+start in the same UTC second, the final atomic rename claims each ID; a
+collision retries with `-01`, `-02`, and so on without replacing an existing
+published session. `prepare`
 and `review` accept only that exact folder name as a direct child of
 `--output-dir`; absolute paths, separators, `..`, symlinks, missing files,
 unsupported queue schemas, malformed CSV data, and CSV/queue submission-ID
@@ -422,7 +424,9 @@ Every platform flushes staged CSV and review-queue file data with `flush()` and
 `os.fsync()` before publication. POSIX systems also sync the containing
 directories so rename metadata is durable. Windows safely skips directory
 syncing because it does not support opening directories this way; file flushing
-and atomic replacement still occur.
+and atomic publication still occur. This relies on the temporary and output
+directories being on the same filesystem; POSIX refuses a non-empty destination
+directory and Windows refuses any existing destination.
 
 For a New Profile Update with a blank Account, the command looks up Accounts
 using the submitted Profile ID. It presents every match as a structured choice;
