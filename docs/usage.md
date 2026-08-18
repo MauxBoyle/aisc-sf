@@ -697,11 +697,13 @@ artifacts, malformed CSVs, unsupported queue schemas, and mismatched CSV/queue
 submission IDs fail before writes.
 
 For blank Submission Accounts, review looks up Accounts using the submitted
-Profile ID and presents typed choices. Press Enter for the first Account, enter
-another displayed number, or enter `P` for a different Profile ID. Setup
-outcomes and source-submission references survive the following refresh. A
-required setup failure marks the affected queue item `failed` and stops before
-change review.
+Certification ID. One matching Account is linked automatically. Multiple
+matches present typed choices with the Account Name and Certification ID; enter
+the displayed number, or enter `P` for a different Certification ID. When the
+submitted ID is missing or has no match, review requests a Certification ID to
+find the Salesforce Account. Setup outcomes and source-submission references
+survive the following refresh. A required setup failure marks the affected queue
+item `failed` and stops before change review.
 
 Sessions are safely resumable. Completed and blocked work stays durable;
 interrupted, failed, `in_progress`, and `stopped_early` work resets to pending

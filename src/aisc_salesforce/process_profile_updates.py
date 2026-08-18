@@ -1408,8 +1408,8 @@ class InteractiveProfileUpdateProcessor:
         for submission in submissions:
             submission_id = _required_record_text(submission, "Id", "Profile Update ID")
             submission_name = _display(submission.get("Name") or submission_id)
-            profile_id = _display(submission.get("Certification_ID__c")).strip()
-            account = self._choose_submission_account(submission_name, profile_id)
+            certification_id = _display(submission.get("Certification_ID__c")).strip()
+            account = self._choose_submission_account(submission_name, certification_id)
             account_id = _required_record_text(account, "Id", "Account ID")
             self._update_record(
                 "Company_Profile_Change__c",
@@ -1431,30 +1431,43 @@ class InteractiveProfileUpdateProcessor:
         return repaired
 
     def _choose_submission_account(
-        self, submission_name: str, profile_id: str
+        self, submission_name: str, certification_id: str
     ) -> dict[str, Any]:
-        """Choose an Account, defaulting to the first Profile ID match."""
+        """Find an Account by Certification ID, asking only when needed."""
         while True:
-            if not profile_id:
-                profile_id = self._ask_free_text(
+            if not certification_id:
+                certification_id = self._ask_free_text(
                     FreeTextQuestion(
                         styled(
                             "Profile Update ",
                             ValueFragment(submission_name),
-                            " has no Submission Account. Enter its Profile ID: ",
+                            " has no Submission Account. Enter its Certification ID to "
+                            "find the Salesforce Account: ",
                         )
                     )
                 ).strip()
-                if not profile_id:
+                if not certification_id:
                     self._display_event(
-                        ValidationFeedback(styled("Profile ID cannot be blank."))
+                        ValidationFeedback(styled("Certification ID cannot be blank."))
                     )
                     continue
+
+            lookup_ids = _certification_id_lookup_candidates(certification_id)
+            if len(lookup_ids) == 1:
+                account_where = (
+                    "Certification_ID__c = "
+                    f"'{escape_soql_string(lookup_ids[0])}'"
+                )
+            else:
+                quoted_lookup_ids = ", ".join(
+                    f"'{escape_soql_string(lookup_id)}'" for lookup_id in lookup_ids
+                )
+                account_where = f"Certification_ID__c IN ({quoted_lookup_ids})"
 
             accounts = self.client.query_records(
                 "Account",
                 ["Id", "Name", "Certification_ID__c"],
-                where=(f"Certification_ID__c = '{escape_soql_string(profile_id)}'"),
+                where=account_where,
                 order_by="Name ASC, Id ASC",
             )
             accounts = [account for account in accounts if _display(account.get("Id"))]
@@ -1462,14 +1475,17 @@ class InteractiveProfileUpdateProcessor:
                 self._display_event(
                     ValidationFeedback(
                         styled(
-                            "No Account was found for Profile ID ",
-                            ValueFragment(profile_id),
+                            "No Account was found for Certification ID ",
+                            ValueFragment(certification_id),
                             ".",
                         )
                     )
                 )
-                profile_id = ""
+                certification_id = ""
                 continue
+
+            if len(accounts) == 1:
+                return accounts[0]
 
             choices = tuple(
                 ReviewChoice(
@@ -1479,8 +1495,8 @@ class InteractiveProfileUpdateProcessor:
                 for index, account in enumerate(accounts, start=1)
             ) + (
                 ReviewChoice(
-                    "different_profile_id",
-                    "Use a different Profile ID",
+                    "different_certification_id",
+                    "Use a different Certification ID",
                     ("p",),
                 ),
             )
@@ -1490,7 +1506,7 @@ class InteractiveProfileUpdateProcessor:
                 ":\n",
             ]
             for choice in choices:
-                marker = "P" if choice.key == "different_profile_id" else choice.key
+                marker = "P" if choice.key == "different_certification_id" else choice.key
                 prompt_fragments.extend(
                     (f"{marker}. ", ValueFragment(choice.label), "\n")
                 )
@@ -1499,12 +1515,14 @@ class InteractiveProfileUpdateProcessor:
                 ChoiceQuestion(
                     styled(*prompt_fragments),
                     choices,
-                    styled("Enter an Account number or P for a different Profile ID."),
+                    styled(
+                        "Enter an Account number or P for a different Certification ID."
+                    ),
                     default_key="1",
                 )
             )
-            if selected == "different_profile_id":
-                profile_id = ""
+            if selected == "different_certification_id":
+                certification_id = ""
                 continue
             return accounts[int(selected) - 1]
 
@@ -4452,8 +4470,24 @@ def _section_heading(title: str, separator: str = STAGE_SEPARATOR) -> str:
 def _account_choice_label(account: dict[str, Any]) -> str:
     """Return the identifying Account text shown in a selection control."""
     name = _display(account.get("Name")) or "(name unavailable)"
-    profile_id = _display(account.get("Certification_ID__c")) or "(blank)"
-    return f"{name} (Profile ID {profile_id})"
+    certification_id = _display(account.get("Certification_ID__c")) or "(blank)"
+    return f"{name} (Certification ID {certification_id})"
+
+
+def _certification_id_lookup_candidates(certification_id: str) -> tuple[str, ...]:
+    """Return exact and known equivalent Certification IDs for Account lookup."""
+    match = re.fullmatch(r"(\d{1,4})-(\d{1,2})-(\d{1,2})-(\d{1,6})([A-Za-z])", certification_id)
+    if match is None:
+        return (certification_id,)
+
+    year, month, day, sequence, suffix = match.groups()
+    normalized = (
+        f"{year.zfill(4)}-{month.zfill(2)}-{day.zfill(2)}-{sequence.zfill(6)}"
+    )
+    candidates = [certification_id, f"{normalized}{suffix.upper()}"]
+    if suffix.upper() == "O":
+        candidates.extend(f"{normalized}{replacement}" for replacement in ("F", "E", "P"))
+    return tuple(dict.fromkeys(candidates))
 
 
 def _contact_name_email(contact: dict[str, Any] | None) -> str:
