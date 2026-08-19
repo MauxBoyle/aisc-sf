@@ -319,6 +319,14 @@ class _RoleResponse:
     changed: bool
 
 
+@dataclass(frozen=True)
+class _RoleContactSnapshot:
+    """One Account role and Contact copied before the batch starts writing."""
+
+    contact_id: str
+    contact: dict[str, Any] | None
+
+
 @dataclass
 class _ResolvedContact:
     """The runtime outcome for one batch-wide email resolution."""
@@ -1691,6 +1699,10 @@ class InteractiveProfileUpdateProcessor:
         for row in batch.rows:
             self._checkpoint_row(row)
 
+        role_contact_snapshots = self._capture_role_contact_snapshots(
+            routing.target_accounts
+        )
+
         self._update_status_with_audit(
             batch,
             batch.case_id,
@@ -1777,6 +1789,7 @@ class InteractiveProfileUpdateProcessor:
                     target_account_id=target_account_id,
                     target_account_name=target_account_name,
                     parent_routed=routing.is_parent,
+                    role_contact_snapshots=role_contact_snapshots,
                 )
                 results.extend(reviewed)
                 if target_index == 0:
@@ -2884,6 +2897,7 @@ class InteractiveProfileUpdateProcessor:
         target_account_id: str,
         target_account_name: str,
         parent_routed: bool,
+        role_contact_snapshots: dict[tuple[str, str], _RoleContactSnapshot],
     ) -> tuple[list[ActionResult], list[_RoleResponse]]:
         """Link roles using the preserved source mapping; never mutate Contacts."""
         results: list[ActionResult] = []
@@ -2893,9 +2907,8 @@ class InteractiveProfileUpdateProcessor:
             submitted = _submitted_role_values(submissions, row, role)
             if not any(submitted.values()):
                 continue
-            original_id, original_contact = self._fresh_role_contact(
-                target_account_id, role.account_lookup
-            )
+            original = role_contact_snapshots[(target_account_id, role.prefix)]
+            original_contact = original.contact
             item: _ContactWorkItem | None = None
             for submission in reversed(submissions):
                 if not any(
@@ -2949,11 +2962,7 @@ class InteractiveProfileUpdateProcessor:
                 proposed_display=_contact_name_email(final_contact),
             )
             results.append(result)
-            previous_contact = (
-                item.original_contact
-                if original_id == item.contact_id and item.original_contact
-                else original_contact
-            )
+            previous_contact = original_contact
             contact_changed = item.result is not None and item.result.status in {
                 ActionStatus.APPLIED,
                 ActionStatus.VERIFIED_MANUAL,
@@ -3458,25 +3467,33 @@ class InteractiveProfileUpdateProcessor:
             results.append(self._review_proposal(proposal))
         return results
 
-    def _fresh_role_contact(
+    def _capture_role_contact_snapshots(
         self,
-        account_id: str,
-        account_lookup: str,
-    ) -> tuple[str, dict[str, Any] | None]:
-        account = self.client.get_record(
-            "Account",
-            account_id,
-            ["Id", account_lookup],
-        )
-        contact_id = _display(account.get(account_lookup))
-        if not contact_id:
-            return "", None
-        contact = self.client.get_record(
-            "Contact",
-            contact_id,
-            CONTACT_REVIEW_FIELDS,
-        )
-        return contact_id, contact
+        target_accounts: tuple[dict[str, Any], ...],
+    ) -> dict[tuple[str, str], _RoleContactSnapshot]:
+        """Copy every target Account's role Contacts before the first write."""
+        snapshots: dict[tuple[str, str], _RoleContactSnapshot] = {}
+        contacts_by_id: dict[str, dict[str, Any]] = {}
+        for account in target_accounts:
+            account_id = _required_record_text(account, "Id", "Affected Account ID")
+            for role in ROLE_DEFINITIONS:
+                contact_id = _display(account.get(role.account_lookup))
+                contact = None
+                if contact_id:
+                    if contact_id not in contacts_by_id:
+                        contacts_by_id[contact_id] = dict(
+                            self.client.get_record(
+                                "Contact",
+                                contact_id,
+                                CONTACT_REVIEW_FIELDS,
+                            )
+                        )
+                    contact = dict(contacts_by_id[contact_id])
+                snapshots[(account_id, role.prefix)] = _RoleContactSnapshot(
+                    contact_id,
+                    contact,
+                )
+        return snapshots
 
     def _build_role_response(
         self,
