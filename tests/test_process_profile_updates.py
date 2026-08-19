@@ -3446,6 +3446,238 @@ def test_role_response_is_consolidated_and_marks_unchanged_roles(tmp_path):
     assert "Cert_Certification_Contact__c" not in response
 
 
+def test_role_response_uses_contact_details_from_start_of_batch(tmp_path):
+    mike = {
+        "Id": "contact-mike",
+        "AccountId": "account-1",
+        "FirstName": "Mike",
+        "LastName": "Miller",
+        "Title": "Certification Manager",
+        "Email": "mike@example.com",
+        "Phone": "555-555-5555",
+    }
+    mary = {
+        "Id": "contact-mary",
+        "AccountId": "account-1",
+        "FirstName": "Mary",
+        "LastName": "Martin",
+        "Title": "Quality Director",
+        "Email": "mary@example.com",
+        "Phone": "312.555.0100",
+    }
+    client = FakeClient(
+        account=account_record(Cert_Certification_Contact__c="contact-mike"),
+        contacts=[mike, mary],
+    )
+    client.records[("Company_Profile_Change__c", "submission-1")].update(
+        {
+            "Cert_Email__c": "mike@example.com",
+            "Cert_Phone__c": "222.222.2222",
+        }
+    )
+    client.records[("Company_Profile_Change__c", "submission-2")] = source_record(
+        Id="submission-2",
+        Name="PU-101",
+        CreatedDate="2026-07-15T15:30:00.000+0000",
+        Cert_First_Name__c="Mary",
+        Cert_Last_Name__c="Martin",
+        Cert_Title__c="Quality Director",
+        Cert_Email__c="mary@example.com",
+        Cert_Phone__c="312.555.0100",
+    )
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["apply automatically", "apply automatically", "yes"]),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    result = processor.review(
+        [
+            staged_row(
+                source_submission_ids=json.dumps(["submission-1", "submission-2"]),
+                source_submission_names=json.dumps(["PU-100", "PU-101"]),
+                latest_submission_date="2026-07-15T15:30:00.000+0000",
+                certification_first_name="Mary",
+                certification_last_name="Martin",
+                certification_title="Quality Director",
+                certification_email="mary@example.com",
+                certification_phone="312.555.0100",
+            )
+        ],
+        tmp_path,
+    )
+
+    assert ("Contact", "contact-mike", {"Phone": "222.222.2222"}) in client.updated
+    assert (
+        "Account",
+        "account-1",
+        {"Cert_Certification_Contact__c": "contact-mary"},
+    ) in client.updated
+    response = result.response_path.read_text(encoding="utf-8")
+    assert (
+        "Certification Contact: Mary Martin, Quality Director, "
+        "mary@example.com, 312.555.0100"
+    ) in response
+    assert (
+        "Replaces Mike Miller, Certification Manager, "
+        "mike@example.com, 555-555-5555"
+    ) in response
+    assert (
+        "Replaces Mike Miller, Certification Manager, "
+        "mike@example.com, 222.222.2222"
+    ) not in response
+    persisted_artifacts = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (result.queue_path, result.audit_path)
+    )
+    assert "role_contact_snapshot" not in persisted_artifacts
+    assert all("snapshot" not in column.casefold() for column in CSV_COLUMNS)
+    salesforce_values = [
+        values
+        for _, _, values in client.updated
+    ] + [values for _, values in client.created]
+    assert all(
+        "snapshot" not in field_name.casefold()
+        for values in salesforce_values
+        for field_name in values
+    )
+
+
+def test_role_contact_snapshot_reads_happen_before_first_batch_write(tmp_path):
+    operations = []
+
+    class OrderingClient(FakeClient):
+        def get_record(self, object_name, record_id, fields):
+            operations.append(("read", object_name, record_id))
+            return super().get_record(object_name, record_id, fields)
+
+        def update_record(self, object_name, record_id, values):
+            operations.append(("write", object_name, record_id))
+            return super().update_record(object_name, record_id, values)
+
+        def create_record(self, object_name, values):
+            operations.append(("write", object_name, "(new)"))
+            return super().create_record(object_name, values)
+
+    role_contact_ids = (
+        "cert-contact",
+        "principal-contact",
+        "accounting-contact",
+        "quality-contact",
+        "new-york-contact",
+    )
+    client = OrderingClient(
+        account=account_record(
+            Cert_Certification_Contact__c=role_contact_ids[0],
+            Cert_Principal_Contact__c=role_contact_ids[1],
+            Cert_Accounting_Contact__c=role_contact_ids[2],
+            Cert_Marketing_Contact__c=role_contact_ids[3],
+            Cert_Safety_Contact__c=role_contact_ids[4],
+        ),
+        contacts=[
+            {
+                "Id": contact_id,
+                "AccountId": "account-1",
+                "FirstName": "Role",
+                "LastName": "Contact",
+                "Title": "Manager",
+                "Email": f"{contact_id}@example.com",
+                "Phone": "312.555.0100",
+            }
+            for contact_id in role_contact_ids
+        ],
+    )
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["yes"]),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    processor.review([staged_row()], tmp_path)
+
+    first_write = next(
+        index for index, operation in enumerate(operations) if operation[0] == "write"
+    )
+    snapshot_reads = [
+        operations.index(("read", "Contact", contact_id))
+        for contact_id in role_contact_ids
+    ]
+    assert max(snapshot_reads) < first_write
+
+
+def test_parent_role_response_uses_target_accounts_original_contact(tmp_path):
+    child = account_record(
+        Id="child-1",
+        Name="Acme Chicago",
+        ParentId="account-1",
+        Cert_Certification_Status__c="Certified",
+        Cert_Certification_Contact__c="child-mike",
+    )
+    child_mike = {
+        "Id": "child-mike",
+        "AccountId": "child-1",
+        "FirstName": "Mike",
+        "LastName": "Child",
+        "Title": "Certification Manager",
+        "Email": "mike.child@example.com",
+        "Phone": "555-555-5555",
+    }
+    mary = {
+        "Id": "contact-mary",
+        "AccountId": "account-1",
+        "FirstName": "Mary",
+        "LastName": "Martin",
+        "Title": "Quality Director",
+        "Email": "mary@example.com",
+        "Phone": "312.555.0100",
+    }
+    client = FakeClient(
+        source=source_record(
+            Cert_First_Name__c="Mary",
+            Cert_Last_Name__c="Martin",
+            Cert_Title__c="Quality Director",
+            Cert_Email__c="mary@example.com",
+            Cert_Phone__c="312.555.0100",
+        ),
+        children=[child],
+        contacts=[child_mike, mary],
+    )
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["apply automatically", "yes"]),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    result = processor.review(
+        [
+            staged_row(
+                is_parent_account="true",
+                certification_first_name="Mary",
+                certification_last_name="Martin",
+                certification_title="Quality Director",
+                certification_email="mary@example.com",
+                certification_phone="312.555.0100",
+            )
+        ],
+        tmp_path,
+    )
+
+    assert (
+        "Account",
+        "child-1",
+        {"Cert_Certification_Contact__c": "contact-mary"},
+    ) in client.updated
+    response = result.response_path.read_text(encoding="utf-8")
+    assert (
+        "Replaces Mike Child, Certification Manager, "
+        "mike.child@example.com, 555-555-5555"
+    ) in response
+    assert "Replaces Old Contact" not in response
+
+
 def test_email_formatter_creates_one_paragraph_per_submitter():
     first = ChangeProposal(
         source_submission_ids=("one",),

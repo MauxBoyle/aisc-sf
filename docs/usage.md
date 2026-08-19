@@ -975,8 +975,15 @@ in response text using `ITEM: NEW INFORMATION` followed by
 `Replaces OLD INFORMATION`. Each submitted Contact role is instead summarized
 as one line containing its name, title, email, and phone. A role that required
 no change ends with `- no change`. A following `Replaces OLD INFORMATION` line
-is included only when prior role information was actually replaced. The
-Account paragraph begins:
+is included only when prior role information was actually replaced. The prior
+role Contact's name, title, email, and phone are copied into memory at the
+beginning of the Case batch, after routing and row checkpoints but before the
+first Salesforce write. Response-email replacement details therefore remain
+the values from the beginning of the batch even if that Contact is updated
+earlier in the same batch. Parent-routed Accounts each use their own role
+Contact snapshot. These temporary snapshots do not survive a process restart
+and are not written to staging CSVs, review queues, audit events, or Salesforce.
+The Account paragraph begins:
 
 > Thank you for updating your information with AISC. The changes are summarized
 > below. An updated Participant Portal login will be sent by a separate email,
