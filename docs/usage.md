@@ -501,7 +501,7 @@ Contact roles. It does this before role resolution, CSV projection, and
 - Submitter names, role first and last names, and role titles are trimmed and
   changed to Proper Case. Punctuation is preserved.
 - Case-insensitive whole-token exceptions preserve these spellings: `CEO`,
-  `CFO`, `COO`, `CTO`, `VP`, `HR`, `QA`, `QC`, `QMS`, `IT`, `ISO`, `AWS`,
+  `CFO`, `COO`, `CTO`, `VP`, `HR`, `QA`, `QC`, `QMS`, `AISC`, `IT`, `ISO`, `AWS`,
   `API`, `AI`, `PhD`, `MBA`, `iOS`, `macOS`, `McDonald`, `MacKenzie`, and
   `O'Connor`.
 - A recognizable ten-digit North American phone, optionally prefixed by `1` or
@@ -853,7 +853,7 @@ checkpoint. For a real change, choose an explicit decision:
 | Shortcut | Complete phrase | Result |
 |---|---|---|
 | `A` | `apply automatically` | Update Salesforce with the proposed value |
-| `M` | `make manually` | Pause, refetch, and verify the reviewer’s Salesforce change |
+| `M` | `make manually` | Defer the field, then refetch and verify it during manual follow-up |
 | `N` | `will not be made` | Record the rejection without a Salesforce data change |
 
 Decision shortcuts and complete phrases are case-insensitive. The JSON Lines
@@ -866,8 +866,9 @@ All row checkpoints are shown before the first Salesforce write. Processing
 then prints and completes these ordered phases:
 
 1. `Contact Updates`
-2. `Account Updates`
-3. `Role Links`
+2. `Manual Contact Follow-up`
+3. `Account Updates`
+4. `Role Links`
 
 ### Contact Updates
 
@@ -906,29 +907,49 @@ identity and field-conflict choices finish before any Contact is written.
 
 A final heading identifies each Contact by person and email, independent of
 role. Its table shows `Field`, `Current Salesforce`, `Reconciled`, and
-`Sources`. The decision summary displays readable lines instead of a Python
-dictionary:
+`Sources`. The processor then presents First Name, Last Name, Title, Email, and
+Phone as independent decisions. An already-current submitted field is an
+audited no-op and does not prompt. A changed field displays a readable scalar
+comparison:
 
 ```text
-Salesforce changes:
-Title: Old Title -> Owner
-Phone: 312.555.0101 -> 312.555.0199
+Contact Title: Alex Smith <alex@example.com>
+Current Salesforce value: Old Title
+Proposed value: Owner
 ```
 
-A new Contact similarly appears under `New Salesforce values`, with one
-labeled field per line. The reviewer then makes one `A`, `M`, or `N` decision
-for the complete Contact:
+A reviewer can therefore approve, defer, or reject different fields on the same
+Contact:
 
-- `A` updates all changed fields in one `update_record` call, or creates a
-  shared new Contact once.
-- `M` pauses for a manual change and verifies all reconciled fields together.
-- `N` leaves the Contact unchanged.
+- `A` adds that field to one grouped automatic Contact payload.
+- `M` omits that field from the automatic payload and defers it to manual
+  follow-up.
+- `N` omits that field from writes and records the rejection.
 
-Thus each resolved Contact has at most one automated Contact create or update
-call in a run. A Contact already matching every reconciled value is an audited
-no-op without a decision prompt. If a new submitter Contact is created, its ID
-is assigned to `Case.ContactId`; matching an existing submitter alone does not
-change that Case lookup.
+All decisions are collected before the first Contact write. Approved fields are
+then combined, so each resolved Contact has at most one automatic create or
+update call in a run. Rejected and manual fields are absent from that payload.
+A new Contact requires an approved Last Name for automatic creation. If Last
+Name is manual, the reviewer uses the manual-creation path and the processor
+verifies the other approved values; if safe creation is impossible, processing
+fails without creating a partial Contact. If every new-Contact field is
+rejected, no Contact or role link is created. When a new submitter Contact is
+created, its ID is assigned to `Case.ContactId`; matching an existing submitter
+alone does not change that Case lookup.
+
+After every automatic Contact has finished, a visibly separated `Manual Contact
+Follow-up` heading reminds the reviewer that external Salesforce edits begin.
+Manual fields are processed one at a time. After each acknowledgement, the
+processor refetches that field. A matching value is verified immediately. When
+Salesforce contains a different value, the processor displays both the
+submitted proposal and fresh Salesforce value, then asks whether the Salesforce
+value should be accepted. Enter defaults to `yes`; acceptance makes the fresh
+Salesforce value authoritative. Declining records a failed verification, keeps
+the Case and source submissions open, and leaves the batch retryable. An
+interruption or Salesforce read failure has the same safe open-batch behavior.
+Every completed Contact is refreshed again before role-link decisions and
+response generation, so downstream names, titles, emails, and phones reflect
+the actual final Salesforce record.
 
 ### Account Updates and Role Links
 
@@ -1034,19 +1055,24 @@ records are closed and the Case stays `Pending`.
 Contact audit objects include classification, comparison key, candidates,
 selected Contact, reason, confidence, and warnings. Every field-conflict
 selection is an explicit event that records the candidate values and their
-sources. A single aggregate Contact create/update event records the final field
-dictionary and every source submission ID for that Contact. The dictionary is
-kept in JSON for machine-readable auditing; the interactive comparison uses the
-readable field lines shown above. Operator identity selections, duplicate
-recovery, ignored entries, Case Contact assignment, and later Account-role
-assignments are separate, immediately flushed events.
+sources. The final Contact outcome is stored per Salesforce field, even though
+approved fields share one automatic write. Each field result records its full
+decision phrase, submitted `proposed_value`, and authoritative `final_value`.
+For ordinary applied, rejected, and no-op results this remains backward
+compatible with the proposal or original value; for an accepted manual
+override, `final_value` preserves the fresh Salesforce value separately from
+the submission. Contact queue entries transition independently while queue
+schema version `1` and its stable field IDs remain unchanged. Operator identity
+selections, duplicate recovery, ignored entries, Case Contact assignment, and
+later Account-role assignments are separate, immediately flushed events.
 
-On interruption, an unrelated Salesforce failure, or a manual value that does not verify,
-the audit is flushed, unfinalized source Profile Updates stay open, the Case is
-kept Pending, and the command exits nonzero. Retry with `review SESSION_ID` to
-reload the saved artifacts and refresh only the captured records. Values
-applied before the interruption are fetched again and recorded as no-ops, so
-they are not applied or emailed twice.
+On interruption, an unrelated Salesforce failure, a failed manual read, or a
+differing manual value that the reviewer declines, the audit is flushed,
+unfinalized source Profile Updates stay open, the Case is kept Pending, and the
+command exits nonzero. Retry with `review SESSION_ID` to reload the saved
+artifacts and refresh only the captured records. Values applied before the
+interruption are fetched again and recorded as no-ops, so they are not applied
+or emailed twice.
 
 `Q` or `Quit` is different from an error or keyboard interruption. It writes a
 `stopped early` audit event, keeps the current Case Pending, leaves that Case's

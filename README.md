@@ -535,16 +535,16 @@ files fail validation.
 Each real field change accepts a shortcut or its complete decision phrase:
 
 - `A` or `apply automatically` writes the displayed value to Salesforce.
-- `M` or `make manually` pauses for the reviewer to make the change, then refetches
-  Salesforce and continues only if the value matches.
+- `M` or `make manually` defers the field to the manual follow-up section, then
+  refetches Salesforce to verify the result.
 - `N` or `will not be made` records the rejection without changing Salesforce.
 
 Shortcuts and phrases are case-insensitive. Audit entries always store the
 complete phrase.
 
 All staged-row checkpoints are completed before Salesforce changes begin. The
-review then prints three explicit sections in order: `Contact Updates`,
-`Account Updates`, and `Role Links`.
+review then prints four explicit sections in order: `Contact Updates`, `Manual
+Contact Follow-up`, `Account Updates`, and `Role Links`.
 
 The Contact section reloads every source Profile Update from Salesforce and
 collects only nonblank Contact values that were explicitly submitted for the
@@ -574,21 +574,25 @@ is resolved before the first Contact write.
 
 After reconciliation, the heading identifies the person and email rather than
 leading with a role. One Contact-level table shows each current value,
-reconciled value, and source. The final comparison uses readable field lines
-instead of printing a Python dictionary. For example:
+reconciled value, and source. Each changed First Name, Last Name, Title, Email,
+and Phone field then receives its own `A`, `M`, or `N` decision. Already-current
+fields are audited no-ops and do not prompt.
 
 ```text
-Salesforce changes:
-Title: Old Title -> Owner
-Phone: 312.555.0101 -> 312.555.0199
+Contact Title: Alex Smith <alex@example.com>
+Current Salesforce value: Old Title
+Proposed value: Owner
 ```
 
-One `A`, `M`, or `N` decision applies to the complete Contact. An automatic
-decision makes at most one Contact `update_record` call, or creates a shared
-new Contact once. A manual decision verifies all proposed fields together. A
-rejected Contact is unchanged. Source-to-Contact mappings are preserved after
-creation and email changes, so the final role section can reuse the same
-resolved Contact safely.
+Approved fields are grouped into at most one automatic Contact update or create;
+rejected and manual fields are omitted from that payload. A new Contact requires
+an approved Last Name for automatic creation. After all automatic Contact work
+finishes, `Manual Contact Follow-up` processes manual fields one at a time. If a
+fresh Salesforce value differs from the submission, the reviewer sees both
+values and may accept Salesforce's value; Enter defaults to `yes`. Declining
+fails verification, leaves the Case and submissions open, and permits a later
+retry. Source-to-Contact mappings are preserved so role links and response text
+use a final refreshed Contact.
 
 Non-role Account changes run after every Contact is complete. The `Role Links`
 section runs last and may update only Account lookup fields; it never creates
@@ -644,12 +648,11 @@ is the first unblocked pending change and becomes `null` when none remains.
 The JSON Lines audit is flushed after every decision and Salesforce result.
 Contact events include classification, comparison key, candidates, selected
 Contact, reason, confidence, and warnings. Each conflict choice is an explicit
-event containing its candidate values and sources. Each reconciled Contact has
-one aggregate create/update event containing the final field dictionary and
-all source submission IDs. This structured dictionary remains in the JSON audit
-for machine-readable traceability, but it is not printed as the reviewer-facing
-comparison. Operator identity selections, duplicate recovery, ignored entries,
-Case Contact assignment, and role assignments remain separate events.
+event containing its candidate values and sources. Each Contact field has its
+own result with the submitted `proposed_value` and authoritative `final_value`.
+Those values differ when the reviewer accepts a manual Salesforce override.
+Operator identity selections, duplicate recovery, ignored entries, Case Contact
+assignment, and role assignments remain separate events.
 The response file contains one generated paragraph per submitter email.
 Account-information changes keep the `ITEM: NEW INFORMATION` and
 `Replaces OLD INFORMATION` format. Each submitted Contact role is consolidated
