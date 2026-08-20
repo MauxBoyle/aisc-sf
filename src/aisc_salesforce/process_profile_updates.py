@@ -201,6 +201,9 @@ class ActionStatus(StrEnum):
     DEFERRED_MANUAL = "deferred manual follow-up"
 
 
+_FINAL_VALUE_UNSET = object()
+
+
 @dataclass(frozen=True)
 class ChangeProposal:
     """One proposed field or record change shown to the reviewer."""
@@ -238,6 +241,7 @@ class ActionResult:
     error: str = ""
     error_code: str = ""
     salesforce_message: str = ""
+    final_value: Any = _FINAL_VALUE_UNSET
 
 
 @dataclass
@@ -354,8 +358,9 @@ class _ContactWorkItem:
     current_contact: dict[str, Any] | None = None
     reconciled: dict[str, str] | None = None
     write_values: dict[str, str] | None = None
-    decision: ReviewDecision | None = None
-    result: ActionResult | None = None
+    decisions: dict[str, ReviewDecision] | None = None
+    results: dict[str, ActionResult] | None = None
+    submitter_assigned: bool = False
 
     @property
     def sources(self) -> list[ContactSource]:
@@ -1175,6 +1180,20 @@ class _AuditWriter:
             "label": proposal.label,
             "original_value": proposal.original_value,
             "proposed_value": proposal.proposed_value,
+            "final_value": (
+                result.final_value
+                if result.final_value is not _FINAL_VALUE_UNSET
+                else (
+                    proposal.proposed_value
+                    if result.status
+                    in {
+                        ActionStatus.APPLIED,
+                        ActionStatus.VERIFIED_MANUAL,
+                        ActionStatus.NOOP,
+                    }
+                    else proposal.original_value
+                )
+            ),
             "context": proposal.context,
             "warnings": proposal.warnings,
             "classification": proposal.classification,
@@ -1739,12 +1758,20 @@ class InteractiveProfileUpdateProcessor:
         for item in contact_items:
             self._reconcile_contact_fields(batch, item)
         for item in contact_items:
-            self._prepare_contact_decision(batch, item)
+            self._prepare_contact_decisions(batch, item)
 
         results: list[ActionResult] = []
         for item in contact_items:
-            contact_results = self._execute_contact_work(batch, item)
-            results.extend(contact_results)
+            results.extend(self._execute_automatic_contact_work(batch, item))
+
+        self._display_event(
+            Heading(styled("Manual Contact Follow-up"), STAGE_SEPARATOR)
+        )
+        for item in contact_items:
+            results.extend(self._execute_manual_contact_work(batch, item))
+        self._refresh_completed_contacts(contact_items)
+        for item in contact_items:
+            results.extend((item.results or {}).values())
 
         self._display_event(Heading(styled("Account Updates"), STAGE_SEPARATOR))
         account_results: list[ActionResult] = []
@@ -2326,38 +2353,17 @@ class InteractiveProfileUpdateProcessor:
             )
         self._display_event(ContactComparison(ValueFragment(identity), tuple(rows)))
 
-    def _prepare_contact_decision(
+    def _prepare_contact_decisions(
         self,
         batch: CaseBatch,
         item: _ContactWorkItem,
     ) -> None:
-        """Show one final Contact proposal and collect one A/M/N decision."""
+        """Show one Contact table, then decide each submitted field separately."""
         if item.ignored:
             return
         self._show_reconciled_contact(item)
-        payload = dict(item.write_values or {})
-        if not item.contact_id:
-            payload = {"AccountId": batch.account_id, **payload}
-        proposal = self._contact_proposal(
-            batch,
-            item,
-            field_name="Contact",
-            label=f"Contact: {self._contact_review_identity(item)}",
-            original_value=item.current_contact or {},
-            proposed_value=payload,
-        )
-        if item.contact_id and not item.write_values:
-            item.result = ActionResult(
-                proposal,
-                None,
-                ActionStatus.NOOP,
-                action="reconciled Contact already current",
-            )
-            self._append_audit(item.result)
-            self._display_event(
-                Notice(styled("Contact is already current; no change needed."))
-            )
-            return
+        item.decisions = {}
+        item.results = {}
         has_last_name = bool((item.reconciled or {}).get("last_name"))
         if not item.contact_id and not has_last_name:
             self._display_event(
@@ -2368,171 +2374,289 @@ class InteractiveProfileUpdateProcessor:
                     )
                 )
             )
-        self._show_proposal(proposal)
-        item.decision = self._review_decision(
-            proposal,
-            automatic_allowed=bool(item.contact_id)
-            or (has_last_name and bool(item.resolution.comparison_key)),
-            action="review reconciled Contact",
+
+        current = item.current_contact or {}
+        for suffix, contact_field, field_label in CONTACT_SUFFIX_FIELDS:
+            if suffix not in (item.reconciled or {}):
+                continue
+            proposal = self._contact_field_proposal(
+                batch, item, suffix, contact_field, field_label
+            )
+            if _values_equal(current.get(contact_field), proposal.proposed_value):
+                result = ActionResult(
+                    proposal,
+                    None,
+                    ActionStatus.NOOP,
+                    action="Contact field already current",
+                    final_value=current.get(contact_field),
+                )
+                item.results[contact_field] = result
+                self._append_audit(result)
+                self._display_event(
+                    Notice(
+                        styled(
+                            ValueFragment(field_label),
+                            ": already current; no change needed.",
+                        )
+                    )
+                )
+                continue
+
+            self._show_proposal(proposal)
+            decision = self._review_decision(
+                proposal,
+                automatic_allowed=bool(item.contact_id) or has_last_name,
+                action=f"review Contact {field_label}",
+            )
+            item.decisions[contact_field] = decision
+            if decision is ReviewDecision.WILL_NOT_BE_MADE:
+                result = ActionResult(
+                    proposal,
+                    decision,
+                    ActionStatus.REJECTED,
+                    action="no Contact field write",
+                    final_value=current.get(contact_field),
+                )
+                item.results[contact_field] = result
+                self._append_audit(result)
+
+    def _contact_field_proposal(
+        self,
+        batch: CaseBatch,
+        item: _ContactWorkItem,
+        suffix: str,
+        contact_field: str,
+        field_label: str,
+    ) -> ChangeProposal:
+        """Build the audit and queue identity for one Contact field."""
+        return self._contact_proposal(
+            batch,
+            item,
+            field_name=contact_field,
+            label=f"Contact {field_label}: {self._contact_review_identity(item)}",
+            original_value=(item.original_contact or {}).get(contact_field),
+            proposed_value=(item.reconciled or {}).get(suffix, ""),
         )
 
-    def _execute_contact_work(
+    def _execute_automatic_contact_work(
         self,
         batch: CaseBatch,
         item: _ContactWorkItem,
     ) -> list[ActionResult]:
-        """Apply or verify one aggregate Contact decision."""
+        """Apply every approved field in at most one automatic Contact write."""
         if item.ignored:
             return []
-        if item.result is not None:
-            return [item.result]
-        proposal = self._contact_proposal(
-            batch,
-            item,
-            field_name="Contact",
-            label=f"Contact: {self._contact_review_identity(item)}",
-            original_value=item.current_contact or {},
-            proposed_value=(
-                dict(item.write_values or {})
-                if item.contact_id
-                else {"AccountId": batch.account_id, **dict(item.write_values or {})}
-            ),
-        )
-        decision = item.decision
-        if decision is ReviewDecision.WILL_NOT_BE_MADE:
-            result = ActionResult(
-                proposal,
-                decision,
-                ActionStatus.REJECTED,
-                action="no Contact write",
+        decisions = item.decisions or {}
+        approved = {
+            field_name: value
+            for field_name, value in (item.write_values or {}).items()
+            if decisions.get(field_name) is ReviewDecision.APPLY_AUTOMATICALLY
+        }
+        if not approved:
+            return []
+
+        if not item.contact_id and (
+            decisions.get("LastName") is not ReviewDecision.APPLY_AUTOMATICALLY
+        ):
+            if any(
+                decision is ReviewDecision.MAKE_MANUALLY
+                for decision in decisions.values()
+            ):
+                return []
+            error = "A new Contact requires an approved Last Name."
+            self._fail_contact_fields(
+                batch, item, approved, error, action="create Contact"
             )
-            self._append_audit(result)
-            item.result = result
-            return [result]
-        if decision is ReviewDecision.MAKE_MANUALLY:
-            result = self._verify_manual_contact(batch, item, proposal)
-        elif item.contact_id:
+            raise ProcessingError(error)
+
+        action = (
+            "update Contact from approved fields"
+            if item.contact_id
+            else "create Contact from approved fields"
+        )
+        result_status = ActionStatus.APPLIED
+        recovery_error: SalesforceError | None = None
+        original_target = item.contact_id
+        if item.contact_id:
             try:
-                self._update_record(
-                    "Contact", item.contact_id, dict(item.write_values or {})
-                )
+                self._update_record("Contact", item.contact_id, approved)
             except SalesforceError as error:
-                result = ActionResult(
-                    proposal,
-                    decision,
-                    ActionStatus.FAILED,
-                    action="update Contact from reconciled proposals",
-                    error=str(error),
+                self._fail_contact_fields(
+                    batch,
+                    item,
+                    approved,
+                    str(error),
+                    action=action,
                     error_code=error.error_code or "",
                     salesforce_message=error.salesforce_message or "",
                 )
-                self._append_audit(result)
                 raise ProcessingError(str(error)) from error
-            result = ActionResult(
-                proposal,
-                decision,
-                ActionStatus.APPLIED,
-                action="update Contact from reconciled proposals",
-            )
-            self._append_audit(result)
         else:
+            payload = {"AccountId": batch.account_id, **approved}
+            aggregate = self._contact_proposal(
+                batch,
+                item,
+                field_name="Contact",
+                label=f"Contact: {self._contact_review_identity(item)}",
+                original_value={},
+                proposed_value=payload,
+            )
             try:
-                contact_id = self._create_record(
-                    "Contact", dict(proposal.proposed_value)
-                )
+                item.contact_id = self._create_record("Contact", payload)
             except SalesforceError as error:
                 if _is_duplicate_contact_error(error):
-                    result = self._recover_duplicate_contact(
+                    recovery = self._recover_duplicate_contact(
                         batch,
                         item.row,
-                        proposal,
+                        aggregate,
                         item.resolution,
                         error,
+                        append_audit=False,
                     )
-                    contact_id = result.proposal.target_record_id
+                    if recovery.status is ActionStatus.REJECTED:
+                        item.ignored = True
+                        for field_name in approved:
+                            suffix, field_label = self._contact_field_metadata(field_name)
+                            proposal = self._contact_field_proposal(
+                                batch, item, suffix, field_name, field_label
+                            )
+                            result = ActionResult(
+                                proposal,
+                                ReviewDecision.WILL_NOT_BE_MADE,
+                                ActionStatus.REJECTED,
+                                action=recovery.action,
+                                error=recovery.error,
+                                error_code=recovery.error_code,
+                                salesforce_message=recovery.salesforce_message,
+                                final_value=proposal.original_value,
+                            )
+                            item.results[field_name] = result
+                            self._append_audit(result)
+                        return []
+                    item.contact_id = recovery.proposal.target_record_id
+                    item.current_contact = dict(
+                        item.resolution.selected_contact or {}
+                    )
+                    action = recovery.action
+                    result_status = ActionStatus.VERIFIED_MANUAL
+                    recovery_error = error
                 else:
-                    result = ActionResult(
-                        proposal,
-                        decision,
-                        ActionStatus.FAILED,
-                        action="create Contact",
-                        error=str(error),
+                    self._fail_contact_fields(
+                        batch,
+                        item,
+                        approved,
+                        str(error),
+                        action=action,
                         error_code=error.error_code or "",
                         salesforce_message=error.salesforce_message or "",
                     )
-                    self._append_audit(result)
                     raise ProcessingError(str(error)) from error
-            else:
-                created_proposal = ChangeProposal(
-                    **{
-                        **proposal.__dict__,
-                        "target_record_id": contact_id,
-                        "selected_contact": contact_snapshot(
-                            {"Id": contact_id, **dict(proposal.proposed_value)}
-                        ),
-                    }
-                )
-                result = ActionResult(
-                    created_proposal,
-                    decision,
-                    ActionStatus.APPLIED,
-                    action="create Contact",
-                )
-                self._append_audit(result)
-            if result.status in {
-                ActionStatus.APPLIED,
-                ActionStatus.VERIFIED_MANUAL,
-            }:
-                item.contact_id = contact_id
 
-        item.result = result
-        results = [result]
-        if result.status in {
-            ActionStatus.APPLIED,
-            ActionStatus.VERIFIED_MANUAL,
-        }:
-            item.current_contact = self.client.get_record(
-                "Contact", item.contact_id, CONTACT_REVIEW_FIELDS
+        if result_status is ActionStatus.APPLIED:
+            item.current_contact = {
+                **(item.current_contact or {}),
+                "Id": item.contact_id,
+                **approved,
+            }
+        item.resolution.selected_contact = item.current_contact
+        for field_name, proposed_value in approved.items():
+            suffix, field_label = self._contact_field_metadata(field_name)
+            proposal = self._contact_field_proposal(
+                batch, item, suffix, field_name, field_label
             )
-            item.resolution.selected_contact = item.current_contact
-            if (
-                not proposal.target_record_id or proposal.target_record_id == "(new)"
-            ) and any(source.kind == "submitter" for source in item.sources):
-                results.append(
-                    self._assign_created_submitter_to_case(
-                        batch,
-                        item.row,
-                        item.resolution,
-                        item.contact_id,
-                    )
-                )
-        return results
+            proposal = replace(proposal, target_record_id=item.contact_id)
+            final_value = (
+                proposed_value
+                if result_status is ActionStatus.APPLIED
+                else (item.current_contact or {}).get(field_name)
+            )
+            result = ActionResult(
+                proposal,
+                ReviewDecision.APPLY_AUTOMATICALLY,
+                result_status,
+                action=action,
+                error=str(recovery_error) if recovery_error is not None else "",
+                error_code=(
+                    recovery_error.error_code or ""
+                    if recovery_error is not None
+                    else ""
+                ),
+                salesforce_message=(
+                    recovery_error.salesforce_message or ""
+                    if recovery_error is not None
+                    else ""
+                ),
+                final_value=final_value,
+            )
+            item.results[field_name] = result
+            self._append_audit(result)
 
-    def _verify_manual_contact(
+        if not original_target:
+            return self._assign_created_submitter_if_needed(batch, item)
+        return []
+
+    def _fail_contact_fields(
         self,
         batch: CaseBatch,
         item: _ContactWorkItem,
-        proposal: ChangeProposal,
-    ) -> ActionResult:
-        """Verify all reconciled Contact fields together."""
-        try:
-            if item.contact_id:
-                self._acknowledge(
-                    AcknowledgementQuestion(
-                        styled(
-                            "Make the complete Contact change in Salesforce, then "
-                            "press Enter to verify it: "
-                        )
-                    )
-                )
-                contact_id = item.contact_id
-            else:
+        values: dict[str, str],
+        error: str,
+        *,
+        action: str,
+        error_code: str = "",
+        salesforce_message: str = "",
+    ) -> None:
+        """Audit the same grouped-write failure against each approved field."""
+        for field_name in values:
+            suffix, field_label = self._contact_field_metadata(field_name)
+            proposal = self._contact_field_proposal(
+                batch, item, suffix, field_name, field_label
+            )
+            result = ActionResult(
+                proposal,
+                ReviewDecision.APPLY_AUTOMATICALLY,
+                ActionStatus.FAILED,
+                action=action,
+                error=error,
+                error_code=error_code,
+                salesforce_message=salesforce_message,
+                final_value=proposal.original_value,
+            )
+            item.results[field_name] = result
+            self._append_audit(result)
+
+    def _execute_manual_contact_work(
+        self,
+        batch: CaseBatch,
+        item: _ContactWorkItem,
+    ) -> list[ActionResult]:
+        """Process manual fields only after every automatic Contact write."""
+        if item.ignored:
+            return []
+        decisions = item.decisions or {}
+        manual_fields = [
+            field_name
+            for field_name, decision in decisions.items()
+            if decision is ReviewDecision.MAKE_MANUALLY
+        ]
+        if not manual_fields:
+            return []
+
+        created_manually = not item.contact_id
+        if created_manually:
+            first_field = manual_fields[0]
+            suffix, field_label = self._contact_field_metadata(first_field)
+            proposal = self._contact_field_proposal(
+                batch, item, suffix, first_field, field_label
+            )
+            try:
                 while True:
                     contact_id = self._ask_free_text(
                         FreeTextQuestion(
                             styled(
-                                "Create the Contact in Salesforce, then enter its "
-                                "Contact ID: "
+                                "Create the Contact in Salesforce using every "
+                                "approved and manual field, then enter its Contact "
+                                "ID: "
                             )
                         )
                     ).strip()
@@ -2543,79 +2667,206 @@ class InteractiveProfileUpdateProcessor:
                             styled("A Contact ID is required for manual verification.")
                         )
                     )
-            fresh = self.client.get_record("Contact", contact_id, CONTACT_REVIEW_FIELDS)
-        except (KeyboardInterrupt, EOFError) as error:
-            result = ActionResult(
-                proposal,
-                ReviewDecision.MAKE_MANUALLY,
-                ActionStatus.INTERRUPTED,
-                action="verify reconciled Contact manually",
-                error="Reviewer interrupted processing.",
+                fresh = self.client.get_record(
+                    "Contact", contact_id, CONTACT_REVIEW_FIELDS
+                )
+            except (KeyboardInterrupt, EOFError) as error:
+                self._manual_contact_failure(
+                    item,
+                    proposal,
+                    ActionStatus.INTERRUPTED,
+                    "Reviewer interrupted processing.",
+                )
+                raise ProcessingInterrupted(
+                    "Profile Update review was interrupted."
+                ) from error
+            except SalesforceError as error:
+                self._manual_contact_failure(
+                    item, proposal, ActionStatus.FAILED, str(error)
+                )
+                raise ProcessingError(str(error)) from error
+            if not _values_equal(fresh.get("AccountId"), batch.account_id):
+                error = "The manually created Contact belongs to a different Account."
+                self._manual_contact_failure(
+                    item, proposal, ActionStatus.FAILED, error
+                )
+                raise ProcessingError(error)
+            item.contact_id = contact_id
+            item.current_contact = fresh
+            item.resolution.selected_contact = fresh
+
+            for field_name, decision in decisions.items():
+                if decision is not ReviewDecision.APPLY_AUTOMATICALLY:
+                    continue
+                suffix, field_label = self._contact_field_metadata(field_name)
+                approved_proposal = replace(
+                    self._contact_field_proposal(
+                        batch, item, suffix, field_name, field_label
+                    ),
+                    target_record_id=contact_id,
+                )
+                final_value = fresh.get(field_name)
+                if not _values_equal(final_value, approved_proposal.proposed_value):
+                    error = (
+                        "The manually created Contact does not match an approved "
+                        f"{field_label} value."
+                    )
+                    result = ActionResult(
+                        approved_proposal,
+                        decision,
+                        ActionStatus.FAILED,
+                        action="verify approved field after manual Contact creation",
+                        error=error,
+                        final_value=final_value,
+                    )
+                    item.results[field_name] = result
+                    self._append_audit(result)
+                    raise ProcessingError(error)
+                result = ActionResult(
+                    approved_proposal,
+                    decision,
+                    ActionStatus.VERIFIED_MANUAL,
+                    action="verify approved field after manual Contact creation",
+                    final_value=final_value,
+                )
+                item.results[field_name] = result
+                self._append_audit(result)
+
+        for field_name in manual_fields:
+            self._verify_manual_contact_field(batch, item, field_name)
+
+        if created_manually:
+            return self._assign_created_submitter_if_needed(batch, item)
+        return []
+
+    def _verify_manual_contact_field(
+        self,
+        batch: CaseBatch,
+        item: _ContactWorkItem,
+        field_name: str,
+    ) -> None:
+        suffix, field_label = self._contact_field_metadata(field_name)
+        proposal = self._contact_field_proposal(
+            batch, item, suffix, field_name, field_label
+        )
+        proposal = replace(proposal, target_record_id=item.contact_id)
+        try:
+            self._acknowledge(
+                AcknowledgementQuestion(
+                    styled(
+                        "Make the Contact ",
+                        ValueFragment(field_label),
+                        " change in Salesforce, then press Enter to verify it: ",
+                    )
+                )
             )
-            self._append_audit(result)
+            fresh = self.client.get_record("Contact", item.contact_id, ["Id", field_name])
+            final_value = fresh.get(field_name)
+            if not _values_equal(final_value, proposal.proposed_value):
+                self._display_event(
+                    ScalarComparison(
+                        f"Manual Contact {field_label} verification",
+                        ValueFragment(_display(final_value)),
+                        ValueFragment(
+                            _display(proposal.proposed_value), ValueOrigin.SUBMITTED
+                        ),
+                    )
+                )
+                accepted = self._prompt_yes_no(
+                    styled(
+                        "Accept the current Salesforce ",
+                        ValueFragment(field_label),
+                        " value? [yes/no] (default yes): ",
+                    ),
+                    default_yes=True,
+                )
+                if not accepted:
+                    error = "The differing Salesforce Contact value was not accepted."
+                    self._manual_contact_failure(
+                        item,
+                        proposal,
+                        ActionStatus.FAILED,
+                        error,
+                        final_value=final_value,
+                    )
+                    raise ProcessingError(error)
+        except (KeyboardInterrupt, EOFError) as error:
+            self._manual_contact_failure(
+                item,
+                proposal,
+                ActionStatus.INTERRUPTED,
+                "Reviewer interrupted processing.",
+            )
             raise ProcessingInterrupted(
                 "Profile Update review was interrupted."
             ) from error
-        except ProcessingError as error:
-            result = ActionResult(
-                proposal,
-                ReviewDecision.MAKE_MANUALLY,
-                ActionStatus.FAILED,
-                action="verify reconciled Contact manually",
-                error=str(error),
-            )
-            self._append_audit(result)
-            raise
         except SalesforceError as error:
-            result = ActionResult(
-                proposal,
-                ReviewDecision.MAKE_MANUALLY,
-                ActionStatus.FAILED,
-                action="verify reconciled Contact manually",
-                error=str(error),
+            self._manual_contact_failure(
+                item, proposal, ActionStatus.FAILED, str(error)
             )
-            self._append_audit(result)
             raise ProcessingError(str(error)) from error
-        expected = item.write_values or {}
-        if not item.contact_id:
-            expected = {
-                field_name: value
-                for field_name, value in proposal.proposed_value.items()
-                if field_name != "AccountId"
-            }
-        if (
-            not item.contact_id
-            and not _values_equal(fresh.get("AccountId"), batch.account_id)
-        ) or any(
-            not _values_equal(fresh.get(field_name), value)
-            for field_name, value in expected.items()
-        ):
-            error = "Salesforce Contact does not match all reconciled proposed fields."
-            result = ActionResult(
-                proposal,
-                ReviewDecision.MAKE_MANUALLY,
-                ActionStatus.FAILED,
-                action="verify reconciled Contact manually",
-                error=error,
-            )
-            self._append_audit(result)
-            raise ProcessingError(error)
-        item.contact_id = contact_id
-        verified_proposal = ChangeProposal(
-            **{
-                **proposal.__dict__,
-                "target_record_id": contact_id,
-                "selected_contact": contact_snapshot(fresh),
-            }
-        )
+
         result = ActionResult(
-            verified_proposal,
+            proposal,
             ReviewDecision.MAKE_MANUALLY,
             ActionStatus.VERIFIED_MANUAL,
-            action="verify reconciled Contact manually",
+            action="verify Contact field manually",
+            final_value=final_value,
         )
+        item.results[field_name] = result
         self._append_audit(result)
-        return result
+        item.current_contact = {**(item.current_contact or {}), field_name: final_value}
+
+    def _manual_contact_failure(
+        self,
+        item: _ContactWorkItem,
+        proposal: ChangeProposal,
+        status: ActionStatus,
+        error: str,
+        *,
+        final_value: Any = _FINAL_VALUE_UNSET,
+    ) -> None:
+        result = ActionResult(
+            proposal,
+            ReviewDecision.MAKE_MANUALLY,
+            status,
+            action="verify Contact field manually",
+            error=error,
+            final_value=final_value,
+        )
+        item.results[proposal.field_name] = result
+        self._append_audit(result)
+
+    @staticmethod
+    def _contact_field_metadata(field_name: str) -> tuple[str, str]:
+        for suffix, contact_field, field_label in CONTACT_SUFFIX_FIELDS:
+            if contact_field == field_name:
+                return suffix, field_label
+        raise ValueError(f"Unknown Contact field {field_name!r}.")
+
+    def _assign_created_submitter_if_needed(
+        self, batch: CaseBatch, item: _ContactWorkItem
+    ) -> list[ActionResult]:
+        if item.submitter_assigned or not any(
+            source.kind == "submitter" for source in item.sources
+        ):
+            return []
+        item.submitter_assigned = True
+        return [
+            self._assign_created_submitter_to_case(
+                batch, item.row, item.resolution, item.contact_id
+            )
+        ]
+
+    def _refresh_completed_contacts(self, items: list[_ContactWorkItem]) -> None:
+        """Refresh final Contact state before role links and response text."""
+        for item in items:
+            if item.ignored or not item.contact_id:
+                continue
+            item.current_contact = self.client.get_record(
+                "Contact", item.contact_id, CONTACT_REVIEW_FIELDS
+            )
+            item.resolution.selected_contact = item.current_contact
 
     def _contact_proposal(
         self,
@@ -2628,7 +2879,7 @@ class InteractiveProfileUpdateProcessor:
         proposed_value: Any,
         warnings: str = "",
     ) -> ChangeProposal:
-        """Build an aggregate Contact proposal with every source ID."""
+        """Build a Contact proposal with every contributing source ID."""
         base = self._proposal(
             batch,
             item.row,
@@ -2968,10 +3219,11 @@ class InteractiveProfileUpdateProcessor:
             )
             results.append(result)
             previous_contact = original_contact
-            contact_changed = item.result is not None and item.result.status in {
-                ActionStatus.APPLIED,
-                ActionStatus.VERIFIED_MANUAL,
-            }
+            contact_changed = any(
+                result.status
+                in {ActionStatus.APPLIED, ActionStatus.VERIFIED_MANUAL}
+                for result in (item.results or {}).values()
+            )
             changed = contact_changed or result.status in {
                 ActionStatus.APPLIED,
                 ActionStatus.VERIFIED_MANUAL,
@@ -3565,19 +3817,22 @@ class InteractiveProfileUpdateProcessor:
         proposal: ChangeProposal,
         resolution: ContactResolution,
         error: SalesforceError,
+        *,
+        append_audit: bool = True,
     ) -> ActionResult:
         """Recover a Contact create that Salesforce's duplicate rule blocked."""
-        self._append_audit(
-            ActionResult(
-                proposal,
-                ReviewDecision.APPLY_AUTOMATICALLY,
-                ActionStatus.FAILED,
-                action="Salesforce duplicate rule blocked Contact create",
-                error=str(error),
-                error_code=error.error_code or "",
-                salesforce_message=error.salesforce_message or "",
+        if append_audit:
+            self._append_audit(
+                ActionResult(
+                    proposal,
+                    ReviewDecision.APPLY_AUTOMATICALLY,
+                    ActionStatus.FAILED,
+                    action="Salesforce duplicate rule blocked Contact create",
+                    error=str(error),
+                    error_code=error.error_code or "",
+                    salesforce_message=error.salesforce_message or "",
+                )
             )
-        )
         self._display_event(
             WarningNotice(
                 styled(
@@ -3630,7 +3885,8 @@ class InteractiveProfileUpdateProcessor:
                     error_code=error.error_code or "",
                     salesforce_message=error.salesforce_message or "",
                 )
-                self._append_audit(ignored)
+                if append_audit:
+                    self._append_audit(ignored)
                 return ignored
 
             if choice == "alternate_email":
@@ -3694,7 +3950,8 @@ class InteractiveProfileUpdateProcessor:
                 ActionStatus.VERIFIED_MANUAL,
                 action=action,
             )
-            self._append_audit(result)
+            if append_audit:
+                self._append_audit(result)
             return result
 
     def _select_contact_by_email(self, email: str) -> dict[str, Any] | None:
@@ -4078,7 +4335,9 @@ class InteractiveProfileUpdateProcessor:
                 f"Unknown review decision answer {answer!r}."
             ) from error
 
-    def _prompt_yes_no(self, prompt: StyledText) -> bool:
+    def _prompt_yes_no(
+        self, prompt: StyledText, *, default_yes: bool = False
+    ) -> bool:
         answer = self._ask_choice(
             ChoiceQuestion(
                 prompt,
@@ -4087,6 +4346,7 @@ class InteractiveProfileUpdateProcessor:
                     ReviewChoice("no", "no"),
                 ),
                 styled("Enter yes or no."),
+                default_key="yes" if default_yes else None,
             )
         )
         return answer == "yes"
@@ -4304,22 +4564,31 @@ class InteractiveProfileUpdateProcessor:
         if self._queue_store is None:
             return False
         changes = list(iter_changes(self._queue_store.manifest))
-        exact_id = stable_queue_id(
-            "proposed_change",
-            object_name=proposal.target_object,
-            source_submission_ids=proposal.source_submission_ids,
-            target_context=proposal.target_record_id,
-            field=proposal.field_name,
-        )
-        item_ids = [change.id for change in changes if change.id == exact_id]
-        if proposal.target_object == "Contact" and proposal.field_name == "Contact":
+        target_contexts = [proposal.target_record_id]
+        if proposal.target_object == "Contact" and proposal.comparison_key:
+            target_contexts.append(f"email:{proposal.comparison_key}")
+        exact_ids = {
+            stable_queue_id(
+                "proposed_change",
+                object_name=proposal.target_object,
+                source_submission_ids=proposal.source_submission_ids,
+                target_context=target_context,
+                field=proposal.field_name,
+            )
+            for target_context in target_contexts
+        }
+        item_ids = [change.id for change in changes if change.id in exact_ids]
+        if proposal.target_object == "Contact" and not item_ids:
             source_ids = set(proposal.source_submission_ids)
-            item_ids.extend(
+            field_candidates = {
                 change.id
                 for change in changes
                 if change.phase is QueuePhase.CONTACT
+                and change.field == proposal.field_name
                 and set(change.source_submission_ids) == source_ids
-            )
+            }
+            if len(field_candidates) == 1:
+                item_ids.extend(field_candidates)
         item_ids = list(dict.fromkeys(item_ids))
         for item_id in item_ids:
             self._queue_store.transition(item_id, status, outcome=outcome)

@@ -18,6 +18,7 @@ CONTACT_CASE_EXCEPTIONS = (
     "QA",
     "QC",
     "QMS",
+    "AISC",
     "IT",
     "ISO",
     "AWS",

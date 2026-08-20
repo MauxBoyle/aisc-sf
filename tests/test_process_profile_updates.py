@@ -1916,6 +1916,9 @@ def test_exact_email_match_is_global_and_each_mismatch_precedes_role_decision(
         [
             "1",
             "apply automatically",
+            "apply automatically",
+            "apply automatically",
+            "apply automatically",
             "will not be made",
             "yes",
         ]
@@ -1941,7 +1944,7 @@ def test_exact_email_match_is_global_and_each_mismatch_precedes_role_decision(
     assert contact_query[2] == "Email = 'old@example.com'"
     assert "AccountId" not in contact_query[2]
     assert any("Contact choice" in prompt for prompt in feeder.prompts)
-    assert sum(prompt.startswith("Decision [") for prompt in feeder.prompts) == 2
+    assert sum(prompt.startswith("Decision [") for prompt in feeder.prompts) == 5
     assert (
         "Contact",
         "contact-1",
@@ -1961,8 +1964,8 @@ def test_exact_email_match_is_global_and_each_mismatch_precedes_role_decision(
         for line in result.audit_path.read_text(encoding="utf-8").splitlines()
     ]
     assert any(
-        item["field"] == "Contact"
-        and item["action"] == "update Contact from reconciled proposals"
+        item["field"] == "FirstName"
+        and item["action"] == "update Contact from approved fields"
         and item["result"] == "applied"
         for item in entries
     )
@@ -1977,8 +1980,8 @@ def test_exact_email_match_is_global_and_each_mismatch_precedes_role_decision(
     assert (
         "Phone | 312-555-0100 | 312.555.0199 | submission-1 / Certification"
     ) in displayed
-    assert "First Name: Alex -> Alexa" in displayed
-    assert "Phone: 312-555-0100 -> 312.555.0199" in displayed
+    assert "Contact First Name: Alexa Jones <old@example.com>" in displayed
+    assert "Contact Phone: Alexa Jones <old@example.com>" in displayed
     assert "Current Salesforce value: {" not in displayed
     assert "Proposed value: {" not in displayed
     assert (
@@ -2018,6 +2021,65 @@ def test_incomplete_contact_is_not_automatically_created(tmp_path):
     assert "required Last Name" in "\n".join(output)
 
 
+def test_incomplete_new_contact_can_use_manual_creation_path(tmp_path):
+    client = FakeClient()
+    client.records[("Company_Profile_Change__c", "submission-1")][
+        "Cert_First_Name__c"
+    ] = "Only"
+
+    def answer(prompt):
+        if prompt.startswith("Continue with this staged row"):
+            return ""
+        if prompt.startswith("Decision ["):
+            decisions = iter(("make manually", "apply automatically"))
+            answer.decisions = getattr(answer, "decisions", decisions)
+            return next(answer.decisions)
+        if prompt.startswith("Create the Contact in Salesforce"):
+            manual = {
+                "Id": "manual-contact",
+                "AccountId": "account-1",
+                "FirstName": "Only",
+                "LastName": "Entered Manually",
+                "Title": "",
+                "Email": "",
+                "Phone": "",
+            }
+            client.records[("Contact", "manual-contact")] = manual
+            client.contacts.append(manual)
+            return "manual-contact"
+        if prompt.startswith("Make the Contact First Name change"):
+            return ""
+        if prompt.startswith("Was the response email"):
+            return "yes"
+        raise AssertionError(prompt)
+
+    result = InteractiveProfileUpdateProcessor(
+        client, input_fn=answer, output_fn=lambda message: None, now=NOW
+    ).review(
+        [
+            staged_row(
+                certification_first_name="Only",
+                certification_resolution_action="create_contact",
+            )
+        ],
+        tmp_path,
+    )
+
+    assert client.created == []
+    assert (
+        "Account",
+        "account-1",
+        {"Cert_Certification_Contact__c": "manual-contact"},
+    ) in client.updated
+    verified = next(
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+        if '"field": "FirstName"' in line
+        and '"result": "verified manually"' in line
+    )
+    assert verified["final_value"] == "Only"
+
+
 def test_valid_contact_creation_precedes_field_and_role_decisions(tmp_path):
     client = FakeClient()
     client.records[("Company_Profile_Change__c", "submission-1")].update(
@@ -2029,6 +2091,8 @@ def test_valid_contact_creation_precedes_field_and_role_decisions(tmp_path):
     )
     feeder = Feeder(
         [
+            "apply automatically",
+            "apply automatically",
             "apply automatically",
             "apply automatically",
             "yes",
@@ -2056,7 +2120,7 @@ def test_valid_contact_creation_precedes_field_and_role_decisions(tmp_path):
 
     contact_query = next(query for query in client.queries if query[0] == "Contact")
     assert contact_query[2] == "Email = 'new.person@example.com'"
-    assert sum(prompt.startswith("Decision [") for prompt in feeder.prompts) == 2
+    assert sum(prompt.startswith("Decision [") for prompt in feeder.prompts) == 4
     assert client.created == [
         (
             "Contact",
@@ -2079,10 +2143,9 @@ def test_valid_contact_creation_precedes_field_and_role_decisions(tmp_path):
     assert (
         "Email | (blank) | new.person@example.com | submission-1 / Certification"
     ) in displayed
-    assert "New Salesforce values:" in displayed
-    assert "First Name: New" in displayed
-    assert "Last Name: Person" in displayed
-    assert "Email: new.person@example.com" in displayed
+    assert "Contact First Name: New Person <new.person@example.com>" in displayed
+    assert "Contact Last Name: New Person <new.person@example.com>" in displayed
+    assert "Contact Email: New Person <new.person@example.com>" in displayed
     assert "Proposed value: {" not in displayed
 
 
@@ -2096,7 +2159,9 @@ def test_new_contract_reuses_submitter_role_contact_and_assigns_case(tmp_path):
             "Cert_Phone__c": "312-555-0101",
         }
     )
-    feeder = Feeder(["apply automatically", "apply automatically", "yes"])
+    feeder = Feeder(
+        ["apply automatically"] * 5 + ["yes"]
+    )
     processor = InteractiveProfileUpdateProcessor(
         client,
         input_fn=feeder,
@@ -2149,7 +2214,9 @@ def test_new_contract_reuses_submitter_role_contact_and_assigns_case(tmp_path):
         for line in result.audit_path.read_text(encoding="utf-8").splitlines()
     ]
     contact_create = next(
-        entry for entry in entries if entry["action"] == "create Contact"
+        entry
+        for entry in entries
+        if entry["action"] == "create Contact from approved fields"
     )
     case_assignment = next(
         entry
@@ -2279,6 +2346,7 @@ def test_contact_phase_combines_roles_into_one_write_before_account_and_role_lin
             "apply automatically",
             "apply automatically",
             "apply automatically",
+            "apply automatically",
             "yes",
         ]
     )
@@ -2337,16 +2405,18 @@ def test_contact_phase_combines_roles_into_one_write_before_account_and_role_lin
         json.loads(line)
         for line in result.audit_path.read_text(encoding="utf-8").splitlines()
     ]
-    aggregate = next(
-        entry
+    contact_fields = {
+        entry["field"]: entry
         for entry in entries
-        if entry["action"] == "update Contact from reconciled proposals"
-    )
-    assert aggregate["proposed_value"] == {
-        "Phone": "312.555.0199",
-        "Title": "Director",
+        if entry["action"] == "update Contact from approved fields"
     }
-    assert aggregate["source_submission_ids"] == ["submission-1"]
+    assert {
+        field: entry["proposed_value"] for field, entry in contact_fields.items()
+    } == {"Phone": "312.555.0199", "Title": "Director"}
+    assert all(
+        entry["source_submission_ids"] == ["submission-1"]
+        for entry in contact_fields.values()
+    )
 
 
 def test_conflicting_contact_values_are_resolved_before_any_contact_write(tmp_path):
@@ -2652,6 +2722,7 @@ def test_contact_updates_use_tim_and_stacy_emails_before_assigning_roles(tmp_pat
                 "apply automatically",
                 "apply automatically",
                 "apply automatically",
+                "apply automatically",
                 "yes",
             ]
         ),
@@ -2718,6 +2789,8 @@ def test_shared_new_contact_is_created_once_and_reused_for_both_roles(tmp_path):
         client,
         input_fn=Feeder(
             [
+                "apply automatically",
+                "apply automatically",
                 "apply automatically",
                 "apply automatically",
                 "apply automatically",
@@ -2793,6 +2866,10 @@ def test_distinct_emails_in_one_role_stay_separate_until_role_assignment(
             "apply automatically",
             "apply automatically",
             "apply automatically",
+            "apply automatically",
+            "apply automatically",
+            "apply automatically",
+            "apply automatically",
             "yes",
         ]
     )
@@ -2848,8 +2925,13 @@ def test_distinct_emails_in_one_role_stay_separate_until_role_assignment(
         json.loads(line)
         for line in result.audit_path.read_text(encoding="utf-8").splitlines()
     ]
-    creates = [entry for entry in entries if entry["action"] == "create Contact"]
-    assert [entry["proposed_value"]["Email"] for entry in creates] == [
+    creates = [
+        entry
+        for entry in entries
+        if entry["action"] == "create Contact from approved fields"
+        and entry["field"] == "Email"
+    ]
+    assert [entry["proposed_value"] for entry in creates] == [
         "first@example.com",
         "second@example.com",
     ]
@@ -2880,7 +2962,9 @@ def test_every_fresh_submitter_submission_contributes_to_reconciliation(tmp_path
     client.records[("Company_Profile_Change__c", "submission-2")] = second
     processor = InteractiveProfileUpdateProcessor(
         client,
-        input_fn=Feeder(["2", "apply automatically"]),
+        input_fn=Feeder(
+            ["2", "apply automatically", "apply automatically", "apply automatically"]
+        ),
         output_fn=lambda message: None,
         now=NOW,
     )
@@ -2952,19 +3036,457 @@ def test_rejected_reconciled_contact_has_no_contact_write(tmp_path):
         now=NOW,
     )
 
-    result = processor.review([staged_row(contact_resolutions="[]")], tmp_path)
+    result = processor.review(
+        [
+            staged_row(
+                contact_resolutions=staged_resolution(
+                    email="alex@example.com",
+                    sources=[
+                        ContactSource("role", "certification", "submission-1")
+                    ],
+                    submitted={"title": "Director"},
+                    classification=ContactResolutionClassification.USE_EXISTING,
+                    selected=contact,
+                )
+            )
+        ],
+        tmp_path,
+    )
 
     assert not any(item[0] == "Contact" for item in client.updated)
     entries = [
         json.loads(line)
         for line in result.audit_path.read_text(encoding="utf-8").splitlines()
     ]
-    rejected = next(entry for entry in entries if entry["action"] == "no Contact write")
+    rejected = next(
+        entry for entry in entries if entry["action"] == "no Contact field write"
+    )
     assert rejected["decision"] == "will not be made"
-    assert rejected["proposed_value"] == {"Title": "Director"}
+    assert rejected["proposed_value"] == "Director"
 
 
-def test_manual_contact_decision_verifies_all_fields_together(tmp_path):
+def test_contact_fields_have_independent_decisions_and_one_grouped_write(tmp_path):
+    contact = {
+        "Id": "contact-1",
+        "AccountId": "account-1",
+        "FirstName": "Alex",
+        "LastName": "Smith",
+        "Title": "Manager",
+        "Email": "alex@example.com",
+        "Phone": "312.555.0100",
+    }
+    client = FakeClient(
+        account=account_record(Cert_Certification_Contact__c="contact-1"),
+        contacts=[contact],
+    )
+    client.records[("Company_Profile_Change__c", "submission-1")].update(
+        {
+            "Cert_First_Name__c": "Alexa",
+            "Cert_Last_Name__c": "Smith",
+            "Cert_Title__c": "Director",
+            "Cert_Email__c": "alex@example.com",
+            "Cert_Phone__c": "312-555-0199",
+        }
+    )
+
+    def answer(prompt):
+        if prompt.startswith("Continue with this staged row"):
+            return ""
+        if prompt.startswith("Decision ["):
+            decisions = iter(("apply automatically", "will not be made", "make manually"))
+            answer.decisions = getattr(answer, "decisions", decisions)
+            return next(answer.decisions)
+        if prompt.startswith("Make the Contact Phone change"):
+            client.records[("Contact", "contact-1")]["Phone"] = "312.555.0199"
+            return ""
+        if prompt.startswith("Was the response email"):
+            return "yes"
+        raise AssertionError(prompt)
+
+    output = []
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=answer,
+        output_fn=output.append,
+        now=NOW,
+    )
+
+    result = processor.review(
+        [
+            staged_row(
+                contact_resolutions=staged_resolution(
+                    email="alex@example.com",
+                    sources=[
+                        ContactSource("role", "certification", "submission-1")
+                    ],
+                    submitted={
+                        "first_name": "Alexa",
+                        "title": "Director",
+                        "phone": "312.555.0199",
+                    },
+                    classification=ContactResolutionClassification.USE_EXISTING,
+                    selected=contact,
+                )
+            )
+        ],
+        tmp_path,
+    )
+
+    assert [item for item in client.updated if item[0] == "Contact"] == [
+        ("Contact", "contact-1", {"FirstName": "Alexa"})
+    ]
+    entries = [
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+        if json.loads(line)["target_object"] == "Contact"
+        and json.loads(line)["field"] in {"FirstName", "Title", "Phone"}
+    ]
+    by_field = {entry["field"]: entry for entry in entries}
+    assert by_field["FirstName"]["decision"] == "apply automatically"
+    assert by_field["FirstName"]["final_value"] == "Alexa"
+    assert by_field["Title"]["result"] == "rejected"
+    assert by_field["Title"]["final_value"] == "Manager"
+    assert by_field["Phone"]["decision"] == "make manually"
+    assert by_field["Phone"]["final_value"] == "312.555.0199"
+    displayed = "\n".join(output)
+    assert "\n========================================================================\nManual Contact Follow-up" in displayed
+    queue = json.loads(result.queue_path.read_text(encoding="utf-8"))
+    outcomes = {
+        change["field"]: change["outcome"]
+        for batch in queue["batches"]
+        for queued_row in batch["rows"]
+        for change in queued_row["changes"]
+        if change["field"] in {"FirstName", "Title", "Phone"}
+    }
+    assert outcomes == {
+        "FirstName": "applied",
+        "Title": "rejected",
+        "Phone": "verified manually",
+    }
+
+
+def test_new_contact_omits_rejected_fields_from_grouped_create(tmp_path):
+    client = FakeClient()
+    client.records[("Company_Profile_Change__c", "submission-1")].update(
+        {
+            "Cert_First_Name__c": "New",
+            "Cert_Last_Name__c": "Person",
+            "Cert_Title__c": "Director",
+            "Cert_Email__c": "new.person@example.com",
+        }
+    )
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(
+            [
+                "apply automatically",
+                "apply automatically",
+                "will not be made",
+                "apply automatically",
+                "apply automatically",
+                "yes",
+            ]
+        ),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    result = processor.review(
+        [
+            staged_row(
+                certification_first_name="New",
+                certification_last_name="Person",
+                certification_title="Director",
+                certification_email="new.person@example.com",
+                certification_resolution_action="create_contact",
+            )
+        ],
+        tmp_path,
+    )
+
+    assert client.created == [
+        (
+            "Contact",
+            {
+                "AccountId": "account-1",
+                "FirstName": "New",
+                "LastName": "Person",
+                "Email": "new.person@example.com",
+            },
+        )
+    ]
+    entries = [
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert {
+        entry["field"]: entry["result"]
+        for entry in entries
+        if entry["target_object"] == "Contact"
+        and entry["field"] in {"FirstName", "LastName", "Title", "Email"}
+    } == {
+        "FirstName": "applied",
+        "LastName": "applied",
+        "Title": "rejected",
+        "Email": "applied",
+    }
+
+
+def test_differing_manual_contact_value_defaults_to_accepting_salesforce(tmp_path):
+    contact = {
+        "Id": "contact-1",
+        "AccountId": "account-1",
+        "FirstName": "Alex",
+        "LastName": "Smith",
+        "Title": "Manager",
+        "Email": "alex@example.com",
+        "Phone": "",
+    }
+    client = FakeClient(
+        account=account_record(Cert_Certification_Contact__c="contact-1"),
+        contacts=[contact],
+    )
+    client.records[("Company_Profile_Change__c", "submission-1")][
+        "Cert_Title__c"
+    ] = "Director"
+
+    def answer(prompt):
+        if prompt.startswith("Continue with this staged row"):
+            return ""
+        if prompt.startswith("Decision ["):
+            return "make manually"
+        if prompt.startswith("Make the Contact Title change"):
+            client.records[("Contact", "contact-1")]["Title"] = "Senior Director"
+            return ""
+        if prompt.startswith("Accept the current Salesforce Title"):
+            return ""
+        if prompt.startswith("Was the response email"):
+            return "yes"
+        raise AssertionError(prompt)
+
+    output = []
+    result = InteractiveProfileUpdateProcessor(
+        client, input_fn=answer, output_fn=output.append, now=NOW
+    ).review([staged_row(contact_resolutions="[]")], tmp_path)
+
+    verified = next(
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+        if '"field": "Title"' in line and '"decision": "make manually"' in line
+    )
+    assert verified["proposed_value"] == "Director"
+    assert verified["final_value"] == "Senior Director"
+    displayed = "\n".join(output)
+    assert "Current Salesforce value: Senior Director" in displayed
+    assert "Proposed value: Director" in displayed
+    assert "Senior Director" in result.response_path.read_text(encoding="utf-8")
+
+
+def test_declined_manual_contact_override_fails_and_keeps_batch_retryable(tmp_path):
+    contact = {
+        "Id": "contact-1",
+        "AccountId": "account-1",
+        "FirstName": "Alex",
+        "LastName": "Smith",
+        "Title": "Manager",
+        "Email": "alex@example.com",
+        "Phone": "",
+    }
+    client = FakeClient(
+        account=account_record(Cert_Certification_Contact__c="contact-1"),
+        contacts=[contact],
+    )
+    client.records[("Company_Profile_Change__c", "submission-1")][
+        "Cert_Title__c"
+    ] = "Director"
+
+    def answer(prompt):
+        if prompt.startswith("Continue with this staged row"):
+            return ""
+        if prompt.startswith("Decision ["):
+            return "make manually"
+        if prompt.startswith("Make the Contact Title change"):
+            client.records[("Contact", "contact-1")]["Title"] = "Senior Director"
+            return ""
+        if prompt.startswith("Accept the current Salesforce Title"):
+            return "no"
+        raise AssertionError(prompt)
+
+    with pytest.raises(ProcessingError, match="not accepted"):
+        InteractiveProfileUpdateProcessor(
+            client, input_fn=answer, output_fn=lambda message: None, now=NOW
+        ).review(
+            [
+                staged_row(
+                    contact_resolutions=staged_resolution(
+                        sources=[
+                            ContactSource(
+                                "role", "certification", "submission-1"
+                            )
+                        ],
+                        submitted={"title": "Director"},
+                        classification=ContactResolutionClassification.USE_EXISTING,
+                        selected=contact,
+                    )
+                )
+            ],
+            tmp_path,
+        )
+
+    assert not any(item[0] == "Company_Profile_Change__c" for item in client.updated)
+    queue = json.loads((tmp_path / "review_queue.json").read_text(encoding="utf-8"))
+    title = next(
+        change
+        for batch in queue["batches"]
+        for queued_row in batch["rows"]
+        for change in queued_row["changes"]
+        if change["field"] == "Title"
+    )
+    assert title["status"] == "failed"
+
+
+@pytest.mark.parametrize("interruption", [KeyboardInterrupt(), EOFError()])
+def test_manual_contact_confirmation_interruption_is_audited(
+    tmp_path, interruption
+):
+    contact = {
+        "Id": "contact-1",
+        "AccountId": "account-1",
+        "FirstName": "Alex",
+        "LastName": "Smith",
+        "Title": "Manager",
+        "Email": "alex@example.com",
+        "Phone": "",
+    }
+    client = FakeClient(
+        account=account_record(Cert_Certification_Contact__c="contact-1"),
+        contacts=[contact],
+    )
+    client.records[("Company_Profile_Change__c", "submission-1")][
+        "Cert_Title__c"
+    ] = "Director"
+    feeder = Feeder(["make manually", interruption])
+
+    with pytest.raises(ProcessingInterrupted):
+        InteractiveProfileUpdateProcessor(
+            client, input_fn=feeder, output_fn=lambda message: None, now=NOW
+        ).review([staged_row(contact_resolutions="[]")], tmp_path)
+
+    entries = [
+        json.loads(line)
+        for line in (tmp_path / "review_audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    interrupted = next(
+        entry
+        for entry in entries
+        if entry["field"] == "Title" and entry["result"] == "interrupted"
+    )
+    assert interrupted["decision"] == "make manually"
+    assert not any(item[0] == "Company_Profile_Change__c" for item in client.updated)
+
+
+def test_manual_contact_salesforce_read_failure_is_audited(tmp_path):
+    contact = {
+        "Id": "contact-1",
+        "AccountId": "account-1",
+        "FirstName": "Alex",
+        "LastName": "Smith",
+        "Title": "Manager",
+        "Email": "alex@example.com",
+        "Phone": "",
+    }
+    client = FakeClient(
+        account=account_record(Cert_Certification_Contact__c="contact-1"),
+        contacts=[contact],
+    )
+    client.records[("Company_Profile_Change__c", "submission-1")][
+        "Cert_Title__c"
+    ] = "Director"
+    original_get = client.get_record
+
+    def fail_manual_read(object_name, record_id, fields):
+        if object_name == "Contact" and list(fields) == ["Id", "Title"]:
+            raise SalesforceError("manual Contact read failed")
+        return original_get(object_name, record_id, fields)
+
+    client.get_record = fail_manual_read
+
+    with pytest.raises(ProcessingError, match="manual Contact read failed"):
+        InteractiveProfileUpdateProcessor(
+            client,
+            input_fn=Feeder(["make manually", ""]),
+            output_fn=lambda message: None,
+            now=NOW,
+        ).review([staged_row(contact_resolutions="[]")], tmp_path)
+
+    entries = [
+        json.loads(line)
+        for line in (tmp_path / "review_audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    failed = next(
+        entry
+        for entry in entries
+        if entry["field"] == "Title" and entry["result"] == "failed"
+    )
+    assert failed["decision"] == "make manually"
+    assert failed["error"] == "manual Contact read failed"
+
+
+def test_all_rejected_new_contact_is_not_created_or_assigned(tmp_path):
+    client = FakeClient()
+    client.records[("Company_Profile_Change__c", "submission-1")].update(
+        {
+            "Cert_First_Name__c": "New",
+            "Cert_Last_Name__c": "Person",
+            "Cert_Email__c": "new.person@example.com",
+        }
+    )
+    contact_resolutions = staged_resolution(
+        email="new.person@example.com",
+        sources=[ContactSource("role", "certification", "submission-1")],
+        submitted={
+            "first_name": "New",
+            "last_name": "Person",
+            "email": "new.person@example.com",
+        },
+    )
+
+    result = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["will not be made"] * 3 + ["yes"]),
+        output_fn=lambda message: None,
+        now=NOW,
+    ).review(
+        [
+            staged_row(
+                certification_resolution_action="create_contact",
+                contact_resolutions=contact_resolutions,
+            )
+        ],
+        tmp_path,
+    )
+
+    assert client.created == []
+    assert not any(
+        object_name == "Account" and "Cert_Certification_Contact__c" in values
+        for object_name, _, values in client.updated
+    )
+    queue = json.loads(result.queue_path.read_text(encoding="utf-8"))
+    contact_changes = [
+        change
+        for batch in queue["batches"]
+        for queued_row in batch["rows"]
+        for change in queued_row["changes"]
+        if change["salesforce"]["object_name"] == "Contact"
+    ]
+    assert {change["outcome"] for change in contact_changes} == {"rejected"}
+
+
+def test_manual_contact_decisions_verify_fields_individually(tmp_path):
     contact = {
         "Id": "contact-1",
         "AccountId": "account-1",
@@ -2993,10 +3515,11 @@ def test_manual_contact_decision_verifies_all_fields_together(tmp_path):
             return ""
         if prompt.startswith("Decision ["):
             return "make manually"
-        if prompt.startswith("Make the complete Contact change"):
-            client.records[("Contact", "contact-1")].update(
-                {"Title": "Director", "Phone": "312.555.0199"}
-            )
+        if prompt.startswith("Make the Contact Title change"):
+            client.records[("Contact", "contact-1")]["Title"] = "Director"
+            return ""
+        if prompt.startswith("Make the Contact Phone change"):
+            client.records[("Contact", "contact-1")]["Phone"] = "312.555.0199"
             return ""
         if prompt.startswith("Was the response email"):
             return "yes"
@@ -3016,13 +3539,14 @@ def test_manual_contact_decision_verifies_all_fields_together(tmp_path):
         json.loads(line)
         for line in result.audit_path.read_text(encoding="utf-8").splitlines()
     ]
-    verified = next(
+    verified = [
         entry
         for entry in entries
-        if entry["action"] == "verify reconciled Contact manually"
-    )
-    assert verified["result"] == "verified manually"
-    assert verified["proposed_value"] == {
+        if entry["action"] == "verify Contact field manually"
+    ]
+    assert {entry["field"] for entry in verified} == {"Title", "Phone"}
+    assert all(entry["result"] == "verified manually" for entry in verified)
+    assert {entry["field"]: entry["proposed_value"] for entry in verified} == {
         "Phone": "312.555.0199",
         "Title": "Director",
     }
@@ -3071,7 +3595,7 @@ def test_contact_failure_is_audited_and_same_input_retries_then_becomes_noop(
         .splitlines()
     ]
     assert any(
-        entry["action"] == "update Contact from reconciled proposals"
+        entry["action"] == "update Contact from approved fields"
         and entry["result"] == "failed"
         for entry in failed_entries
     )
@@ -3107,7 +3631,7 @@ def test_contact_failure_is_audited_and_same_input_retries_then_becomes_noop(
         for line in noop_result.audit_path.read_text(encoding="utf-8").splitlines()
     ]
     assert any(
-        entry["action"] == "reconciled Contact already current"
+        entry["action"] == "Contact field already current"
         for entry in noop_entries
     )
 
@@ -3124,7 +3648,7 @@ def test_compatibility_review_normalizes_fresh_role_values(tmp_path):
     )
     processor = InteractiveProfileUpdateProcessor(
         client,
-        input_fn=Feeder(["apply automatically", "apply automatically", "yes"]),
+        input_fn=Feeder(["apply automatically"] * 6 + ["yes"]),
         output_fn=lambda message: None,
         now=NOW,
     )
@@ -3184,6 +3708,8 @@ def test_duplicate_create_can_recover_with_an_alternate_email_contact(tmp_path):
     feeder = Feeder(
         [
             "apply automatically",
+            "apply automatically",
+            "apply automatically",
             "3",
             "other@example.com",
             "apply automatically",
@@ -3228,16 +3754,16 @@ def test_duplicate_create_can_recover_with_an_alternate_email_contact(tmp_path):
         json.loads(line)
         for line in result.audit_path.read_text(encoding="utf-8").splitlines()
     ]
-    assert any(
-        entry["action"] == "Salesforce duplicate rule blocked Contact create"
-        for entry in entries
-    )
+    assert not any(entry["field"] == "Contact" for entry in entries)
     recovered = next(
         entry
         for entry in entries
         if entry["action"] == "use alternate-email Contact after duplicate failure"
+        and entry["field"] == "Email"
     )
     assert recovered["selected_contact"]["Id"] == "alternate-contact"
+    assert recovered["proposed_value"] == "new.person@example.com"
+    assert recovered["final_value"] == "other@example.com"
 
 
 def test_duplicate_exact_email_matches_are_audited_and_keep_case_retryable(tmp_path):
