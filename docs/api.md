@@ -202,12 +202,14 @@ completed and blocked outcomes while resetting interrupted statuses to pending.
       show_root_heading: true
       members:
         - TextFragment
+        - ValueOrigin
         - ValueFragment
         - StyledFragment
         - StyledText
         - ReviewChoice
         - Heading
         - Notice
+        - WarningNotice
         - ValidationFeedback
         - ContextLine
         - ScalarComparison
@@ -240,7 +242,12 @@ completed and blocked outcomes while resetting interrupted statuses to pending.
 
 The frozen review dataclasses form the supported renderer boundary.
 `ValueFragment` distinguishes interpolated domain values from explanatory text,
-so a visual UI can style values without parsing sentences. `ChoiceQuestion`
+so a visual UI can style values without parsing sentences. Its
+backward-compatible `origin` field defaults to `ValueOrigin.NEUTRAL`;
+processors and adapters explicitly mark submitted and script-supplemented
+values with `SUBMITTED` and `SUPPLEMENTED`.
+`WarningNotice` distinguishes actionable warnings from an ordinary `Notice`,
+while `ValidationFeedback` remains a separate retry event. `ChoiceQuestion`
 contains only its available `ReviewChoice` objects. Questions and answers have
 separate choice, free-text, and acknowledgement shapes; an unknown interaction
 or mismatched answer raises `UnsupportedReviewInteractionError` explicitly.
@@ -249,12 +256,24 @@ or mismatched answer raises `UnsupportedReviewInteractionError` explicitly.
     options:
       show_root_heading: true
       members:
+        - ColorMode
         - CLIReviewUI
 
 `CLIReviewUI` adapts the typed boundary to terminal `input_fn` and `output_fn`
 callbacks. It preserves the command's headings, comparisons, Contact tables,
 shortcuts, complete phrases, invalid-input retries, and interruption behavior.
-It contains no Salesforce or audit logic.
+Its single Rich theme maps submitted values to bright green, supplemented
+values and notes to bright yellow, warnings to bright red, and response bodies
+to bright blue. Headings, current Salesforce values, progress, and counts stay
+neutral, retaining their existing non-color labels. `ColorMode.AUTO` uses Rich
+terminal detection and honors `NO_COLOR`; `NEVER` backs `--no-color`, and
+`ALWAYS` supports explicit renderer tests. Custom callbacks default to plain
+text. Values are assembled as literal Rich `Text` fragments rather than parsed
+markup. See the Rich [Console](https://rich.readthedocs.io/en/stable/console.html)
+and [theme style](https://rich.readthedocs.io/en/stable/style.html)
+documentation. The adapter contains no Salesforce or audit logic, and saved
+`response_emails.txt` content never passes through it or contains ANSI terminal
+codes.
 
 ::: aisc_salesforce.process_profile_updates
     options:

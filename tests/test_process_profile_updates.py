@@ -3716,6 +3716,7 @@ def test_email_formatter_creates_one_paragraph_per_submitter():
     assert emails["first@example.com"].count("Thank you for updating") == 1
     assert "Company Name: Acme Steel" in emails["first@example.com"]
     assert "Billing City: Chicago" in emails["second@example.com"]
+    assert all("\x1b[" not in body for body in emails.values())
 
 
 def test_unsent_response_closes_sources_but_keeps_case_pending(tmp_path):

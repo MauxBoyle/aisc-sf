@@ -14,7 +14,7 @@ from .application_snapshot import (
     ApplicationSnapshotService,
     write_application_snapshot,
 )
-from .cli_review_ui import CLIReviewUI
+from .cli_review_ui import CLIReviewUI, ColorMode, print_profile_error
 from .dictionary import DictionaryError, load_export_plan
 from .imis_contacts import ContactConsolidationError, consolidate_contactbasic
 from .picklist_audit import (
@@ -100,11 +100,22 @@ def main(
         default=Path("staged_profile_updates"),
         help="Directory to contain staging, audit, and response artifacts.",
     )
+    process_parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable colored terminal output.",
+    )
     process_operations = process_parser.add_subparsers(dest="process_operation")
     for operation in ("stage", "prepare", "review"):
         operation_parser = process_operations.add_parser(
             operation,
             help=f"Run only the {operation} phase of a staging session.",
+        )
+        operation_parser.add_argument(
+            "--no-color",
+            action="store_true",
+            default=argparse.SUPPRESS,
+            help="Disable colored terminal output.",
         )
         if operation != "stage":
             operation_parser.add_argument(
@@ -169,17 +180,23 @@ def main(
             print(f"Stage profile updates failed: {error}", file=sys.stderr)
             return 1
     if args.command == "process-profile-updates":
+        color_mode = ColorMode.NEVER if args.no_color else ColorMode.AUTO
+        color_kwargs = (
+            {"color_mode": color_mode} if color_mode is ColorMode.NEVER else {}
+        )
         try:
             if args.process_operation == "stage":
                 return _run_stage_profile_update_session(
                     args.output_dir,
                     output_fn=output_fn,
+                    **color_kwargs,
                 )
             if args.process_operation == "prepare":
                 return _run_prepare_profile_update_session(
                     args.session_id,
                     args.output_dir,
                     output_fn=output_fn,
+                    **color_kwargs,
                 )
             if args.process_operation == "review":
                 return _run_review_profile_update_session(
@@ -187,11 +204,13 @@ def main(
                     args.output_dir,
                     input_fn=input_fn,
                     output_fn=output_fn,
+                    **color_kwargs,
                 )
             return _run_process_profile_updates(
                 args.output_dir,
                 input_fn=input_fn,
                 output_fn=output_fn,
+                **color_kwargs,
             )
         except (
             ProcessingError,
@@ -199,7 +218,10 @@ def main(
             UnsupportedReviewInteractionError,
             OSError,
         ) as error:
-            print(f"Process profile updates failed: {error}", file=sys.stderr)
+            print_profile_error(
+                f"Process profile updates failed: {error}",
+                color_mode=color_mode,
+            )
             return 1
     if args.command == "rename-profile-update-cases":
         try:
@@ -364,6 +386,7 @@ def _run_process_profile_updates(
     *,
     input_fn: Callable[[str], str] = input,
     output_fn: Callable[[str], None] = print,
+    color_mode: ColorMode | str | bool | None = None,
 ) -> int:
     """Connect to Salesforce and run the interactive Profile Update workflow."""
     _load_dotenv(Path(".env"))
@@ -380,7 +403,11 @@ def _run_process_profile_updates(
     if "ui" in processor_parameters:
         processor = InteractiveProfileUpdateProcessor(
             client,
-            CLIReviewUI(input_fn=input_fn, output_fn=output_fn),
+            CLIReviewUI(
+                input_fn=input_fn,
+                output_fn=output_fn,
+                color_mode=color_mode,
+            ),
         )
     else:  # Compatibility for injected processors using the former constructor.
         processor = InteractiveProfileUpdateProcessor(
@@ -414,6 +441,7 @@ def _run_stage_profile_update_session(
     output_dir: Path,
     *,
     output_fn: Callable[[str], None] = print,
+    color_mode: ColorMode | str | bool | None = None,
 ) -> int:
     """Authenticate, capture New submissions, and publish one stable session."""
     client = _profile_update_client(output_fn)
@@ -436,6 +464,7 @@ def _run_prepare_profile_update_session(
     output_dir: Path,
     *,
     output_fn: Callable[[str], None] = print,
+    color_mode: ColorMode | str | bool | None = None,
 ) -> int:
     """Authenticate and prepare Cases for one published session."""
     client, queue_id, responder_id = _profile_update_client_with_configuration(
@@ -443,7 +472,11 @@ def _run_prepare_profile_update_session(
     )
     processor = InteractiveProfileUpdateProcessor(
         client,
-        CLIReviewUI(input_fn=input, output_fn=output_fn),
+        CLIReviewUI(
+            input_fn=input,
+            output_fn=output_fn,
+            color_mode=color_mode,
+        ),
     )
     workflow = ProfileUpdateProcessingWorkflow(
         ProfileUpdateService(client, queue_id, responder_id),
@@ -462,6 +495,7 @@ def _run_review_profile_update_session(
     *,
     input_fn: Callable[[str], str] = input,
     output_fn: Callable[[str], None] = print,
+    color_mode: ColorMode | str | bool | None = None,
 ) -> int:
     """Authenticate and resume interactive review for one published session."""
     client, queue_id, responder_id = _profile_update_client_with_configuration(
@@ -469,7 +503,11 @@ def _run_review_profile_update_session(
     )
     processor = InteractiveProfileUpdateProcessor(
         client,
-        CLIReviewUI(input_fn=input_fn, output_fn=output_fn),
+        CLIReviewUI(
+            input_fn=input_fn,
+            output_fn=output_fn,
+            color_mode=color_mode,
+        ),
     )
     workflow = ProfileUpdateProcessingWorkflow(
         ProfileUpdateService(client, queue_id, responder_id),
