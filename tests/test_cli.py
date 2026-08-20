@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from io import StringIO
 from types import SimpleNamespace
 
 import pytest
@@ -511,6 +512,30 @@ def test_process_profile_update_nested_operation_preserves_parent_output_dir(
     assert calls == [tmp_path]
 
 
+@pytest.mark.parametrize("operation", ["stage", "prepare", "review"])
+@pytest.mark.parametrize("position", ["before", "after"])
+def test_process_profile_update_no_color_works_around_nested_operations(
+    monkeypatch, operation, position
+):
+    calls = []
+
+    def record(*args, **kwargs):
+        calls.append((args, kwargs))
+        return 0
+
+    monkeypatch.setattr(app, f"_run_{operation}_profile_update_session", record)
+    session = [] if operation == "stage" else ["2026-08-04T15-30-00Z"]
+    argv = ["process-profile-updates"]
+    if position == "before":
+        argv.append("--no-color")
+    argv.extend([operation, *session])
+    if position == "after":
+        argv.append("--no-color")
+
+    assert app.main(argv) == 0
+    assert calls[0][1]["color_mode"] == app.ColorMode.NEVER
+
+
 def test_process_profile_updates_reports_authentication_and_safe_stop(
     monkeypatch, tmp_path
 ):
@@ -589,6 +614,21 @@ def test_process_profile_updates_cli_reports_processing_failure(monkeypatch, cap
         "Process profile updates failed: manual verification failed"
         in capsys.readouterr().err
     )
+
+
+def test_process_profile_update_failure_is_red_on_a_supported_terminal(monkeypatch):
+    class TerminalBuffer(StringIO):
+        def isatty(self):
+            return True
+
+    stream = TerminalBuffer()
+    monkeypatch.setattr("sys.stderr", stream)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    app.print_profile_error("Process profile updates failed: example")
+
+    assert "\x1b[91mProcess profile updates failed: example\x1b[0m" in stream.getvalue()
 
 
 def test_rename_cli_previews_by_default_and_apply_is_explicit(monkeypatch):

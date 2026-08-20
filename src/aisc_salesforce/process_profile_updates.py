@@ -80,6 +80,8 @@ from .review_ui import (
     UnsupportedReviewInteractionError,
     ValidationFeedback,
     ValueFragment,
+    ValueOrigin,
+    WarningNotice,
     styled,
 )
 from .salesforce import SalesforceClient, SalesforceError
@@ -1429,7 +1431,7 @@ class InteractiveProfileUpdateProcessor:
                 Notice(
                     styled(
                         "Assigned Profile Update ",
-                        ValueFragment(submission_name),
+                        ValueFragment(submission_name, ValueOrigin.SUBMITTED),
                         " to ",
                         ValueFragment(_display(account.get("Name")) or account_id),
                         ".",
@@ -1448,7 +1450,7 @@ class InteractiveProfileUpdateProcessor:
                     FreeTextQuestion(
                         styled(
                             "Profile Update ",
-                            ValueFragment(submission_name),
+                            ValueFragment(submission_name, ValueOrigin.SUBMITTED),
                             " has no Submission Account. Enter its Certification ID to "
                             "find the Salesforce Account: ",
                         )
@@ -1510,7 +1512,7 @@ class InteractiveProfileUpdateProcessor:
             )
             prompt_fragments: list[str | ValueFragment] = [
                 "Choose the Submission Account for Profile Update ",
-                ValueFragment(submission_name),
+                ValueFragment(submission_name, ValueOrigin.SUBMITTED),
                 ":\n",
             ]
             for choice in choices:
@@ -2176,7 +2178,7 @@ class InteractiveProfileUpdateProcessor:
                     tuple(
                         ConflictCandidate(
                             str(index),
-                            ValueFragment(value),
+                            ValueFragment(value, ValueOrigin.SUBMITTED),
                             ValueFragment(self._format_contact_sources(sources)),
                         )
                         for index, (value, sources) in enumerate(
@@ -2318,7 +2320,7 @@ class InteractiveProfileUpdateProcessor:
                 ContactComparisonRow(
                     field_label,
                     ValueFragment(_display(current.get(contact_field))),
-                    ValueFragment(reconciled.get(suffix, "")),
+                    ValueFragment(reconciled.get(suffix, ""), ValueOrigin.SUBMITTED),
                     ValueFragment(self._format_contact_sources(sources)),
                 )
             )
@@ -2359,7 +2361,7 @@ class InteractiveProfileUpdateProcessor:
         has_last_name = bool((item.reconciled or {}).get("last_name"))
         if not item.contact_id and not has_last_name:
             self._display_event(
-                Notice(
+                WarningNotice(
                     styled(
                         "This Contact cannot be created automatically because the "
                         "required Last Name field is missing."
@@ -2701,7 +2703,7 @@ class InteractiveProfileUpdateProcessor:
             self._show_contact_details("Suggested Contact", candidate)
             candidate_email, candidate_key, _ = normalize_email(candidate.get("Email"))
             self._display_event(
-                Notice(
+                WarningNotice(
                     styled(
                         "Likely email typo: ",
                         ValueFragment(resolution.normalized_email),
@@ -2750,7 +2752,10 @@ class InteractiveProfileUpdateProcessor:
             Heading(
                 styled(
                     "Contact resolution for ",
-                    ValueFragment(resolution.normalized_email or "(invalid email)"),
+                    ValueFragment(
+                        resolution.normalized_email or "(invalid email)",
+                        ValueOrigin.SUBMITTED,
+                    ),
                 ),
                 ITEM_SEPARATOR,
             )
@@ -3020,11 +3025,13 @@ class InteractiveProfileUpdateProcessor:
         all_sent = True
         for email, text in emails.items():
             response_writer.append(batch.case_id, email, text)
-            self._display_event(ResponseEmail(ValueFragment(email), text))
+            self._display_event(
+                ResponseEmail(ValueFragment(email, ValueOrigin.SUBMITTED), text)
+            )
             sent = self._prompt_yes_no(
                 styled(
                     "Was the response email to ",
-                    ValueFragment(email),
+                    ValueFragment(email, ValueOrigin.SUBMITTED),
                     " sent? [yes/no]: ",
                 )
             )
@@ -3071,9 +3078,9 @@ class InteractiveProfileUpdateProcessor:
         self._display_event(
             StagedRowSummary(
                 ValueFragment(account_name or "(unavailable)"),
-                ValueFragment(submitter_name),
-                ValueFragment(submitter_email),
-                ValueFragment(source_names or "(unnamed)"),
+                ValueFragment(submitter_name, ValueOrigin.SUBMITTED),
+                ValueFragment(submitter_email, ValueOrigin.SUBMITTED),
+                ValueFragment(source_names or "(unnamed)", ValueOrigin.SUBMITTED),
                 contact_details_supplemented=(
                     row.get("has_contact_derived_values") == "true"
                 ),
@@ -3160,7 +3167,7 @@ class InteractiveProfileUpdateProcessor:
                 conflicts.append(
                     ParentAccountFieldConflict(
                         label,
-                        ValueFragment(requested),
+                        ValueFragment(requested, ValueOrigin.SUBMITTED),
                         tuple(
                             ParentAccountChildValue(
                                 ValueFragment(_display(child.get("Id"))),
@@ -3348,7 +3355,12 @@ class InteractiveProfileUpdateProcessor:
             self._display_event(
                 ContextLine(
                     "Submitter",
-                    styled(ValueFragment(name), " <", ValueFragment(email), ">"),
+                    styled(
+                        ValueFragment(name, ValueOrigin.SUBMITTED),
+                        " <",
+                        ValueFragment(email, ValueOrigin.SUBMITTED),
+                        ">",
+                    ),
                 )
             )
 
@@ -3358,7 +3370,8 @@ class InteractiveProfileUpdateProcessor:
                     styled(
                         "Profile Update ",
                         ValueFragment(
-                            _display(submission.get("Name") or submission.get("Id"))
+                            _display(submission.get("Name") or submission.get("Id")),
+                            ValueOrigin.SUBMITTED,
                         ),
                         " (status: ",
                         ValueFragment(_display(submission.get("Status__c"))),
@@ -3369,21 +3382,47 @@ class InteractiveProfileUpdateProcessor:
             comments = _display(submission.get("Comments__c"))
             notes = _display(submission.get("Other_Personnel_Notes__c"))
             if comments:
-                self._display_event(ContextLine("Comments", (ValueFragment(comments),)))
+                self._display_event(
+                    ContextLine(
+                        "Comments",
+                        (ValueFragment(comments, ValueOrigin.SUBMITTED),),
+                    )
+                )
             if notes:
                 self._display_event(
-                    ContextLine("Other Personnel notes", (ValueFragment(notes),))
+                    ContextLine(
+                        "Other Personnel notes",
+                        (ValueFragment(notes, ValueOrigin.SUBMITTED),),
+                    )
                 )
 
-        self._show_unique_row_context(batch.rows, "effective_date", "Effective date")
-        self._show_unique_row_context(batch.rows, "key_answers", "Key Update answers")
-        self._show_unique_row_context(batch.rows, "warnings", "Warnings")
+        self._show_unique_row_context(
+            batch.rows,
+            "effective_date",
+            "Effective date",
+            origin=ValueOrigin.SUBMITTED,
+        )
+        self._show_unique_row_context(
+            batch.rows,
+            "key_answers",
+            "Key Update answers",
+            origin=ValueOrigin.SUBMITTED,
+        )
+        self._show_unique_row_context(
+            batch.rows,
+            "warnings",
+            "Warnings",
+            warning=True,
+        )
 
     def _show_unique_row_context(
         self,
         rows: list[dict[str, str]],
         field_name: str,
         label: str,
+        *,
+        origin: ValueOrigin = ValueOrigin.NEUTRAL,
+        warning: bool = False,
     ) -> None:
         values = dict.fromkeys(
             row.get(field_name, "").strip()
@@ -3391,7 +3430,11 @@ class InteractiveProfileUpdateProcessor:
             if row.get(field_name, "").strip()
         )
         for value in values:
-            self._display_event(ContextLine(label, (ValueFragment(value),)))
+            fragment = ValueFragment(value, origin)
+            if warning:
+                self._display_event(WarningNotice(styled(f"{label}: ", fragment)))
+            else:
+                self._display_event(ContextLine(label, (fragment,)))
 
     def _show_account_history(
         self,
@@ -3536,7 +3579,7 @@ class InteractiveProfileUpdateProcessor:
             )
         )
         self._display_event(
-            Notice(
+            WarningNotice(
                 styled(
                     "Salesforce blocked this Contact create as a possible duplicate."
                 )
@@ -3945,7 +3988,7 @@ class InteractiveProfileUpdateProcessor:
             ScalarComparison(
                 proposal.label,
                 ValueFragment(current),
-                ValueFragment(proposed),
+                ValueFragment(proposed, ValueOrigin.SUBMITTED),
             )
         )
 
@@ -3961,7 +4004,7 @@ class InteractiveProfileUpdateProcessor:
                 MappingComparisonRow(
                     label,
                     ValueFragment(_display(current.get(field_name))),
-                    ValueFragment(_display(proposed_value)),
+                    ValueFragment(_display(proposed_value), ValueOrigin.SUBMITTED),
                 )
             )
         self._display_event(MappingComparison(proposal.label, tuple(rows), is_new))

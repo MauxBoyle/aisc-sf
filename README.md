@@ -405,6 +405,29 @@ uv run aisc_salesforce process-profile-updates \
   --output-dir /secure/staged-profile-updates
 ```
 
+On a supported interactive terminal, review output uses a small semantic color
+palette while keeping every existing label: submitted values are bright green,
+script-supplemented values and `Note` lines are bright yellow, warnings and
+validation feedback are bright red, and response-email bodies are bright blue.
+Headings, current Salesforce values, progress messages, and record counts stay
+uncolored, so color is never the only way meaning is communicated.
+
+Disable colors with `--no-color`. For a nested command, the option may appear
+before or after the operation:
+
+```bash
+uv run aisc_salesforce process-profile-updates --no-color review SESSION_ID
+uv run aisc_salesforce process-profile-updates review SESSION_ID --no-color
+```
+
+The standard `NO_COLOR` environment variable also disables colors. Redirected
+output and custom `output_fn` callbacks use plain text automatically. Rich
+provides the terminal detection and rendering fallback; see its
+[Console documentation](https://rich.readthedocs.io/en/stable/console.html) and
+[style/theme documentation](https://rich.readthedocs.io/en/stable/style.html).
+Generated artifacts, including `response_emails.txt`, are always plain text and
+never contain terminal escape codes.
+
 `stage` prints the generated session ID and both artifact paths. If two stages
 start in the same UTC second, the final atomic rename claims each ID; a
 collision retries with `-01`, `-02`, and so on without replacing an existing

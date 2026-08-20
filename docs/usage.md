@@ -667,6 +667,38 @@ uv run aisc_salesforce process-profile-updates review \
   --output-dir /secure/staged-profile-updates
 ```
 
+### Accessible terminal colors
+
+On supported interactive terminals, only review semantics are colored:
+
+| Meaning | Terminal color | Non-color label or context |
+|---|---|---|
+| Submitted values | Bright green | `Proposed value`, submission context, and existing field labels |
+| Script-supplemented values or notes | Bright yellow | `Note` |
+| Warnings and validation feedback | Bright red | `Warnings` and the complete feedback text |
+| Response-email body | Bright blue | `Response email for ...` heading |
+
+Headings, current Salesforce values, progress messages, and record counts are
+neutral. The labels remain the primary meaning, so the workflow is readable
+without color.
+
+Use `--no-color` on the combined command or before/after any nested operation:
+
+```bash
+uv run aisc_salesforce process-profile-updates --no-color stage
+uv run aisc_salesforce process-profile-updates prepare SESSION_ID --no-color
+uv run aisc_salesforce process-profile-updates --no-color review SESSION_ID
+```
+
+Setting the standard `NO_COLOR` environment variable has the same effect.
+Redirection, unsupported terminals, and custom `output_fn` callbacks fall back
+to plain text automatically. The adapter uses Rich's
+[Console](https://rich.readthedocs.io/en/stable/console.html) and
+[theme styles](https://rich.readthedocs.io/en/stable/style.html) without parsing
+markup, so brackets and other characters in submitted values stay literal.
+Terminal styling is never written to `profile_updates.csv`,
+`review_audit.jsonl`, `review_queue.json`, or `response_emails.txt`.
+
 `stage` reads New submissions and publishes both `profile_updates.csv` and
 `review_queue.json` through one temporary directory and one final rename. The
 printed UTC timestamp folder name is the session ID. The final rename claims an

@@ -1,4 +1,6 @@
+import re
 from dataclasses import FrozenInstanceError
+from io import StringIO
 
 import pytest
 
@@ -13,17 +15,23 @@ from aisc_salesforce.review_ui import (
     AcknowledgementAnswer,
     ChoiceAnswer,
     ChoiceQuestion,
+    Heading,
     MappingComparison,
     MappingComparisonRow,
     ParentAccountChildValue,
     ParentAccountConflict,
     ParentAccountFieldConflict,
     ParentAccountNoActiveChildren,
+    ResponseEmail,
     ReviewChoice,
     ReviewQueueSnapshot,
     ScalarComparison,
+    StagedRowSummary,
     UnsupportedReviewInteractionError,
+    ValidationFeedback,
     ValueFragment,
+    ValueOrigin,
+    WarningNotice,
     styled,
 )
 
@@ -52,6 +60,153 @@ def test_review_dataclasses_are_frozen_and_keep_values_structured():
     assert event.proposed.value == "Acme Steel"
     with pytest.raises(FrozenInstanceError):
         event.label = "Other"  # type: ignore[misc]
+
+
+def test_value_fragment_origin_is_backward_compatible_and_renderer_neutral():
+    assert ValueFragment("old caller").origin is ValueOrigin.NEUTRAL
+    assert (
+        ValueFragment("submitted", ValueOrigin.SUBMITTED).origin
+        is ValueOrigin.SUBMITTED
+    )
+
+
+def test_cli_forced_color_uses_the_semantic_palette_and_literal_text():
+    output = []
+    ui = CLIReviewUI(output_fn=output.append, color_mode="always")
+
+    ui.display(
+        ScalarComparison(
+            "Company [Name]",
+            ValueFragment("Current [Salesforce]"),
+            ValueFragment("Submitted [value]", ValueOrigin.SUBMITTED),
+        )
+    )
+    ui.display(
+        StagedRowSummary(
+            ValueFragment("Acme"),
+            ValueFragment("Alex", ValueOrigin.SUBMITTED),
+            ValueFragment("alex@example.com", ValueOrigin.SUBMITTED),
+            ValueFragment("PU-1", ValueOrigin.SUBMITTED),
+            contact_details_supplemented=True,
+        )
+    )
+    ui.display(WarningNotice(styled("Warning [literal]")))
+    ui.display(ValidationFeedback(styled("Try [again]")))
+    ui.display(ResponseEmail(ValueFragment("alex@example.com"), "Hello [Alex]"))
+
+    rendered = "\n".join(output)
+    assert "\x1b[92mSubmitted [value]\x1b[0m" in rendered
+    assert "\x1b[93mNote: contact details were supplemented" in rendered
+    assert "\x1b[91mWarning [literal]\x1b[0m" in rendered
+    assert "\x1b[91mTry [again]\x1b[0m" in rendered
+    assert "\x1b[94mHello [Alex]\x1b[0m" in rendered
+    assert "Current [Salesforce]" in rendered
+
+
+def test_cli_keeps_neutral_events_uncolored_even_when_color_is_forced():
+    output = []
+    ui = CLIReviewUI(output_fn=output.append, color_mode="always")
+
+    ui.display(Heading(styled("Account Updates"), "=" * 4))
+    ui.display(ScalarComparison("Name", ValueFragment("Old"), ValueFragment("New")))
+    ui.display(ReviewQueueSnapshot(build_review_queue([])))
+
+    assert all("\x1b[" not in value for value in output)
+
+
+@pytest.mark.parametrize("color_mode", [None, "never", False])
+def test_cli_custom_output_is_plain_unless_color_is_forced(color_mode):
+    output = []
+    ui = CLIReviewUI(output_fn=output.append, color_mode=color_mode)
+
+    ui.display(
+        ScalarComparison(
+            "Name",
+            ValueFragment("Old"),
+            ValueFragment("New", ValueOrigin.SUBMITTED),
+        )
+    )
+
+    assert "\x1b[" not in output[0]
+
+
+def test_cli_no_color_environment_disables_ansi_on_a_supported_terminal(
+    monkeypatch,
+):
+    class TerminalBuffer(StringIO):
+        def isatty(self):
+            return True
+
+    stream = TerminalBuffer()
+    monkeypatch.setattr("sys.stdout", stream)
+    monkeypatch.setenv("NO_COLOR", "1")
+    ui = CLIReviewUI()
+
+    ui.display(
+        ScalarComparison(
+            "Name",
+            ValueFragment("Old"),
+            ValueFragment("New", ValueOrigin.SUBMITTED),
+        )
+    )
+
+    assert "\x1b[" not in stream.getvalue()
+
+
+def test_cli_auto_color_uses_ansi_on_a_supported_terminal(monkeypatch):
+    class TerminalBuffer(StringIO):
+        def isatty(self):
+            return True
+
+    stream = TerminalBuffer()
+    monkeypatch.setattr("sys.stdout", stream)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    ui = CLIReviewUI()
+
+    ui.display(
+        ScalarComparison(
+            "Name",
+            ValueFragment("Old"),
+            ValueFragment("New", ValueOrigin.SUBMITTED),
+        )
+    )
+
+    assert "\x1b[92mNew\x1b[0m" in stream.getvalue()
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_cli_auto_color_falls_back_for_redirection_and_dumb_terminals(
+    monkeypatch, terminal
+):
+    class TerminalBuffer(StringIO):
+        def isatty(self):
+            return terminal
+
+    stream = TerminalBuffer()
+    monkeypatch.setattr("sys.stdout", stream)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    if terminal:
+        monkeypatch.setenv("TERM", "dumb")
+    ui = CLIReviewUI()
+
+    ui.display(WarningNotice(styled("Needs attention")))
+
+    assert "\x1b[" not in stream.getvalue()
+
+
+def test_forced_color_and_plain_rendering_have_identical_readable_text():
+    event = ScalarComparison(
+        "Company Name",
+        ValueFragment("Acme"),
+        ValueFragment("Acme [Steel]", ValueOrigin.SUBMITTED),
+    )
+    colored = []
+    plain = []
+    CLIReviewUI(output_fn=colored.append, color_mode="always").display(event)
+    CLIReviewUI(output_fn=plain.append, color_mode="never").display(event)
+
+    assert re.sub(r"\x1b\[[0-9;]*m", "", colored[0]) == plain[0]
 
 
 def test_cli_renders_scalar_and_mapping_comparisons_compatibly():

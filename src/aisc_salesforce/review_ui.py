@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol
 
 from .review_queue import ReviewQueueManifest
@@ -10,6 +11,14 @@ from .review_queue import ReviewQueueManifest
 
 class UnsupportedReviewInteractionError(RuntimeError):
     """A review UI received an interaction shape it does not support."""
+
+
+class ValueOrigin(StrEnum):
+    """Semantic source of a displayed value, independent of any renderer."""
+
+    NEUTRAL = "neutral"
+    SUBMITTED = "submitted"
+    SUPPLEMENTED = "supplemented"
 
 
 @dataclass(frozen=True)
@@ -24,6 +33,7 @@ class ValueFragment:
     """An interpolated domain value that a UI may style differently."""
 
     value: str
+    origin: ValueOrigin = ValueOrigin.NEUTRAL
 
 
 type StyledFragment = TextFragment | ValueFragment
@@ -50,6 +60,13 @@ class Heading:
 @dataclass(frozen=True)
 class Notice:
     """Informational reviewer-facing content."""
+
+    message: StyledText
+
+
+@dataclass(frozen=True)
+class WarningNotice:
+    """Actionable warning content that a UI may emphasize semantically."""
 
     message: StyledText
 
@@ -217,6 +234,7 @@ class ReviewQueueSnapshot:
 type ReviewEvent = (
     Heading
     | Notice
+    | WarningNotice
     | ValidationFeedback
     | ContextLine
     | ScalarComparison
