@@ -19,6 +19,60 @@ from aisc_salesforce.profile_updates import AutomationCounts
 from aisc_salesforce.rename_profile_update_cases import RenameCounts
 
 
+def test_user_sync_config_cli_runs_the_read_only_check(monkeypatch, capsys):
+    monkeypatch.setattr(app, "_run_check_user_sync_config", lambda: 0)
+
+    assert app.main(["check-user-sync-config"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_user_sync_config_command_authenticates_and_validates(monkeypatch, capsys):
+    environment = {
+        "SF_CLIENT_ID": "id",
+        "SF_CLIENT_SECRET": "secret",
+        "PARTICIPANT_PROFILE_ID": "00e5w000000k7KfAAI",
+        "PARTICIPANT_PRINCIPAL_PROFILE_ID": "00e5w000000kDqiAAE",
+        "PARTICIPANT_AP_PROFILE_ID": "00e5w000000kDqdAAE",
+        "PARTICIPANT_QC_PROFILE_ID": "00e5w000000kDqnAAE",
+        "PARTICIPANT_RAS_PROFILE_ID": "00e5w000000kDqsAAE",
+    }
+    monkeypatch.setattr(app, "_load_dotenv", lambda path: None)
+    monkeypatch.setattr(app.os, "environ", environment)
+    monkeypatch.setattr(app, "get_credentials", lambda values: {"ok": "yes"})
+    monkeypatch.setattr(app, "get_oauth_url", lambda values: "token-url")
+    monkeypatch.setattr(
+        app, "request_access_token", lambda credentials, oauth_url: "auth"
+    )
+    monkeypatch.setattr(app, "SalesforceClient", lambda auth: "client")
+
+    class Validator:
+        def __init__(self, client):
+            assert client == "client"
+
+        def validate(self, values):
+            assert values == environment
+
+    monkeypatch.setattr(app, "UserSyncConfigValidator", Validator)
+
+    assert app.main(["check-user-sync-config"]) == 0
+    assert capsys.readouterr().out.strip() == (
+        "User sync configuration is valid; no Salesforce records were changed."
+    )
+
+
+def test_user_sync_config_cli_reports_expected_failures(monkeypatch, capsys):
+    monkeypatch.setattr(
+        app,
+        "_run_check_user_sync_config",
+        lambda: (_ for _ in ()).throw(app.SalesforceError("Profile query failed")),
+    )
+
+    assert app.main(["check-user-sync-config"]) == 1
+    assert "User sync configuration check failed: Profile query failed" in (
+        capsys.readouterr().err
+    )
+
+
 def test_picklist_audit_cli_prints_grouped_informational_findings(monkeypatch):
     output = []
     result = PicklistAuditResult(

@@ -22,10 +22,34 @@ cp .env.example .env
 | `SF_CLIENT_SECRET` | Yes | Salesforce Connected App secret |
 | `CERTIFICATION_QUEUE_ID` | For profile updates | Owner ID for Profile Update Cases |
 | `PRIMARY_RESPONDER_ID` | For profile updates | Primary Responder ID for Profile Update Cases |
+| `PARTICIPANT_PROFILE_ID` | For user-sync check | Participant Profile ID |
+| `PARTICIPANT_PRINCIPAL_PROFILE_ID` | For user-sync check | Participant Principal Profile ID |
+| `PARTICIPANT_AP_PROFILE_ID` | For user-sync check | Participant AP Profile ID |
+| `PARTICIPANT_QC_PROFILE_ID` | For user-sync check | Participant QC Profile ID |
+| `PARTICIPANT_RAS_PROFILE_ID` | For user-sync check | Participant RAS Profile ID |
 | `SF_LOGIN_URL` | No | Salesforce org URL or complete OAuth token URL |
 
 The CLI loads `.env` without replacing environment variables that are already
 set.
+
+## Participant user-provisioning Profile check
+
+Run the read-only configuration check before using participant provisioning:
+
+```bash
+uv run aisc_salesforce check-user-sync-config
+```
+
+The command reads the five Salesforce `Profile` records configured above and
+checks that each configured ID matches the application contract and that its
+Salesforce `Name` is the expected participant Profile name. It does not create,
+update, or delete Salesforce records or local files. It returns exit code `0`
+when every Profile matches. Missing configuration, an incorrect ID, a missing
+Profile, a name mismatch, authentication failure, or a Salesforce read failure
+returns exit code `1`.
+
+License validation is intentionally out of scope for now because the expected
+external-user license value has not yet been defined.
 
 ## Developer rule: use the Salesforce enum catalog
 

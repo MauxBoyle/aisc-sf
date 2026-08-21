@@ -44,6 +44,7 @@ from .stage_profile_updates import (
     ProfileUpdateStagingService,
     write_staged_profile_updates,
 )
+from .user_sync_config import UserSyncConfigError, UserSyncConfigValidator
 
 
 def main(
@@ -151,6 +152,10 @@ def main(
         "audit-picklist-enums",
         help="Report recently stored picklist values missing from Python enums.",
     )
+    subparsers.add_parser(
+        "check-user-sync-config",
+        help="Validate configured participant Profiles without changing Salesforce.",
+    )
     args = parser.parse_args(argv)
     if args.command == "snapshot":
         try:
@@ -253,6 +258,12 @@ def main(
         ) as error:
             print(f"Picklist enum audit failed: {error}", file=sys.stderr)
             return 1
+    if args.command == "check-user-sync-config":
+        try:
+            return _run_check_user_sync_config()
+        except (UserSyncConfigError, SalesforceError) as error:
+            print(f"User sync configuration check failed: {error}", file=sys.stderr)
+            return 1
     return 1
 
 
@@ -291,6 +302,17 @@ def _run_audit_picklist_enums(*, output_fn: Callable[[str], None] = print) -> in
         build_queried_field_inventory(export_plan)
     )
     _print_picklist_audit(result, output_fn=output_fn)
+    return 0
+
+
+def _run_check_user_sync_config() -> int:
+    """Validate the configured participant Profiles with read-only Salesforce calls."""
+    _load_dotenv(Path(".env"))
+    environment = dict(os.environ)
+    credentials = get_credentials(environment)
+    auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
+    UserSyncConfigValidator(SalesforceClient(auth)).validate(environment)
+    print("User sync configuration is valid; no Salesforce records were changed.")
     return 0
 
 
