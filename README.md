@@ -24,6 +24,10 @@ Set these values in `.env`:
   `process-profile-updates`.
 - `PRIMARY_RESPONDER_ID`: the Case Primary Responder used by
   `profile-updates` and `process-profile-updates`.
+- `PARTICIPANT_PROFILE_ID`, `PARTICIPANT_PRINCIPAL_PROFILE_ID`,
+  `PARTICIPANT_AP_PROFILE_ID`, `PARTICIPANT_QC_PROFILE_ID`, and
+  `PARTICIPANT_RAS_PROFILE_ID`: the fixed Profile IDs used by participant user
+  provisioning.
 - `SF_LOGIN_URL` (optional): an org URL or complete OAuth token URL. It
   defaults to Salesforce's production login service.
 
@@ -50,6 +54,13 @@ catalog:
 
 ```bash
 uv run aisc_salesforce audit-picklist-enums
+```
+
+Validate the participant user-provisioning Profile configuration without
+changing Salesforce:
+
+```bash
+uv run aisc_salesforce check-user-sync-config
 ```
 
 Create a read-only application-stage count:
