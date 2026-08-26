@@ -47,6 +47,22 @@ from aisc_salesforce.stage_profile_updates import CSV_COLUMNS, StagingResult
 NOW = datetime(2026, 7, 17, 18, 0, tzinfo=UTC)
 
 
+def test_review_helpers_have_docstrings():
+    routing = profile_update_processing._ParentRouting
+    assert routing.is_parent.__doc__
+    assert routing.blocked.__doc__
+    assert profile_update_processing._AuditWriter.append.__doc__
+    assert profile_update_processing._ResponseWriter.append.__doc__
+
+    class Client:
+        def create_record(self):
+            return None
+
+    client = profile_update_processing._QueuePublishingClient(Client(), lambda: None)
+    mutation = client.__getattr__("create_record")
+    assert mutation.__doc__
+
+
 def staged_row(**changes):
     row = {column: "" for column in CSV_COLUMNS}
     row.update(

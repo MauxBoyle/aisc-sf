@@ -278,10 +278,12 @@ class _ParentRouting:
 
     @property
     def is_parent(self) -> bool:
+        """Return whether a parent Account routes changes to active direct children."""
         return bool(self.direct_children)
 
     @property
     def blocked(self) -> bool:
+        """Return whether parent routing has no active targets or field conflicts."""
         return self.is_parent and (not self.target_accounts or bool(self.conflicts))
 
 
@@ -399,6 +401,7 @@ class _QueuePublishingClient:
             return attribute
 
         def mutation(*args: Any, **kwargs: Any) -> Any:
+            """Publish queue snapshots before and after one Salesforce mutation."""
             self._publish()
             try:
                 return attribute(*args, **kwargs)
@@ -1165,6 +1168,7 @@ class _AuditWriter:
             self.output.close()
 
     def append(self, result: ActionResult) -> None:
+        """Write an audit event, then flush and sync it to disk."""
         if self.output is None:
             raise RuntimeError("Audit writer is not open.")
         proposal = result.proposal
@@ -1221,6 +1225,11 @@ class _ResponseWriter:
         self.path.touch()
 
     def append(self, case_id: str, email: str, text: str) -> bool:
+        """Append a response email once and return whether it was written.
+
+        Returns:
+            True when the response block was not already present.
+        """
         block = f"Case {case_id}\nTo: {email}\n\n{text}\n\n"
         if block in self.path.read_text(encoding="utf-8"):
             return False

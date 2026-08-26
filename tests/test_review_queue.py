@@ -1,10 +1,13 @@
 import json
+from collections.abc import Generator
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
+from typing import get_type_hints
 
 import pytest
 
 from aisc_salesforce.review_queue import (
+    ProposedChange,
     QueueStatus,
     ReviewQueueStore,
     build_review_queue,
@@ -17,6 +20,12 @@ from aisc_salesforce.review_queue import (
 from aisc_salesforce.stage_profile_updates import CSV_COLUMNS
 
 NOW = datetime(2026, 7, 17, 18, 0, tzinfo=UTC)
+
+
+def test_iter_changes_has_explicit_generator_return_type():
+    assert get_type_hints(iter_changes)["return"] == Generator[  # noqa: UP043
+        ProposedChange, None, None
+    ]
 
 
 def queue_row(**changes):
