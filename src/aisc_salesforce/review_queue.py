@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Generator
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -810,7 +811,9 @@ class ReviewQueueStore:
         return self.manifest
 
 
-def iter_changes(manifest: ReviewQueueManifest):
+def iter_changes(  # noqa: UP043 - the full generator contract is intentional.
+    manifest: ReviewQueueManifest,
+) -> Generator[ProposedChange, None, None]:  # noqa: UP043
     """Yield changes once in manifest order, despite cross-row references."""
     seen: set[str] = set()
     for batch in manifest.batches:
