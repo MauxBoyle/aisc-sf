@@ -3,9 +3,11 @@
 
 import subprocess
 import sys
+from pathlib import Path
 
 
-def main():
+def main() -> None:
+    """Serve MkDocs and mirror its output to the terminal and log file."""
     proc = subprocess.Popen(
         [sys.executable, "-m", "mkdocs", "serve"],
         stdout=subprocess.PIPE,
@@ -14,7 +16,8 @@ def main():
         bufsize=1,
     )
     try:
-        with open("mkdocs.log", "w") as log:
+        log_path = Path("mkdocs.log")
+        with log_path.open("w") as log:
             for line in proc.stdout:
                 print(line, end="", flush=True)
                 log.write(line)
