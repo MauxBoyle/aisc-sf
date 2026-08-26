@@ -4645,7 +4645,12 @@ def format_response_emails(
                 "your account",
             ),
         )
-        lines = [ACCOUNT_EMAIL_OPENING.format(account_name=account_name)]
+        lines = [
+            f"Thank you for updating your information with AISC. The changes are "
+            f"summarized below. An updated Participant Portal login will be sent by a "
+            f"separate email, if needed. Unless otherwise noted, previous contacts will "
+            f"remain in the {account_name} contact list."
+        ]
         seen: set[tuple[str, str, str, str]] = set()
         for proposal in proposals:
             identity = (

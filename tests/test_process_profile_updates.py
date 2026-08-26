@@ -4239,7 +4239,13 @@ def test_email_formatter_creates_one_paragraph_per_submitter():
     emails = format_response_emails(results)
 
     assert list(emails) == ["first@example.com", "second@example.com"]
-    assert emails["first@example.com"].count("Thank you for updating") == 1
+    assert (
+        "Thank you for updating your information with AISC. The changes are "
+        "summarized below. An updated Participant Portal login will be sent by a "
+        "separate email, if needed. Unless otherwise noted, previous contacts will "
+        "remain in the Acme Steel contact list."
+        in emails["first@example.com"]
+    )
     assert "Company Name: Acme Steel" in emails["first@example.com"]
     assert "Billing City: Chicago" in emails["second@example.com"]
     assert all("\x1b[" not in body for body in emails.values())
