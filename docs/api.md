@@ -94,6 +94,21 @@ The frozen data classes model an Account name plus ordered Profile Update/date
 pairs. Both recurring automation and staging use these helpers, so identifier
 matching and subject-length validation have one shared implementation.
 
+## Required participant Profile rules
+
+::: aisc_salesforce.required_profile_rules
+    options:
+      show_root_heading: true
+      members:
+        - NOT_ELIGIBLE_SKIP_REASON
+        - AccountRoleAssignment
+        - RequiredProfileDecision
+        - determine_required_profile
+
+This pure rule module accepts already-known Account-role assignments and never
+reads from or writes to Salesforce. Its frozen decision preserves the ordered,
+deduplicated assignments that caused the selected Profile.
+
 ## Legacy Case subject correction
 
 ::: aisc_salesforce.rename_profile_update_cases

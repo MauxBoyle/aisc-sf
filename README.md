@@ -352,6 +352,11 @@ queue. The Quality/QC role intentionally uses the
 `Cert_Marketing_Contact__c` Account lookup field; its marketing-oriented name
 is established Salesforce schema, not a mapping error.
 
+`required_profile_rules.py` is a reusable, pure rule engine for choosing a
+participant Profile from Account-role assignments. It does not read from or
+write to Salesforce; future orchestration can pass it already-known Account
+IDs, roles, and certification statuses.
+
 Contact searches prefer the Account's **family accounts**: the target Account,
 its parent Account, and its **sibling accounts** that have the same parent. A
 root Account with no parent has only itself in its family. Exact normalized and
