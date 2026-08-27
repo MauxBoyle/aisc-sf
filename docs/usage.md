@@ -599,6 +599,15 @@ New York has no submitted title field. Completely blank roles have completely
 blank role columns. The prefixed resolution columns are readable projections
 kept for compatibility; `contact_resolutions` is the authoritative contract.
 
+### Required participant Profile rules
+
+`aisc_salesforce.required_profile_rules` is a pure Python rule engine for
+selecting a participant Profile from Account-role assignments. It accepts an
+`AccountRole`, Salesforce Account ID, and certification status for each
+assignment, then returns a Profile decision and its ordered, deduplicated
+causes. It performs no Salesforce reads or writes. A later orchestration layer
+is responsible for obtaining assignments and using the result.
+
 Each JSON entry represents one distinct comparison key shared by any submitter
 and role occurrences. It contains:
 
