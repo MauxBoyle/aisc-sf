@@ -17,6 +17,11 @@ from typing import Any, TextIO
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from .account_roles import (
+    ACCOUNT_ROLE_DEFINITIONS,
+    QUALIFYING_CERTIFICATION_STATUSES,
+    RoleDefinition,
+)
 from .contact_normalization import normalize_contact_value
 from .contact_resolution import (
     ContactResolution,
@@ -87,11 +92,8 @@ from .review_ui import (
 from .salesforce import SalesforceClient, SalesforceError
 from .salesforce_enums import CaseStatus, ProfileChangeStatus
 from .stage_profile_updates import (
-    ACTIVE_CERTIFICATION_STATUSES,
     CSV_COLUMNS,
-    ROLE_DEFINITIONS,
     ProfileUpdateStagingService,
-    RoleDefinition,
     StagingResult,
     write_staged_profile_updates,
 )
@@ -1891,7 +1893,7 @@ class InteractiveProfileUpdateProcessor:
         account_fields = [
             "Id",
             "ParentId",
-            *(role.account_lookup for role in ROLE_DEFINITIONS),
+            *(role.account_lookup for role in ACCOUNT_ROLE_DEFINITIONS),
         ]
         account = self.client.get_record("Account", batch.account_id, account_fields)
         family_ids = self._fresh_family_account_ids(batch)
@@ -1929,7 +1931,7 @@ class InteractiveProfileUpdateProcessor:
                         source = ContactSource("submitter", submission_id=submission_id)
                         occurrences.append((source, details, row, ""))
 
-                for role in ROLE_DEFINITIONS:
+                for role in ACCOUNT_ROLE_DEFINITIONS:
                     details = {
                         suffix: normalize_contact_value(
                             suffix, record.get(source_field)
@@ -3168,7 +3170,7 @@ class InteractiveProfileUpdateProcessor:
         results: list[ActionResult] = []
         responses: list[_RoleResponse] = []
         items_by_key = {item.key: item for item in items}
-        for role in ROLE_DEFINITIONS:
+        for role in ACCOUNT_ROLE_DEFINITIONS:
             submitted = _submitted_role_values(submissions, row, role)
             if not any(submitted.values()):
                 continue
@@ -3410,7 +3412,7 @@ class InteractiveProfileUpdateProcessor:
             child
             for child in direct_children
             if _display(child.get("Cert_Certification_Status__c"))
-            in ACTIVE_CERTIFICATION_STATUSES
+            in QUALIFYING_CERTIFICATION_STATUSES
         )
         conflicts: list[ParentAccountFieldConflict] = []
         if active_children:
@@ -3495,7 +3497,7 @@ class InteractiveProfileUpdateProcessor:
                 requested = _latest_nonblank(submissions, source_field)
                 if requested:
                     requests.append((account_field, label, requested))
-            for role in ROLE_DEFINITIONS:
+            for role in ACCOUNT_ROLE_DEFINITIONS:
                 submitted = _submitted_role_values(submissions, row, role)
                 has_fresh_role_value = any(
                     _latest_nonblank(submissions, source_field)
@@ -3780,7 +3782,7 @@ class InteractiveProfileUpdateProcessor:
         contacts_by_id: dict[str, dict[str, Any]] = {}
         for account in target_accounts:
             account_id = _required_record_text(account, "Id", "Affected Account ID")
-            for role in ROLE_DEFINITIONS:
+            for role in ACCOUNT_ROLE_DEFINITIONS:
                 contact_id = _display(account.get(role.account_lookup))
                 contact = None
                 if contact_id:

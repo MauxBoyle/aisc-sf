@@ -346,6 +346,12 @@ filled from that Contact where possible. Repeating the same contact information
 in several roles does not create a warning, but conflicting emails for the same
 submitted name are treated as ambiguous.
 
+The shared Account-role definitions in `account_roles.py` own these submitted
+field and Account lookup mappings for staging, processing, and the review
+queue. The Quality/QC role intentionally uses the
+`Cert_Marketing_Contact__c` Account lookup field; its marketing-oriented name
+is established Salesforce schema, not a mapping error.
+
 Contact searches prefer the Account's **family accounts**: the target Account,
 its parent Account, and its **sibling accounts** that have the same parent. A
 root Account with no parent has only itself in its family. Exact normalized and

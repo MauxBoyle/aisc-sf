@@ -13,6 +13,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .account_roles import (
+    ACCOUNT_ROLE_DEFINITIONS,
+    QUALIFYING_CERTIFICATION_STATUSES,
+    RoleDefinition,
+)
 from .contact_normalization import normalize_contact_value
 from .contact_resolution import (
     ContactResolution,
@@ -65,93 +70,6 @@ KEY_UPDATE_FIELDS = [
     "Revised_Company_Owner__c",
     *(api_name for _, api_name, _ in ADDRESS_FIELDS),
     *(api_name for api_name, _ in KEY_ANSWER_FIELDS),
-]
-
-ACTIVE_CERTIFICATION_STATUSES = frozenset({"Certified", "Initials"})
-
-
-@dataclass(frozen=True)
-class RoleDefinition:
-    """Map one submitted role to its fields and current Account lookup."""
-
-    prefix: str
-    label: str
-    first_name_field: str
-    last_name_field: str
-    title_field: str | None
-    email_field: str
-    phone_field: str
-    account_lookup: str
-
-    @property
-    def submitted_fields(self) -> list[tuple[str, str]]:
-        """Return pairs of CSV suffixes and Salesforce submission fields."""
-        fields = [
-            ("first_name", self.first_name_field),
-            ("last_name", self.last_name_field),
-        ]
-        if self.title_field is not None:
-            fields.append(("title", self.title_field))
-        fields.extend(
-            [
-                ("email", self.email_field),
-                ("phone", self.phone_field),
-            ]
-        )
-        return fields
-
-
-ROLE_DEFINITIONS = [
-    RoleDefinition(
-        "certification",
-        "Certification",
-        "Cert_First_Name__c",
-        "Cert_Last_Name__c",
-        "Cert_Title__c",
-        "Cert_Email__c",
-        "Cert_Phone__c",
-        "Cert_Certification_Contact__c",
-    ),
-    RoleDefinition(
-        "principal",
-        "Principal",
-        "Principal_First_Name__c",
-        "Principal_Last_Name__c",
-        "Principal_Title__c",
-        "Principal_Email__c",
-        "Principal_Phone__c",
-        "Cert_Principal_Contact__c",
-    ),
-    RoleDefinition(
-        "accounting",
-        "Accounting",
-        "AP_First_Name__c",
-        "AP_Last_Name__c",
-        "AP_Title__c",
-        "AP_Email__c",
-        "AP_Phone__c",
-        "Cert_Accounting_Contact__c",
-    ),
-    RoleDefinition(
-        "quality",
-        "Quality",
-        "Quality_First_Name__c",
-        "Quality_Last_Name__c",
-        "QC_Title__c",
-        "Quality_Email__c",
-        "Quality_Phone__c",
-        "Cert_Marketing_Contact__c",
-    ),
-    RoleDefinition(
-        "new_york",
-        "New York",
-        "NY_First_Name__c",
-        "NY_Last_Name__c",
-        None,
-        "NY_Email__c",
-        "NY_Phone__c",
-        "Cert_Safety_Contact__c",
-    ),
 ]
 
 SHARED_COLUMNS = [
@@ -215,7 +133,7 @@ def _role_columns(role: RoleDefinition) -> list[str]:
 CSV_COLUMNS = [
     *SHARED_COLUMNS,
     *KEY_COLUMNS,
-    *(column for role in ROLE_DEFINITIONS for column in _role_columns(role)),
+    *(column for role in ACCOUNT_ROLE_DEFINITIONS for column in _role_columns(role)),
 ]
 
 
@@ -342,7 +260,7 @@ class ProfileUpdateStagingService:
         lookup_ids = _unique_text_values(
             account.get(role.account_lookup)
             for account in accounts
-            for role in ROLE_DEFINITIONS
+            for role in ACCOUNT_ROLE_DEFINITIONS
         )
         clauses = []
         if account_ids:
@@ -396,7 +314,7 @@ class ProfileUpdateStagingService:
                 child
                 for child in direct_children
                 if _clean_text(child.get("Cert_Certification_Status__c"))
-                in ACTIVE_CERTIFICATION_STATUSES
+                in QUALIFYING_CERTIFICATION_STATUSES
             ]
             if direct_children
             else ([account] if account is not None else [])
@@ -812,7 +730,7 @@ def _has_submitted_update_content(records: list[dict[str, Any]]) -> bool:
         *KEY_UPDATE_FIELDS,
         *(
             api_name
-            for role in ROLE_DEFINITIONS
+            for role in ACCOUNT_ROLE_DEFINITIONS
             for _, api_name in role.submitted_fields
         ),
         "Comments__c",
@@ -827,7 +745,7 @@ def _has_submitted_update_content(records: list[dict[str, Any]]) -> bool:
 
 def _merge_roles(records: list[dict[str, Any]]) -> list[MergedRole]:
     roles: list[MergedRole] = []
-    for definition in ROLE_DEFINITIONS:
+    for definition in ACCOUNT_ROLE_DEFINITIONS:
         values: dict[str, str] = {}
         source_submission_id = ""
         for record in records:

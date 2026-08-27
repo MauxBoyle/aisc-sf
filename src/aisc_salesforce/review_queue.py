@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid5
 
+from .account_roles import ACCOUNT_ROLE_DEFINITIONS
 from .filesystem import sync_directory
-from .stage_profile_updates import ROLE_DEFINITIONS
 
 SCHEMA_VERSION = 1
 REVIEW_QUEUE_FILENAME = "review_queue.json"
@@ -1120,7 +1120,7 @@ def _build_contact_changes(
 def _role_link_changes(raw: dict[str, str], row: StagedRow) -> list[ProposedChange]:
     changes = []
     for affected in _affected_accounts(raw):
-        for role in ROLE_DEFINITIONS:
+        for role in ACCOUNT_ROLE_DEFINITIONS:
             if not any(
                 raw.get(f"{role.prefix}_{suffix}", "").strip()
                 for suffix, _ in role.submitted_fields

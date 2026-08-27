@@ -514,6 +514,15 @@ When at least one revised address component is present, the output contains all
 five components. Missing submitted components are filled from the Account
 billing address where possible.
 
+### Shared Account-role mappings
+
+`src/aisc_salesforce/account_roles.py` owns the submitted Salesforce fields and
+Account lookup mappings shared by staging, interactive processing, and the
+review queue. The Quality/QC role deliberately uses the
+`Cert_Marketing_Contact__c` Account lookup field. The field's marketing name is
+part of the existing Salesforce schema and does not mean the role should use a
+different lookup.
+
 ### Submitted contact normalization
 
 Staging canonicalizes only values submitted for the submitter and the five
