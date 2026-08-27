@@ -606,7 +606,13 @@ selecting a participant Profile from Account-role assignments. It accepts an
 `AccountRole`, Salesforce Account ID, and certification status for each
 assignment, then returns a Profile decision and its ordered, deduplicated
 causes. It performs no Salesforce reads or writes. A later orchestration layer
-is responsible for obtaining assignments and using the result.
+is responsible for obtaining assignments and using the result. Only
+`Certified` and `Initials` assignments are eligible. That layer can also pass
+the IDs of Accounts in multi-account Families (Accounts with a parent, child,
+or sibling). A qualifying assignment on one of those IDs has first priority and
+selects Participant RAS. A standalone root Account does not qualify for this
+override. When no qualifying assignment is in the supplied ID set, the usual
+single-role, New York, and multiple-role rules apply unchanged.
 
 Each JSON entry represents one distinct comparison key shared by any submitter
 and role occurrences. It contains:

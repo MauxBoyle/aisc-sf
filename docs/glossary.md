@@ -81,6 +81,11 @@ identify the exact data involved.
   itself. Family membership helps the project prefer a relevant Contact match;
   it does not automatically change every Account in the family.
 
+  For required participant Profile selection, a **multi-account Family** is an
+  Account that has a parent, a child, or a sibling in the Account hierarchy. A
+  standalone root Account is not a multi-account Family. A qualifying role on
+  a multi-account Family Account requires the Participant RAS Profile.
+
 ## I
 
 **iMIS contact consolidation**
@@ -154,4 +159,3 @@ identify the exact data involved.
 
 : One row in the staged Profile Updates CSV. It may represent one submission or
   several compatible submissions grouped by Account and submitter email.
-

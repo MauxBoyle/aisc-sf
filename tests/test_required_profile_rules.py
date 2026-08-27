@@ -48,6 +48,55 @@ def test_new_york_role_requires_ras_profile():
     assert decision == RequiredProfileDecision(ParticipantProfile.RAS, None, (source,))
 
 
+@pytest.mark.parametrize("role", list(AccountRole))
+def test_multi_account_family_assignment_overrides_role_profile_with_ras(role):
+    source = assignment(role, "001-family-member")
+
+    decision = determine_required_profile(
+        [source], multi_account_family_account_ids={"001-family-member"}
+    )
+
+    assert decision == RequiredProfileDecision(ParticipantProfile.RAS, None, (source,))
+
+
+def test_non_qualifying_multi_account_family_assignment_is_not_eligible():
+    source = assignment(
+        AccountRole.PRINCIPAL,
+        "001-family-member",
+        certification_status="Expired",
+    )
+
+    decision = determine_required_profile(
+        [source], multi_account_family_account_ids={"001-family-member"}
+    )
+
+    assert decision == RequiredProfileDecision(None, NOT_ELIGIBLE_SKIP_REASON, ())
+
+
+@pytest.mark.parametrize(
+    ("sources", "expected_profile"),
+    [
+        ([assignment(AccountRole.PRINCIPAL)], ParticipantProfile.PRINCIPAL),
+        ([assignment(AccountRole.NEW_YORK)], ParticipantProfile.RAS),
+        (
+            [
+                assignment(AccountRole.ACCOUNTING, "001-first"),
+                assignment(AccountRole.QUALITY_QC, "001-second"),
+            ],
+            ParticipantProfile.RAS,
+        ),
+    ],
+)
+def test_assignments_outside_multi_account_family_keep_existing_rules(
+    sources, expected_profile
+):
+    decision = determine_required_profile(
+        sources, multi_account_family_account_ids={"001-unrelated-family-member"}
+    )
+
+    assert decision == RequiredProfileDecision(expected_profile, None, tuple(sources))
+
+
 @pytest.mark.parametrize(
     "sources",
     [
