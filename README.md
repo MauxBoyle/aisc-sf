@@ -358,7 +358,12 @@ is established Salesforce schema, not a mapping error.
 `required_profile_rules.py` is a reusable, pure rule engine for choosing a
 participant Profile from Account-role assignments. It does not read from or
 write to Salesforce; future orchestration can pass it already-known Account
-IDs, roles, and certification statuses.
+IDs, roles, certification statuses, and the IDs of Accounts in multi-account
+Families. Only `Certified` and `Initials` assignments qualify. When a
+qualifying assignment belongs to a multi-account Family, it selects the
+Participant RAS Profile before the usual single-role, New York, and
+multiple-role rules. Accounts outside that supplied ID set keep the usual
+rules.
 
 Contact searches prefer the Account's **family accounts**: the target Account,
 its parent Account, and its **sibling accounts** that have the same parent. A

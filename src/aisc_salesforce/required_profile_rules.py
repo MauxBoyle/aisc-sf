@@ -2,12 +2,13 @@
 
 This module deliberately does not read from or write to Salesforce.  Callers
 provide already-known assignments and can later use the returned profile when
-orchestrating Salesforce work.
+orchestrating Salesforce work. A qualifying assignment on a multi-account
+Family Account has priority and selects the RAS profile.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 
 from .account_roles import QUALIFYING_CERTIFICATION_STATUSES, AccountRole
@@ -45,11 +46,18 @@ _SINGLE_ROLE_PROFILES = {
 
 def determine_required_profile(
     assignments: Iterable[AccountRoleAssignment],
+    multi_account_family_account_ids: Collection[str] | None = None,
 ) -> RequiredProfileDecision:
     """Select the required participant Profile from qualifying assignments.
 
-    Duplicate role/Account pairs retain only their first occurrence.  A New
-    York assignment or more than one distinct role requires the RAS profile.
+    Duplicate role/Account pairs retain only their first occurrence. A
+    qualifying assignment on an Account in ``multi_account_family_account_ids``
+    requires the RAS profile before all other profile rules. Otherwise, a New
+    York assignment or more than one distinct role requires RAS.
+
+    ``multi_account_family_account_ids`` is optional so callers that do not
+    have family-hierarchy information retain the existing behavior. Its IDs
+    must represent Accounts that have a parent, child, or sibling.
     """
     causes = _qualifying_unique_assignments(assignments)
     if not causes:
@@ -59,16 +67,30 @@ def determine_required_profile(
             causal_assignments=(),
         )
 
-    roles = {assignment.role for assignment in causes}
-    if AccountRole.NEW_YORK in roles or len(roles) > 1:
+    if multi_account_family_account_ids is not None and any(
+        assignment.account_id in multi_account_family_account_ids
+        for assignment in causes
+    ):
         profile = ParticipantProfile.RAS
     else:
-        profile = _SINGLE_ROLE_PROFILES[next(iter(roles))]
+        profile = _profile_from_roles(causes)
     return RequiredProfileDecision(
         profile=profile,
         skip_reason=None,
         causal_assignments=causes,
     )
+
+
+def _profile_from_roles(
+    causes: tuple[AccountRoleAssignment, ...],
+) -> ParticipantProfile:
+    """Return the usual Profile from qualifying assignments without family data."""
+    roles = {assignment.role for assignment in causes}
+    if AccountRole.NEW_YORK in roles or len(roles) > 1:
+        profile = ParticipantProfile.RAS
+    else:
+        profile = _SINGLE_ROLE_PROFILES[next(iter(roles))]
+    return profile
 
 
 def _qualifying_unique_assignments(

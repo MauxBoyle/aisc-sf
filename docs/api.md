@@ -107,7 +107,11 @@ matching and subject-length validation have one shared implementation.
 
 This pure rule module accepts already-known Account-role assignments and never
 reads from or writes to Salesforce. Its frozen decision preserves the ordered,
-deduplicated assignments that caused the selected Profile.
+deduplicated assignments that caused the selected Profile. Callers can
+optionally pass the Account IDs that belong to multi-account Families. A
+qualifying assignment on one of those IDs selects Participant RAS before the
+usual role-based rules; `Certified` and `Initials` are the only qualifying
+statuses.
 
 ## Legacy Case subject correction
 
