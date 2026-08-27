@@ -38,4 +38,5 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Usage: usage.md
+  - Glossary: glossary.md
   - API Reference: api.md

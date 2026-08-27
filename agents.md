@@ -1,6 +1,8 @@
 ## Project Domain
 
 The purpose of this project is to interact with our Salesforce data efficiently without the user interface.
+docs/glossary.md should help clarify any custom terminology used. 
+when updating docs, add any new terms to the glossary that may help future users.
 
 ## Project Setup and Management
 

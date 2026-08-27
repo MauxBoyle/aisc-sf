@@ -11,5 +11,6 @@ audited interactive review command for approved Account and Contact changes.
 ## Quick Links
 
 - [Usage Guide](usage.md) — installation and running instructions
+- [Glossary](glossary.md) — definitions of project-specific terms
 - [Enum catalog rule](usage.md#developer-rule-use-the-salesforce-enum-catalog) — required approach for Salesforce picklist values
 - [API Reference](api.md) — auto-generated from source code

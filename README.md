@@ -1,5 +1,8 @@
 # aisc-salesforce
 
+Project-specific terms, including Family, Parent, Child, and Sibling Accounts,
+are defined in the [documentation glossary](docs/glossary.md).
+
 ## Installation
 
 Clone the repository, then install the project and its dependencies:
