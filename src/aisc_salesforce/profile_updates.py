@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
 
+from .account_roles import ACCOUNT_ROLE_DEFINITIONS
 from .profile_update_subjects import (
     ProfileUpdateReference,
     append_profile_update,
@@ -60,30 +61,11 @@ SUMMARY_FIELDS = [
     ("Will_new_equipment_be_purchased__c", "New Equipment Will Be Purchased"),
     ("Will_old_equipment_be_removed__c", "Old Equipment Will Be Removed"),
     ("Will_software_change__c", "Software Will Change"),
-    ("AP_First_Name__c", "Accounting Contact First Name"),
-    ("AP_Last_Name__c", "Accounting Contact Last Name"),
-    ("AP_Title__c", "Accounting Contact Title"),
-    ("AP_Email__c", "Accounting Contact Email"),
-    ("AP_Phone__c", "Accounting Contact Phone"),
-    ("Cert_First_Name__c", "Certification Contact First Name"),
-    ("Cert_Last_Name__c", "Certification Contact Last Name"),
-    ("Cert_Title__c", "Certification Contact Title"),
-    ("Cert_Email__c", "Certification Contact Email"),
-    ("Cert_Phone__c", "Certification Contact Phone"),
-    ("Principal_First_Name__c", "Principal Contact First Name"),
-    ("Principal_Last_Name__c", "Principal Contact Last Name"),
-    ("Principal_Title__c", "Principal Contact Title"),
-    ("Principal_Email__c", "Principal Contact Email"),
-    ("Principal_Phone__c", "Principal Contact Phone"),
-    ("Quality_First_Name__c", "Quality Contact First Name"),
-    ("Quality_Last_Name__c", "Quality Contact Last Name"),
-    ("QC_Title__c", "Quality Contact Title"),
-    ("Quality_Email__c", "Quality Contact Email"),
-    ("Quality_Phone__c", "Quality Contact Phone"),
-    ("NY_First_Name__c", "New York Contact First Name"),
-    ("NY_Last_Name__c", "New York Contact Last Name"),
-    ("NY_Email__c", "New York Contact Email"),
-    ("NY_Phone__c", "New York Contact Phone"),
+    *(
+        (field_name, f"{role.label} Contact {suffix.replace('_', ' ').title()}")
+        for role in ACCOUNT_ROLE_DEFINITIONS
+        for suffix, field_name in role.submitted_fields
+    ),
     ("Other_Personnel_Notes__c", "Other Personnel Notes"),
     ("Comments__c", "Comments"),
 ]

@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from .account_roles import ACCOUNT_ROLE_DEFINITIONS
+
 # Application snapshot
 APPLICATION_CASE_FIELDS = (
     "Id",
@@ -67,30 +69,11 @@ SUBMISSION_FIELDS = (
     "Will_new_equipment_be_purchased__c",
     "Will_old_equipment_be_removed__c",
     "Will_software_change__c",
-    "AP_First_Name__c",
-    "AP_Last_Name__c",
-    "AP_Title__c",
-    "AP_Email__c",
-    "AP_Phone__c",
-    "Cert_First_Name__c",
-    "Cert_Last_Name__c",
-    "Cert_Title__c",
-    "Cert_Email__c",
-    "Cert_Phone__c",
-    "Principal_First_Name__c",
-    "Principal_Last_Name__c",
-    "Principal_Title__c",
-    "Principal_Email__c",
-    "Principal_Phone__c",
-    "Quality_First_Name__c",
-    "Quality_Last_Name__c",
-    "QC_Title__c",
-    "Quality_Email__c",
-    "Quality_Phone__c",
-    "NY_First_Name__c",
-    "NY_Last_Name__c",
-    "NY_Email__c",
-    "NY_Phone__c",
+    *(
+        field_name
+        for role in ACCOUNT_ROLE_DEFINITIONS
+        for _, field_name in role.submitted_fields
+    ),
     "Other_Personnel_Notes__c",
     "Comments__c",
 )
@@ -122,11 +105,7 @@ ACCOUNT_FIELDS = (
     "BillingCountry",
     "ParentId",
     "Cert_Certification_Status__c",
-    "Cert_Certification_Contact__c",
-    "Cert_Principal_Contact__c",
-    "Cert_Accounting_Contact__c",
-    "Cert_Marketing_Contact__c",
-    "Cert_Safety_Contact__c",
+    *(role.account_lookup for role in ACCOUNT_ROLE_DEFINITIONS),
 )
 
 CONTACT_FIELDS = (
@@ -160,11 +139,7 @@ ACCOUNT_REVIEW_FIELDS = (
     "BillingState",
     "BillingPostalCode",
     "BillingCountry",
-    "Cert_Certification_Contact__c",
-    "Cert_Principal_Contact__c",
-    "Cert_Accounting_Contact__c",
-    "Cert_Marketing_Contact__c",
-    "Cert_Safety_Contact__c",
+    *(role.account_lookup for role in ACCOUNT_ROLE_DEFINITIONS),
 )
 
 CONTACT_REVIEW_FIELDS = CONTACT_FIELDS
