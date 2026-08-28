@@ -1,0 +1,167 @@
+"""Tests for the read-only participant User reconciliation planner."""
+
+from dataclasses import FrozenInstanceError
+
+import pytest
+
+from aisc_salesforce.user_reconciliation import (
+    UserReconciliationService,
+    build_user_reconciliation_plan,
+    render_user_reconciliation_plan,
+)
+from aisc_salesforce.user_sync_config import PROFILE_CONFIGURATION, ParticipantProfile
+
+CONTACT = {
+    "Id": "contact-1",
+    "FirstName": "Ada",
+    "LastName": "Lovelace",
+    "Email": " ADA@example.com ",
+    "MailingStreet": "1 Main St",
+    "MailingCity": "Chicago",
+    "MailingState": "IL",
+    "MailingPostalCode": "60601",
+    "MailingCountry": "United States",
+}
+CONFIG = {profile: profile.value for profile in ParticipantProfile}
+PROFILES = [
+    {"Id": profile.value, "Name": name}
+    for profile, (_, name) in PROFILE_CONFIGURATION.items()
+]
+
+
+def account(**overrides):
+    return {
+        "Id": "account-1",
+        "ParentId": "",
+        "Cert_Certification_Status__c": "Certified",
+        "Cert_Certification_Contact__c": "contact-1",
+        **overrides,
+    }
+
+
+def test_no_active_user_produces_create_with_normalized_username():
+    plan = build_user_reconciliation_plan(
+        CONTACT, [], [account()], [account()], PROFILES, CONFIG, []
+    )
+
+    assert plan.proposed_operation == "create"
+    assert dict(plan.proposed_create or ())["Username"] == "ada@example.com"
+    assert plan.required_profile == ParticipantProfile.PARTICIPANT
+    assert not plan.blockers
+    assert plan.as_dict()["proposed_create"]["ContactId"] == "contact-1"
+
+
+def test_one_active_user_shows_only_differences():
+    user = {
+        "Id": "user-1",
+        "IsActive": True,
+        **dict(
+            build_user_reconciliation_plan(
+                CONTACT, [], [account()], [account()], PROFILES, CONFIG, []
+            ).proposed_create
+            or ()
+        ),
+    }
+    user["City"] = "Evanston"
+
+    plan = build_user_reconciliation_plan(
+        CONTACT, [user], [account()], [account()], PROFILES, CONFIG, []
+    )
+
+    assert plan.proposed_operation == "update"
+    assert [
+        (change.field, change.current, change.desired) for change in plan.field_changes
+    ] == [("City", "Evanston", "Chicago")]
+
+
+def test_multiple_active_users_and_inactive_users_are_kept_separate():
+    users = [
+        {"Id": "one", "IsActive": True},
+        {"Id": "two", "IsActive": True},
+        {"Id": "old", "IsActive": False},
+    ]
+    plan = build_user_reconciliation_plan(
+        CONTACT, users, [account()], [account()], PROFILES, CONFIG, []
+    )
+
+    assert [item["Id"] for item in plan.inactive_users] == ["old"]
+    assert plan.proposed_operation is None
+    assert [item.code for item in plan.blockers] == ["multiple_active_users"]
+
+
+def test_collision_excludes_linked_users_and_blocks_other_active_or_inactive_users():
+    linked = [{"Id": "linked", "IsActive": True}]
+    matches = [
+        *linked,
+        {"Id": "collision", "IsActive": False, "Username": "ada@example.com"},
+    ]
+    plan = build_user_reconciliation_plan(
+        CONTACT, linked, [account()], [account()], PROFILES, CONFIG, matches
+    )
+
+    assert [item["Id"] for item in plan.username_collisions] == ["collision"]
+    assert any(item.code == "username_collision" for item in plan.blockers)
+
+
+def test_multi_account_family_requires_ras_and_invalid_contact_data_blocks():
+    parent = account(Id="parent", ParentId="")
+    child = account(Id="account-1", ParentId="parent")
+    bad_contact = {**CONTACT, "Email": "not email"}
+    plan = build_user_reconciliation_plan(
+        bad_contact, [], [child], [parent, child], PROFILES, CONFIG, []
+    )
+
+    assert plan.required_profile == ParticipantProfile.RAS
+    assert {item.code for item in plan.blockers} >= {"invalid_email"}
+    assert "blockers:" in render_user_reconciliation_plan(plan)
+
+
+def test_plan_is_frozen_and_json_is_stable():
+    plan = build_user_reconciliation_plan(
+        CONTACT, [], [account()], [account()], PROFILES, CONFIG, []
+    )
+    with pytest.raises(FrozenInstanceError):
+        plan.contact_id = "other"
+    assert plan.to_json() == plan.to_json()
+
+
+def test_service_uses_only_filtered_queries():
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        def query_records(self, object_name, fields, *, where=None, order_by=None):
+            self.calls.append((object_name, tuple(fields), where))
+            if object_name == "Contact":
+                return [CONTACT]
+            if object_name == "Account":
+                return (
+                    [account()]
+                    if "Cert_Certification_Contact__c" in (where or "")
+                    else []
+                )
+            if object_name == "Profile":
+                return PROFILES
+            return []
+
+        def create_record(self, *args):
+            raise AssertionError("write attempted")
+
+        def update_record(self, *args):
+            raise AssertionError("write attempted")
+
+    client = Client()
+    plan = UserReconciliationService(client).plan(
+        "contact-1",
+        {
+            "PARTICIPANT_PROFILE_ID": ParticipantProfile.PARTICIPANT.value,
+            "PARTICIPANT_PRINCIPAL_PROFILE_ID": ParticipantProfile.PRINCIPAL.value,
+            "PARTICIPANT_AP_PROFILE_ID": ParticipantProfile.AP.value,
+            "PARTICIPANT_QC_PROFILE_ID": ParticipantProfile.QC.value,
+            "PARTICIPANT_RAS_PROFILE_ID": ParticipantProfile.RAS.value,
+        },
+    )
+
+    assert plan.proposed_operation == "create"
+    assert all(where for _, _, where in client.calls)
+    assert client.calls[0][2] == "Id = 'contact-1'"

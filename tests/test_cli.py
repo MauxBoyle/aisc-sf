@@ -17,6 +17,10 @@ from aisc_salesforce.picklist_audit import (
 )
 from aisc_salesforce.profile_updates import AutomationCounts
 from aisc_salesforce.rename_profile_update_cases import RenameCounts
+from aisc_salesforce.user_reconciliation import (
+    ReconciliationBlocker,
+    UserReconciliationPlan,
+)
 
 
 def test_user_sync_config_cli_runs_the_read_only_check(monkeypatch, capsys):
@@ -71,6 +75,67 @@ def test_user_sync_config_cli_reports_expected_failures(monkeypatch, capsys):
     assert "User sync configuration check failed: Profile query failed" in (
         capsys.readouterr().err
     )
+
+
+def test_reconcile_user_cli_supports_text_and_json(monkeypatch):
+    output = []
+    plan = UserReconciliationPlan(
+        "contact-1", (), None, (), (), (), (), "none", None, (), ()
+    )
+    monkeypatch.setattr(
+        app,
+        "_run_reconcile_user",
+        lambda contact_id, *, as_json, output_fn: (
+            output_fn(plan.to_json() if as_json else "text plan"),
+            0,
+        )[1],
+    )
+
+    assert app.main(["reconcile-user", "contact-1"], output_fn=output.append) == 0
+    assert output == ["text plan"]
+    output.clear()
+    assert (
+        app.main(["reconcile-user", "contact-1", "--json"], output_fn=output.append)
+        == 0
+    )
+    assert '"contact_id": "contact-1"' in output[0]
+
+
+def test_reconcile_user_profile_configuration_blocker_returns_nonzero(monkeypatch):
+    plan = UserReconciliationPlan(
+        "contact-1",
+        (),
+        None,
+        (),
+        (),
+        (),
+        (),
+        None,
+        None,
+        (),
+        (ReconciliationBlocker("profile_configuration", "bad Profile"),),
+    )
+    monkeypatch.setattr(app, "_load_dotenv", lambda path: None)
+    monkeypatch.setattr(
+        app.os, "environ", {"SF_CLIENT_ID": "id", "SF_CLIENT_SECRET": "secret"}
+    )
+    monkeypatch.setattr(app, "get_credentials", lambda values: values)
+    monkeypatch.setattr(app, "get_oauth_url", lambda values: "token-url")
+    monkeypatch.setattr(
+        app, "request_access_token", lambda credentials, oauth_url: "auth"
+    )
+    monkeypatch.setattr(app, "SalesforceClient", lambda auth: "client")
+
+    class Service:
+        def __init__(self, client):
+            pass
+
+        def plan(self, contact_id, environment):
+            return plan
+
+    monkeypatch.setattr(app, "UserReconciliationService", Service)
+
+    assert app.main(["reconcile-user", "contact-1"], output_fn=lambda line: None) == 1
 
 
 def test_picklist_audit_cli_prints_grouped_informational_findings(monkeypatch):
@@ -558,9 +623,7 @@ def test_process_profile_update_nested_operation_preserves_parent_output_dir(
     )
 
     assert (
-        app.main(
-            ["process-profile-updates", "--output-dir", str(tmp_path), "stage"]
-        )
+        app.main(["process-profile-updates", "--output-dir", str(tmp_path), "stage"])
         == 0
     )
     assert calls == [tmp_path]
