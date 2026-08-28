@@ -66,6 +66,20 @@ changing Salesforce:
 uv run aisc_salesforce check-user-sync-config
 ```
 
+Build a read-only User reconciliation plan for one Contact:
+
+```bash
+uv run aisc_salesforce reconcile-user CONTACT_ID
+uv run aisc_salesforce reconcile-user CONTACT_ID --json
+```
+
+`reconcile-user` never creates, updates, or deletes Salesforce records. It
+uses the Contact's identity and mailing fields as the desired User values and
+uses the Contact email, trimmed and lowercased, as the desired username. The
+command reports blockers—such as a missing email, profile configuration
+problem, username collision, or multiple active linked Users—instead of
+attempting a repair. `--json` provides a stable machine-readable plan.
+
 Create a read-only application-stage count:
 
 ```bash

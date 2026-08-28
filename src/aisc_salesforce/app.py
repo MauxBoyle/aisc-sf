@@ -44,6 +44,10 @@ from .stage_profile_updates import (
     ProfileUpdateStagingService,
     write_staged_profile_updates,
 )
+from .user_reconciliation import (
+    UserReconciliationService,
+    render_user_reconciliation_plan,
+)
 from .user_sync_config import UserSyncConfigError, UserSyncConfigValidator
 
 
@@ -156,6 +160,14 @@ def main(
         "check-user-sync-config",
         help="Validate configured participant Profiles without changing Salesforce.",
     )
+    reconcile_user_parser = subparsers.add_parser(
+        "reconcile-user",
+        help="Build a read-only participant User reconciliation plan for one Contact.",
+    )
+    reconcile_user_parser.add_argument("contact_id", help="Salesforce Contact ID.")
+    reconcile_user_parser.add_argument(
+        "--json", action="store_true", help="Print the stable JSON plan contract."
+    )
     args = parser.parse_args(argv)
     if args.command == "snapshot":
         try:
@@ -264,6 +276,14 @@ def main(
         except (UserSyncConfigError, SalesforceError) as error:
             print(f"User sync configuration check failed: {error}", file=sys.stderr)
             return 1
+    if args.command == "reconcile-user":
+        try:
+            return _run_reconcile_user(
+                args.contact_id, as_json=args.json, output_fn=output_fn
+            )
+        except (SalesforceError, UserSyncConfigError) as error:
+            print(f"User reconciliation failed: {error}", file=sys.stderr)
+            return 1
     return 1
 
 
@@ -314,6 +334,26 @@ def _run_check_user_sync_config() -> int:
     UserSyncConfigValidator(SalesforceClient(auth)).validate(environment)
     print("User sync configuration is valid; no Salesforce records were changed.")
     return 0
+
+
+def _run_reconcile_user(
+    contact_id: str,
+    *,
+    as_json: bool,
+    output_fn: Callable[[str], None] = print,
+) -> int:
+    """Authenticate and print a User proposal using Salesforce reads only."""
+    _load_dotenv(Path(".env"))
+    environment = dict(os.environ)
+    credentials = get_credentials(environment)
+    auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
+    plan = UserReconciliationService(SalesforceClient(auth)).plan(
+        contact_id, environment
+    )
+    output_fn(plan.to_json() if as_json else render_user_reconciliation_plan(plan))
+    return (
+        1 if any(item.code == "profile_configuration" for item in plan.blockers) else 0
+    )
 
 
 def _print_picklist_audit(

@@ -51,6 +51,31 @@ returns exit code `1`.
 License validation is intentionally out of scope for now because the expected
 external-user license value has not yet been defined.
 
+## User reconciliation planner
+
+Use the planner to inspect what a participant User would need for one Contact:
+
+```bash
+uv run aisc_salesforce reconcile-user CONTACT_ID
+uv run aisc_salesforce reconcile-user CONTACT_ID --json
+```
+
+This is a read-only command: it authenticates and performs focused Salesforce
+queries, but never creates, updates, or deletes a record. The regular output
+is a short review summary. `--json` prints a stable, automation-friendly plan
+with desired values, role assignments, linked Users, proposed changes, and
+blockers.
+
+The Contact is the source of the desired `ContactId`, name, email, and mailing
+address values. Its trimmed, lowercased Email is also the desired `Username`.
+An empty or invalid email, incomplete Contact source data, no qualifying role,
+invalid participant Profile configuration, a Profile name mismatch, a username
+owned by another User (active or inactive), or more than one active linked User
+is a blocker. The planner describes a create when no active User is linked and
+field-by-field changes when exactly one is linked, but it never carries out
+either proposal. Inactive linked Users are shown as conflict-only records and
+are never update targets.
+
 ## Developer rule: use the Salesforce enum catalog
 
 When adding or changing code that uses a Salesforce **picklist** value, use
