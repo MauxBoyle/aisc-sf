@@ -28,5 +28,6 @@ The PR should include:
 - A clear, concise title
 - A summary of what changed and why
 - References to connected GitHub issues (e.g., `Closes #123`, `Fixes #45`)
+- if it is unclear which is the connected Github issue, please ask the user for clarification.
 
 Keep it short and focused — this is mechanical work, not a review.
