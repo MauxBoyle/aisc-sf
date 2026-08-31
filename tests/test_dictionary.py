@@ -1,4 +1,5 @@
 import csv
+from pathlib import Path
 
 import pytest
 
@@ -97,3 +98,19 @@ def test_load_export_plan_rejects_missing_columns(tmp_path):
     write_dictionary(path, [], headers=["Salesforce_Table"])
     with pytest.raises(DictionaryError, match="missing required columns"):
         load_export_plan(path)
+
+
+def test_schema_dictionary_includes_participant_drop_withdrawal_fields():
+    dictionary_path = (
+        Path(__file__).parents[1]
+        / "src/aisc_salesforce/data/salesforce_schema_dictionary.csv"
+    )
+
+    plan = load_export_plan(dictionary_path)
+
+    assert [field.api_name for field in plan["Withdrawal_Request__c"]] == [
+        "Id",
+        "Name",
+        "Account__c",
+    ]
+    assert "InvoiceNumber" in [field.api_name for field in plan["Invoice"]]

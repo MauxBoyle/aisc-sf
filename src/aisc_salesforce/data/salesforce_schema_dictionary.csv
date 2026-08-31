@@ -71,6 +71,11 @@ Account,acct_support_functions,Support_Office_Functions__c,many,,FALSE
 Account,acct_support_location,Support_Office_Location__c,many,,FALSE
 Account,acct_sustainability,Sustainability_Program__c,boolean,,FALSE
 Account,acct_url,Website,string,should be restricted to a url,FALSE
+Invoice,invoice_number,InvoiceNumber,string,The invoice number used for participant-drop lookup,TRUE
+Invoice,invoice_billing_account,BillingAccountId,Lookup (Account),Account used for participant-drop lookup,TRUE
+Withdrawal_Request__c,withdrawal_request_id,Id,Id,Withdrawal request record ID,TRUE
+Withdrawal_Request__c,withdrawal_request_name,Name,string,Withdrawal request reference used for participant-drop lookup,TRUE
+Withdrawal_Request__c,withdrawal_request_account,Account__c,Lookup (Account),Account used for participant-drop lookup,TRUE
 Case,case_acctid,AccountId,,,TRUE
 Case,case_additional_audit,Additional_Audit__c,,,FALSE
 Case,case_adhere_to_aisc_cosp_2_1,Adhere_to_AISC_CoSP_2_1__c,,,FALSE
