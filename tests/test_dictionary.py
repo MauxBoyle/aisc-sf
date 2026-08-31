@@ -113,4 +113,7 @@ def test_schema_dictionary_includes_participant_drop_withdrawal_fields():
         "Name",
         "Account__c",
     ]
-    assert "InvoiceNumber" in [field.api_name for field in plan["Invoice"]]
+    assert [field.api_name for field in plan["Cert_Invoice__c"]] == [
+        "Name",
+        "Cert_Account__c",
+    ]

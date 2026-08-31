@@ -47,10 +47,10 @@ class Interaction:
         self.messages.append(message)
 
 
-def test_unpaid_invoice_uses_invoice_number_and_posts_exact_message():
+def test_unpaid_invoice_uses_cert_invoice_name_and_posts_exact_message():
     client = Client(
         [
-            [{"BillingAccountId": "001invoice"}],
+            [{"Cert_Account__c": "001invoice"}],
             [{"Id": "001invoice", "Name": "Invoice Steel", "Certification_ID__c": "C-1"}],
         ]
     )
@@ -60,7 +60,7 @@ def test_unpaid_invoice_uses_invoice_number_and_posts_exact_message():
 
     assert result.account == AccountCandidate("001invoice", "Invoice Steel", "C-1")
     assert client.queries[0] == (
-        "Invoice", ["InvoiceNumber", "BillingAccountId"], "InvoiceNumber = 'INV-42'"
+        "Cert_Invoice__c", ["Name", "Cert_Account__c"], "Name = 'INV-42'"
     )
     assert client.messages == [
         ("001invoice", "Withdrawal in progress: Unpaid Invoice.")

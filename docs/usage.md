@@ -42,11 +42,11 @@ uv run aisc_salesforce participant-drop
 
 Select the scenario (Unpaid Invoice, Withdrawal Request, CRG drop, or another
 participant drop). Reference values are optional. An invoice reference is
-matched exactly against `Invoice.InvoiceNumber`, a Withdrawal Request reference
+matched exactly against `Cert_Invoice__c.Name`, a Withdrawal Request reference
 against `Withdrawal_Request__c.Name`, and a CRG reference against
-`Cert_Audit__c.Name`. Those records supply their Account lookup. This corrects
-the older `Invoice.Name` assumption: live Salesforce metadata uses
-`Invoice.InvoiceNumber` and `BillingAccountId`.
+`Cert_Audit__c.Name`. Those records supply their Account lookup. The workflow
+does not use Salesforce's built-in `Invoice` object; it uses the custom
+`Cert_Invoice__c` object and its `Cert_Account__c` Account lookup.
 
 When a reference does not resolve an Account, the command tries a normalized
 Certification ID and then normalized partial company-name matches. A single

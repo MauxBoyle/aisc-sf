@@ -53,7 +53,7 @@ class ParticipantDropInteraction(Protocol):
 
 
 _REFERENCE_LOOKUPS = {
-    ParticipantDropScenario.UNPAID_INVOICE: ("Invoice", "InvoiceNumber", "BillingAccountId"),
+    ParticipantDropScenario.UNPAID_INVOICE: ("Cert_Invoice__c", "Name", "Cert_Account__c"),
     ParticipantDropScenario.WITHDRAWAL_REQUEST: (
         "Withdrawal_Request__c",
         "Name",
