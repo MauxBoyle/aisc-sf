@@ -80,6 +80,22 @@ command reports blockers—such as a missing email, profile configuration
 problem, username collision, or multiple active linked Users—instead of
 attempting a repair. `--json` provides a stable machine-readable plan.
 
+Start an interactive participant-drop intake:
+
+```bash
+uv run aisc_salesforce participant-drop
+```
+
+Choose Unpaid Invoice, Withdrawal Request, CRG drop, or another participant
+drop. The related reference and Certification ID are optional; when supplied,
+the command tries them before asking for a company name. If more than one
+Account matches, it requires an explicit selection. Enter `cancel` at any
+prompt to exit without writing to Salesforce. Once an Account is resolved, the
+command posts `Withdrawal in progress: <scenario>.` to that Account's Chatter
+feed. Invoice lookup does not use Salesforce's built-in `Invoice` object.
+Instead, it matches the invoice number against `Cert_Invoice__c.Name` and uses
+that record's `Cert_Account__c` Account lookup.
+
 Create a read-only application-stage count:
 
 ```bash

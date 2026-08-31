@@ -32,6 +32,29 @@ cp .env.example .env
 The CLI loads `.env` without replacing environment variables that are already
 set.
 
+## Participant-drop intake
+
+Start a participant withdrawal intake from the terminal:
+
+```bash
+uv run aisc_salesforce participant-drop
+```
+
+Select the scenario (Unpaid Invoice, Withdrawal Request, CRG drop, or another
+participant drop). Reference values are optional. An invoice reference is
+matched exactly against `Cert_Invoice__c.Name`, a Withdrawal Request reference
+against `Withdrawal_Request__c.Name`, and a CRG reference against
+`Cert_Audit__c.Name`. Those records supply their Account lookup. The workflow
+does not use Salesforce's built-in `Invoice` object; it uses the custom
+`Cert_Invoice__c` object and its `Cert_Account__c` Account lookup.
+
+When a reference does not resolve an Account, the command tries a normalized
+Certification ID and then normalized partial company-name matches. A single
+match proceeds automatically; multiple matches always require an explicit
+choice. Type `cancel` at any prompt to stop. Cancellation makes no Salesforce
+write. A completed intake posts exactly `Withdrawal in progress: <scenario>.`
+to the selected Account's Chatter feed.
+
 ## Participant user-provisioning Profile check
 
 Run the read-only configuration check before using participant provisioning:

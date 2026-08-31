@@ -30,6 +30,40 @@ def test_user_sync_config_cli_runs_the_read_only_check(monkeypatch, capsys):
     assert capsys.readouterr().err == ""
 
 
+def test_participant_drop_cli_runs_interactive_workflow(monkeypatch):
+    output = []
+    received = {}
+
+    monkeypatch.setattr(app, "_load_dotenv", lambda path: None)
+    monkeypatch.setattr(
+        app.os, "environ", {"SF_CLIENT_ID": "id", "SF_CLIENT_SECRET": "secret"}
+    )
+    monkeypatch.setattr(app, "get_credentials", lambda values: values)
+    monkeypatch.setattr(app, "get_oauth_url", lambda values: "token-url")
+    monkeypatch.setattr(
+        app, "request_access_token", lambda credentials, oauth_url: "auth"
+    )
+    monkeypatch.setattr(app, "SalesforceClient", lambda auth: "client")
+
+    class Service:
+        def __init__(self, client):
+            assert client == "client"
+
+        def run(self, interaction):
+            received["scenario"] = interaction.choose_scenario()
+            received["reference"] = interaction.request_reference(received["scenario"])
+            return SimpleNamespace(cancelled=False)
+
+    monkeypatch.setattr(app, "ParticipantDropService", Service)
+
+    answers = iter(["1", "INV-42"])
+    assert app.main(
+        ["participant-drop"], input_fn=lambda prompt: next(answers), output_fn=output.append
+    ) == 0
+    assert received["scenario"].value == "Unpaid Invoice"
+    assert received["reference"] == "INV-42"
+
+
 def test_user_sync_config_command_authenticates_and_validates(monkeypatch, capsys):
     environment = {
         "SF_CLIENT_ID": "id",

@@ -14,9 +14,11 @@ from .application_snapshot import (
     ApplicationSnapshotService,
     write_application_snapshot,
 )
+from .cli_participant_drop import CLIParticipantDropInteraction
 from .cli_review_ui import CLIReviewUI, ColorMode, print_profile_error
 from .dictionary import DictionaryError, load_export_plan
 from .imis_contacts import ContactConsolidationError, consolidate_contactbasic
+from .participant_drop import ParticipantDropService
 from .picklist_audit import (
     PicklistAuditError,
     PicklistAuditResult,
@@ -168,6 +170,10 @@ def main(
     reconcile_user_parser.add_argument(
         "--json", action="store_true", help="Print the stable JSON plan contract."
     )
+    subparsers.add_parser(
+        "participant-drop",
+        help="Interactively record that a participant withdrawal is in progress.",
+    )
     args = parser.parse_args(argv)
     if args.command == "snapshot":
         try:
@@ -284,6 +290,12 @@ def main(
         except (SalesforceError, UserSyncConfigError) as error:
             print(f"User reconciliation failed: {error}", file=sys.stderr)
             return 1
+    if args.command == "participant-drop":
+        try:
+            return _run_participant_drop(input_fn=input_fn, output_fn=output_fn)
+        except (SalesforceError, ValueError) as error:
+            print(f"Participant drop failed: {error}", file=sys.stderr)
+            return 1
     return 1
 
 
@@ -354,6 +366,22 @@ def _run_reconcile_user(
     return (
         1 if any(item.code == "profile_configuration" for item in plan.blockers) else 0
     )
+
+
+def _run_participant_drop(
+    *,
+    input_fn: Callable[[str], str] = input,
+    output_fn: Callable[[str], None] = print,
+) -> int:
+    """Authenticate and run the interactive participant withdrawal intake."""
+    _load_dotenv(Path(".env"))
+    environment = dict(os.environ)
+    credentials = get_credentials(environment)
+    auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
+    ParticipantDropService(SalesforceClient(auth)).run(
+        CLIParticipantDropInteraction(input_fn=input_fn, output_fn=output_fn)
+    )
+    return 0
 
 
 def _print_picklist_audit(
