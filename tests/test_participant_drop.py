@@ -1,3 +1,5 @@
+from datetime import date
+
 import pytest
 
 from aisc_salesforce.cli_participant_drop import CLIParticipantDropInteraction
@@ -18,6 +20,7 @@ class Client:
         self.responses = iter(responses)
         self.queries = []
         self.messages = []
+        self.updates = []
 
     def query_records(self, object_name, fields, *, where=None, order_by=None):
         self.queries.append((object_name, fields, where))
@@ -25,6 +28,9 @@ class Client:
 
     def post_feed_message(self, account_id, message):
         self.messages.append((account_id, message))
+
+    def update_record(self, object_name, record_id, values):
+        self.updates.append((object_name, record_id, values))
 
 
 class Interaction:
@@ -70,10 +76,10 @@ class Interaction:
 def test_withdrawal_reason_collections_match_the_workflow_contract():
     assert SELECTABLE_REASONS == (
         WithdrawalReason.ECONOMY,
-        WithdrawalReason.FACILITY_MAIN_OFFICE_CLOSURE,
+        WithdrawalReason.CLOSED,
         WithdrawalReason.ROI,
-        WithdrawalReason.NEW_OWNERSHIP,
-        WithdrawalReason.NEW_BUSINESS_MODEL,
+        WithdrawalReason.NEW_OWNER,
+        WithdrawalReason.BUSINESS_MODEL,
     )
     assert ASSIGNED_REASONS == (WithdrawalReason.CRG, WithdrawalReason.NON_PAYMENT)
     assert ALL_REASONS == (*SELECTABLE_REASONS, *ASSIGNED_REASONS)
@@ -88,15 +94,15 @@ def test_cli_reason_menu_uses_the_unpaid_default_and_allows_replacement():
 
     reason = interaction.choose_withdrawal_reason(WithdrawalReason.NON_PAYMENT)
 
-    assert reason is WithdrawalReason.FACILITY_MAIN_OFFICE_CLOSURE
+    assert reason is WithdrawalReason.CLOSED
     assert output == [
         "Withdrawal reason:",
         "  1. #NonPayment (default)",
-        "  2. Economy",
-        "  3. Facility/Main office closure",
-        "  4. ROI",
-        "  5. New Ownership",
-        "  6. New Business model",
+        "  2. #Economy",
+        "  3. #Closed",
+        "  4. #ROI",
+        "  5. #NewOwner",
+        "  6. #BusModel",
     ]
 
 
@@ -149,7 +155,7 @@ def test_choose_action_accepts_all_cancellation_aliases(alias):
     assert interaction.choose_action() is None
 
 
-def test_unpaid_invoice_uses_cert_invoice_name_and_posts_exact_message():
+def test_unpaid_invoice_records_dated_note_and_posts_exact_message():
     client = Client(
         [
             [{"Cert_Account__c": "001invoice"}],
@@ -158,15 +164,20 @@ def test_unpaid_invoice_uses_cert_invoice_name_and_posts_exact_message():
                     "Id": "001invoice",
                     "Name": "Invoice Steel",
                     "Certification_ID__c": "C-1",
+                    "Cert_Notes__c": "Prior note",
                 }
             ],
         ]
     )
     interaction = Interaction(ParticipantDropScenario.UNPAID_INVOICE, "INV-42")
 
-    result = ParticipantDropService(client).run(interaction)
+    result = ParticipantDropService(client, date_provider=lambda: date(2026, 9, 1)).run(
+        interaction
+    )
 
-    assert result.account == AccountCandidate("001invoice", "Invoice Steel", "C-1")
+    assert result.account == AccountCandidate(
+        "001invoice", "Invoice Steel", "C-1", "Prior note"
+    )
     assert result.withdrawal_reason is WithdrawalReason.NON_PAYMENT
     assert client.queries[0] == (
         "Cert_Invoice__c",
@@ -175,6 +186,107 @@ def test_unpaid_invoice_uses_cert_invoice_name_and_posts_exact_message():
     )
     assert client.messages == [
         ("001invoice", "Withdrawal in progress: Unpaid Invoice.")
+    ]
+    assert client.updates == [
+        (
+            "Account",
+            "001invoice",
+            {"Cert_Notes__c": "Prior note\n9/1/26 Withdrawal: #NonPayment INV-42"},
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("reference", "reason", "expected_note"),
+    [
+        ("", WithdrawalReason.ECONOMY, "9/1/26 Withdrawal: #Economy"),
+        (" REF-7 ", WithdrawalReason.CLOSED, "9/1/26 Withdrawal: #Closed REF-7"),
+        ("REF-7", WithdrawalReason.ROI, "9/1/26 Withdrawal: #ROI REF-7"),
+        ("REF-7", WithdrawalReason.NEW_OWNER, "9/1/26 Withdrawal: #NewOwner REF-7"),
+        ("REF-7", WithdrawalReason.BUSINESS_MODEL, "9/1/26 Withdrawal: #BusModel REF-7"),
+    ],
+)
+def test_withdrawal_note_uses_each_reason_and_optional_reference(
+    reference, reason, expected_note
+):
+    client = Client(
+        [[{"Id": "001a", "Name": "Steel", "Certification_ID__c": "C-1"}]]
+    )
+    interaction = Interaction(
+        ParticipantDropScenario.OTHER,
+        reference,
+        certification_ids=["C-1"],
+        withdrawal_reasons=[reason],
+    )
+
+    ParticipantDropService(client, date_provider=lambda: date(2026, 9, 1)).run(
+        interaction
+    )
+
+    assert client.updates == [("Account", "001a", {"Cert_Notes__c": expected_note})]
+    assert client.messages == [
+        ("001a", "Withdrawal in progress: Other participant drop.")
+    ]
+
+
+@pytest.mark.parametrize("existing_note", [None, ""])
+def test_withdrawal_note_writes_only_new_entry_for_empty_notes(existing_note):
+    client = Client(
+        [
+            [
+                {
+                    "Id": "001a",
+                    "Name": "Steel",
+                    "Certification_ID__c": "C-1",
+                    "Cert_Notes__c": existing_note,
+                }
+            ]
+        ]
+    )
+    interaction = Interaction(
+        ParticipantDropScenario.OTHER,
+        certification_ids=["C-1"],
+        withdrawal_reasons=[WithdrawalReason.ECONOMY],
+    )
+
+    ParticipantDropService(client, date_provider=lambda: date(2026, 9, 1)).run(
+        interaction
+    )
+
+    assert client.updates == [
+        ("Account", "001a", {"Cert_Notes__c": "9/1/26 Withdrawal: #Economy"})
+    ]
+
+
+def test_withdrawal_note_preserves_a_trailing_newline():
+    client = Client(
+        [
+            [
+                {
+                    "Id": "001a",
+                    "Name": "Steel",
+                    "Certification_ID__c": "C-1",
+                    "Cert_Notes__c": "Prior note\n",
+                }
+            ]
+        ]
+    )
+    interaction = Interaction(
+        ParticipantDropScenario.OTHER,
+        certification_ids=["C-1"],
+        withdrawal_reasons=[WithdrawalReason.ECONOMY],
+    )
+
+    ParticipantDropService(client, date_provider=lambda: date(2026, 9, 1)).run(
+        interaction
+    )
+
+    assert client.updates == [
+        (
+            "Account",
+            "001a",
+            {"Cert_Notes__c": "Prior note\n9/1/26 Withdrawal: #Economy"},
+        )
     ]
 
 
@@ -243,7 +355,7 @@ def test_unpaid_invoice_default_can_be_replaced_with_a_selectable_reason():
     ("scenario", "reason"),
     [
         (ParticipantDropScenario.WITHDRAWAL_REQUEST, WithdrawalReason.ECONOMY),
-        (ParticipantDropScenario.OTHER, WithdrawalReason.NEW_BUSINESS_MODEL),
+        (ParticipantDropScenario.OTHER, WithdrawalReason.BUSINESS_MODEL),
     ],
 )
 def test_selectable_reason_is_required_for_manual_drop_scenarios(scenario, reason):
@@ -265,11 +377,14 @@ def test_crg_drop_assigns_its_reason_without_prompting_for_a_reason():
         ]
     )
 
-    result = ParticipantDropService(client).run(
+    result = ParticipantDropService(client, date_provider=lambda: date(2026, 9, 1)).run(
         Interaction(ParticipantDropScenario.CRG_DROP, "AUD-1")
     )
 
     assert result.withdrawal_reason is WithdrawalReason.CRG
+    assert client.updates == [
+        ("Account", "001crg", {"Cert_Notes__c": "9/1/26 Withdrawal: #CRG AUD-1"})
+    ]
 
 
 def test_cancel_at_reason_never_posts_to_salesforce():
@@ -293,6 +408,7 @@ def test_cancel_at_reason_never_posts_to_salesforce():
 
     assert result.cancelled is True
     assert client.messages == []
+    assert client.updates == []
 
 
 def test_falls_back_to_normalized_certification_id_then_company_name():
@@ -371,6 +487,7 @@ def test_cancel_at_scenario_never_posts_to_salesforce():
 
     assert result.cancelled is True
     assert client.messages == []
+    assert client.updates == []
 
 
 def test_cancel_at_reference_never_posts_to_salesforce():
@@ -381,6 +498,7 @@ def test_cancel_at_reference_never_posts_to_salesforce():
 
     assert result.cancelled is True
     assert client.messages == []
+    assert client.updates == []
 
 
 def test_cancel_at_certification_id_never_posts_to_salesforce():
@@ -391,6 +509,7 @@ def test_cancel_at_certification_id_never_posts_to_salesforce():
 
     assert result.cancelled is True
     assert client.messages == []
+    assert client.updates == []
 
 
 def test_cancel_at_company_name_never_posts_to_salesforce():
@@ -405,6 +524,7 @@ def test_cancel_at_company_name_never_posts_to_salesforce():
 
     assert result.cancelled is True
     assert client.messages == []
+    assert client.updates == []
 
 
 def test_cancel_at_multiple_account_selection_never_posts_to_salesforce():
@@ -428,3 +548,4 @@ def test_cancel_at_multiple_account_selection_never_posts_to_salesforce():
 
     assert result.cancelled is True
     assert client.messages == []
+    assert client.updates == []
