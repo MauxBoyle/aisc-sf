@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
-from typing import Callable, Protocol
+from typing import Protocol
 
 
 class ParticipantDropAction(StrEnum):
@@ -112,6 +113,14 @@ _REFERENCE_LOOKUPS = {
     ),
     ParticipantDropScenario.CRG_DROP: ("Cert_Audit__c", "Name", "Cert_Account__c"),
 }
+WITHDRAWAL_FOLLOW_UP_CONTACTS = (
+    ("Data", "Maureen Boyle"),
+    ("Department Head", "Lisa Patel"),
+    ("Invoicing", "Karla Ruiz"),
+    ("Audit Logistics", "Kim Swiss"),
+)
+"""Manual notification contacts, in the order shown after a withdrawal starts."""
+
 _NORMALIZED_SEARCH = re.compile(r"[^a-z0-9]+")
 
 
@@ -184,6 +193,8 @@ class ParticipantDropService:
         message = f"Withdrawal in progress: {scenario.value}."
         self.client.post_feed_message(account.id, message)
         interaction.show(f"Withdrawal intake recorded for {account.name}.")
+        for reminder in _manual_follow_up_reminders():
+            interaction.show(reminder)
         return ParticipantDropResult(account, withdrawal_reason)
 
     @staticmethod
@@ -318,11 +329,29 @@ def _format_withdrawal_note(
     withdrawal_date: date, reason: WithdrawalReason, reference: str
 ) -> str:
     """Create the dated Certification Notes entry for one withdrawal."""
-    formatted_date = (
-        f"{withdrawal_date.month}/{withdrawal_date.day}/{withdrawal_date.year % 100:02d}"
-    )
+    formatted_date = f"{withdrawal_date.month}/{withdrawal_date.day}/{withdrawal_date.year % 100:02d}"
     entry = f"{formatted_date} Withdrawal: {reason.value}"
     return f"{entry} {reference.strip()}" if reference.strip() else entry
+
+
+def _manual_follow_up_reminders() -> tuple[str, ...]:
+    """Return the terminal-only tasks required after both Salesforce writes."""
+    audit_logistics_name = dict(WITHDRAWAL_FOLLOW_UP_CONTACTS)["Audit Logistics"]
+    notifications = tuple(
+        f"  - Notify {role}: {name}." for role, name in WITHDRAWAL_FOLLOW_UP_CONTACTS
+    )
+    return (
+        "Manual follow-up required:",
+        *notifications,
+        (
+            "  - Ask Audit Logistics "
+            f"({audit_logistics_name}) to remove the Account's Audit Package."
+        ),
+        (
+            "These notifications and Audit Package removal are not performed or "
+            "verified by the script."
+        ),
+    )
 
 
 def _append_withdrawal_note(existing_note: str | None, entry: str) -> str:

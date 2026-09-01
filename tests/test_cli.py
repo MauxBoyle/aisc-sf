@@ -57,11 +57,78 @@ def test_participant_drop_cli_runs_interactive_workflow(monkeypatch):
     monkeypatch.setattr(app, "ParticipantDropService", Service)
 
     answers = iter(["1", "1", "INV-42"])
-    assert app.main(
-        ["participant-drop"], input_fn=lambda prompt: next(answers), output_fn=output.append
-    ) == 0
+    assert (
+        app.main(
+            ["participant-drop"],
+            input_fn=lambda prompt: next(answers),
+            output_fn=output.append,
+        )
+        == 0
+    )
     assert received["scenario"].value == "Unpaid Invoice"
     assert received["reference"] == "INV-42"
+
+
+def test_participant_drop_cli_displays_manual_follow_up_reminders(monkeypatch):
+    output = []
+
+    monkeypatch.setattr(app, "_load_dotenv", lambda path: None)
+    monkeypatch.setattr(
+        app.os, "environ", {"SF_CLIENT_ID": "id", "SF_CLIENT_SECRET": "secret"}
+    )
+    monkeypatch.setattr(app, "get_credentials", lambda values: values)
+    monkeypatch.setattr(app, "get_oauth_url", lambda values: "token-url")
+    monkeypatch.setattr(
+        app, "request_access_token", lambda credentials, oauth_url: "auth"
+    )
+
+    class Client:
+        def __init__(self, auth):
+            assert auth == "auth"
+
+        def query_records(self, object_name, fields, *, where=None, order_by=None):
+            if object_name == "Cert_Invoice__c":
+                return [{"Cert_Account__c": "001invoice"}]
+            return [
+                {
+                    "Id": "001invoice",
+                    "Name": "Invoice Steel",
+                    "Certification_ID__c": "C-1",
+                    "Cert_Notes__c": None,
+                }
+            ]
+
+        def update_record(self, object_name, record_id, values):
+            assert (object_name, record_id) == ("Account", "001invoice")
+
+        def post_feed_message(self, account_id, message):
+            assert (account_id, message) == (
+                "001invoice",
+                "Withdrawal in progress: Unpaid Invoice.",
+            )
+
+    monkeypatch.setattr(app, "SalesforceClient", Client)
+
+    answers = iter(["1", "1", "INV-42", ""])
+    assert (
+        app.main(
+            ["participant-drop"],
+            input_fn=lambda prompt: next(answers),
+            output_fn=output.append,
+        )
+        == 0
+    )
+
+    assert output[-8:] == [
+        "Withdrawal intake recorded for Invoice Steel.",
+        "Manual follow-up required:",
+        "  - Notify Data: Maureen Boyle.",
+        "  - Notify Department Head: Lisa Patel.",
+        "  - Notify Invoicing: Karla Ruiz.",
+        "  - Notify Audit Logistics: Kim Swiss.",
+        "  - Ask Audit Logistics (Kim Swiss) to remove the Account's Audit Package.",
+        "These notifications and Audit Package removal are not performed or verified by the script.",
+    ]
 
 
 def test_participant_drop_complete_exits_without_salesforce_setup(monkeypatch):
@@ -72,10 +139,14 @@ def test_participant_drop_complete_exits_without_salesforce_setup(monkeypatch):
         lambda path: pytest.fail("Salesforce setup must not run for complete"),
     )
 
-    assert app.main(
-        ["participant-drop"], input_fn=lambda prompt: "2", output_fn=output.append
-    ) == 0
+    assert (
+        app.main(
+            ["participant-drop"], input_fn=lambda prompt: "2", output_fn=output.append
+        )
+        == 0
+    )
     assert output[-1] == "Complete an existing withdrawal is not implemented yet."
+    assert "Manual follow-up required:" not in output
 
 
 @pytest.mark.parametrize("alias", ["cancel", "c", "q", "quit"])
@@ -89,12 +160,16 @@ def test_participant_drop_initial_cancel_exits_without_salesforce_setup(
         lambda path: pytest.fail("Salesforce setup must not run for cancellation"),
     )
 
-    assert app.main(
-        ["participant-drop"], input_fn=lambda prompt: alias, output_fn=output.append
-    ) == 0
+    assert (
+        app.main(
+            ["participant-drop"], input_fn=lambda prompt: alias, output_fn=output.append
+        )
+        == 0
+    )
     assert output[-1] == (
         "Participant drop cancelled; no Salesforce changes were made."
     )
+    assert "Manual follow-up required:" not in output
 
 
 def test_user_sync_config_command_authenticates_and_validates(monkeypatch, capsys):
