@@ -1,5 +1,9 @@
+import pytest
+
+from aisc_salesforce.cli_participant_drop import CLIParticipantDropInteraction
 from aisc_salesforce.participant_drop import (
     AccountCandidate,
+    ParticipantDropAction,
     ParticipantDropScenario,
     ParticipantDropService,
 )
@@ -45,6 +49,44 @@ class Interaction:
 
     def show(self, message):
         self.messages.append(message)
+
+
+def test_choose_action_displays_choices_in_enum_order():
+    output = []
+    interaction = CLIParticipantDropInteraction(
+        input_fn=lambda prompt: "2", output_fn=output.append
+    )
+
+    assert interaction.choose_action() is ParticipantDropAction.COMPLETE
+    assert output == [
+        "Participant-drop action:",
+        "  1. Start a new withdrawal",
+        "  2. Complete an existing withdrawal",
+    ]
+
+
+def test_choose_action_explains_invalid_input_and_repeats_prompt():
+    answers = iter(["not-a-choice", "1"])
+    prompts = []
+    output = []
+    interaction = CLIParticipantDropInteraction(
+        input_fn=lambda prompt: (prompts.append(prompt), next(answers))[1],
+        output_fn=output.append,
+    )
+
+    assert interaction.choose_action() is ParticipantDropAction.START
+    assert output[-1] == "Enter one of the listed numbers, or 'cancel'."
+    assert prompts == [
+        "Choose an action (or 'cancel'): ",
+        "Choose an action (or 'cancel'): ",
+    ]
+
+
+@pytest.mark.parametrize("alias", ["cancel", "c", "q", "quit"])
+def test_choose_action_accepts_all_cancellation_aliases(alias):
+    interaction = CLIParticipantDropInteraction(input_fn=lambda prompt: alias)
+
+    assert interaction.choose_action() is None
 
 
 def test_unpaid_invoice_uses_cert_invoice_name_and_posts_exact_message():
@@ -128,10 +170,63 @@ def test_company_no_match_retries_and_multiple_candidates_require_selection():
     assert client.messages == [("001b", "Withdrawal in progress: Other participant drop.")]
 
 
-def test_cancel_never_posts_to_salesforce():
+def test_cancel_at_scenario_never_posts_to_salesforce():
+    client = Client([])
+    interaction = Interaction(None)
+
+    result = ParticipantDropService(client).run(interaction)
+
+    assert result.cancelled is True
+    assert client.messages == []
+
+
+def test_cancel_at_reference_never_posts_to_salesforce():
+    client = Client([])
+    interaction = Interaction(ParticipantDropScenario.OTHER, reference=None)
+
+    result = ParticipantDropService(client).run(interaction)
+
+    assert result.cancelled is True
+    assert client.messages == []
+
+
+def test_cancel_at_certification_id_never_posts_to_salesforce():
+    client = Client([])
+    interaction = Interaction(ParticipantDropScenario.OTHER, certification_ids=[None])
+
+    result = ParticipantDropService(client).run(interaction)
+
+    assert result.cancelled is True
+    assert client.messages == []
+
+
+def test_cancel_at_company_name_never_posts_to_salesforce():
     client = Client([[]])
     interaction = Interaction(
         ParticipantDropScenario.OTHER, certification_ids=["missing"], company_names=[None]
+    )
+
+    result = ParticipantDropService(client).run(interaction)
+
+    assert result.cancelled is True
+    assert client.messages == []
+
+
+def test_cancel_at_multiple_account_selection_never_posts_to_salesforce():
+    client = Client(
+        [
+            [],
+            [
+                {"Id": "001a", "Name": "Acme East", "Certification_ID__c": "A-1"},
+                {"Id": "001b", "Name": "Acme West", "Certification_ID__c": "A-2"},
+            ],
+        ]
+    )
+    interaction = Interaction(
+        ParticipantDropScenario.OTHER,
+        certification_ids=["missing"],
+        company_names=["Acme"],
+        choice=None,
     )
 
     result = ParticipantDropService(client).run(interaction)

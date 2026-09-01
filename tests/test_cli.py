@@ -56,12 +56,45 @@ def test_participant_drop_cli_runs_interactive_workflow(monkeypatch):
 
     monkeypatch.setattr(app, "ParticipantDropService", Service)
 
-    answers = iter(["1", "INV-42"])
+    answers = iter(["1", "1", "INV-42"])
     assert app.main(
         ["participant-drop"], input_fn=lambda prompt: next(answers), output_fn=output.append
     ) == 0
     assert received["scenario"].value == "Unpaid Invoice"
     assert received["reference"] == "INV-42"
+
+
+def test_participant_drop_complete_exits_without_salesforce_setup(monkeypatch):
+    output = []
+    monkeypatch.setattr(
+        app,
+        "_load_dotenv",
+        lambda path: pytest.fail("Salesforce setup must not run for complete"),
+    )
+
+    assert app.main(
+        ["participant-drop"], input_fn=lambda prompt: "2", output_fn=output.append
+    ) == 0
+    assert output[-1] == "Complete an existing withdrawal is not implemented yet."
+
+
+@pytest.mark.parametrize("alias", ["cancel", "c", "q", "quit"])
+def test_participant_drop_initial_cancel_exits_without_salesforce_setup(
+    monkeypatch, alias
+):
+    output = []
+    monkeypatch.setattr(
+        app,
+        "_load_dotenv",
+        lambda path: pytest.fail("Salesforce setup must not run for cancellation"),
+    )
+
+    assert app.main(
+        ["participant-drop"], input_fn=lambda prompt: alias, output_fn=output.append
+    ) == 0
+    assert output[-1] == (
+        "Participant drop cancelled; no Salesforce changes were made."
+    )
 
 
 def test_user_sync_config_command_authenticates_and_validates(monkeypatch, capsys):

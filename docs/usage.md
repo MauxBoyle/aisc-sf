@@ -34,26 +34,33 @@ set.
 
 ## Participant-drop intake
 
-Start a participant withdrawal intake from the terminal:
+Open the participant-drop menu from the terminal:
 
 ```bash
 uv run aisc_salesforce participant-drop
 ```
 
-Select the scenario (Unpaid Invoice, Withdrawal Request, CRG drop, or another
-participant drop). Reference values are optional. An invoice reference is
-matched exactly against `Cert_Invoice__c.Name`, a Withdrawal Request reference
-against `Withdrawal_Request__c.Name`, and a CRG reference against
-`Cert_Audit__c.Name`. Those records supply their Account lookup. The workflow
-does not use Salesforce's built-in `Invoice` object; it uses the custom
-`Cert_Invoice__c` object and its `Cert_Account__c` Account lookup.
+The first menu offers **Start a new withdrawal** and **Complete an existing
+withdrawal**, in that order. Complete currently displays `Complete an existing
+withdrawal is not implemented yet.` and exits successfully. Start continues to
+the scenario menu (Unpaid Invoice, Withdrawal Request, CRG drop, or another
+participant drop). Salesforce configuration is loaded and the connection is
+created only after Start is selected.
+
+Reference values are optional. An invoice reference is matched exactly against
+`Cert_Invoice__c.Name`, a Withdrawal Request reference against
+`Withdrawal_Request__c.Name`, and a CRG reference against `Cert_Audit__c.Name`.
+Those records supply their Account lookup. The workflow does not use
+Salesforce's built-in `Invoice` object; it uses the custom `Cert_Invoice__c`
+object and its `Cert_Account__c` Account lookup.
 
 When a reference does not resolve an Account, the command tries a normalized
 Certification ID and then normalized partial company-name matches. A single
 match proceeds automatically; multiple matches always require an explicit
-choice. Type `cancel` at any prompt to stop. Cancellation makes no Salesforce
-write. A completed intake posts exactly `Withdrawal in progress: <scenario>.`
-to the selected Account's Chatter feed.
+choice. Type `cancel`, `c`, `q`, or `quit` at any prompt to stop. Cancellation
+makes no Salesforce write; cancellation from the initial menu also avoids a
+Salesforce connection. A completed intake posts exactly `Withdrawal in
+progress: <scenario>.` to the selected Account's Chatter feed.
 
 ## Participant user-provisioning Profile check
 

@@ -18,7 +18,7 @@ from .cli_participant_drop import CLIParticipantDropInteraction
 from .cli_review_ui import CLIReviewUI, ColorMode, print_profile_error
 from .dictionary import DictionaryError, load_export_plan
 from .imis_contacts import ContactConsolidationError, consolidate_contactbasic
-from .participant_drop import ParticipantDropService
+from .participant_drop import ParticipantDropAction, ParticipantDropService
 from .picklist_audit import (
     PicklistAuditError,
     PicklistAuditResult,
@@ -373,14 +373,25 @@ def _run_participant_drop(
     input_fn: Callable[[str], str] = input,
     output_fn: Callable[[str], None] = print,
 ) -> int:
-    """Authenticate and run the interactive participant withdrawal intake."""
+    """Choose an action, then authenticate only when starting a withdrawal."""
+    interaction = CLIParticipantDropInteraction(
+        input_fn=input_fn, output_fn=output_fn
+    )
+    action = interaction.choose_action()
+    if action is None:
+        interaction.show(
+            "Participant drop cancelled; no Salesforce changes were made."
+        )
+        return 0
+    if action is ParticipantDropAction.COMPLETE:
+        interaction.show("Complete an existing withdrawal is not implemented yet.")
+        return 0
+
     _load_dotenv(Path(".env"))
     environment = dict(os.environ)
     credentials = get_credentials(environment)
     auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
-    ParticipantDropService(SalesforceClient(auth)).run(
-        CLIParticipantDropInteraction(input_fn=input_fn, output_fn=output_fn)
-    )
+    ParticipantDropService(SalesforceClient(auth)).run(interaction)
     return 0
 
 
