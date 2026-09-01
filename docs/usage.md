@@ -74,6 +74,18 @@ when blank, and the workflow preserves existing note text. The selected reason
 is available in the Python intake result for later work; this command does not
 create or update `Certification_Withdrawal__c` records.
 
+For later withdrawal completion-task creation, Withdrawal Request and Unpaid
+Invoice use the latest available certificate expiration date. A Saturday or
+Sunday expiration advances to Monday. CRG drop and Other participant drop use
+the next weekday after the current date and ignore certificate expirations. A
+Withdrawal Request or Unpaid Invoice with no available certificate expiration
+uses the same next-weekday fallback. Business days exclude weekends only;
+holidays are not considered.
+
+After a withdrawal is recorded, the terminal displays the due date for the
+next step before the manual follow-up reminders, for example: `Due 12/31/26:
+complete withdrawal for Industrial Fabricators (IN-28037)`.
+
 ## Participant user-provisioning Profile check
 
 Run the read-only configuration check before using participant provisioning:
