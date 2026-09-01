@@ -194,6 +194,16 @@ def test_unpaid_invoice_records_dated_note_and_posts_exact_message():
             {"Cert_Notes__c": "Prior note\n9/1/26 Withdrawal: #NonPayment INV-42"},
         )
     ]
+    assert interaction.messages == [
+        "Withdrawal intake recorded for Invoice Steel.",
+        "Manual follow-up required:",
+        "  - Notify Data: Maureen Boyle.",
+        "  - Notify Department Head: Lisa Patel.",
+        "  - Notify Invoicing: Karla Ruiz.",
+        "  - Notify Audit Logistics: Kim Swiss.",
+        "  - Ask Audit Logistics (Kim Swiss) to remove the Account's Audit Package.",
+        "These notifications and Audit Package removal are not performed or verified by the script.",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -203,15 +213,17 @@ def test_unpaid_invoice_records_dated_note_and_posts_exact_message():
         (" REF-7 ", WithdrawalReason.CLOSED, "9/1/26 Withdrawal: #Closed REF-7"),
         ("REF-7", WithdrawalReason.ROI, "9/1/26 Withdrawal: #ROI REF-7"),
         ("REF-7", WithdrawalReason.NEW_OWNER, "9/1/26 Withdrawal: #NewOwner REF-7"),
-        ("REF-7", WithdrawalReason.BUSINESS_MODEL, "9/1/26 Withdrawal: #BusModel REF-7"),
+        (
+            "REF-7",
+            WithdrawalReason.BUSINESS_MODEL,
+            "9/1/26 Withdrawal: #BusModel REF-7",
+        ),
     ],
 )
 def test_withdrawal_note_uses_each_reason_and_optional_reference(
     reference, reason, expected_note
 ):
-    client = Client(
-        [[{"Id": "001a", "Name": "Steel", "Certification_ID__c": "C-1"}]]
-    )
+    client = Client([[{"Id": "001a", "Name": "Steel", "Certification_ID__c": "C-1"}]])
     interaction = Interaction(
         ParticipantDropScenario.OTHER,
         reference,
@@ -409,6 +421,9 @@ def test_cancel_at_reason_never_posts_to_salesforce():
     assert result.cancelled is True
     assert client.messages == []
     assert client.updates == []
+    assert interaction.messages == [
+        "Participant drop cancelled; no Salesforce changes were made."
+    ]
 
 
 def test_falls_back_to_normalized_certification_id_then_company_name():

@@ -114,6 +114,12 @@ the invoice number against `Cert_Invoice__c.Name` and uses that record's
 intake result for later withdrawal processing; this command does not create or
 update a `Certification_Withdrawal__c` record.
 
+After both Salesforce updates succeed, the terminal displays manual follow-up
+reminders for Data, the Department Head, Invoicing, and Audit Logistics. It
+also asks Audit Logistics to remove the Account's Audit Package. The command
+does not send or verify those notifications, and it does not remove or verify
+removal of the Audit Package.
+
 Create a read-only application-stage count:
 
 ```bash
