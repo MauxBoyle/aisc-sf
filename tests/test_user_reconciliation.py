@@ -1,6 +1,7 @@
 """Tests for the read-only participant User reconciliation planner."""
 
 from dataclasses import FrozenInstanceError
+from datetime import date
 
 import pytest
 
@@ -45,13 +46,17 @@ def test_no_active_user_produces_create_with_normalized_username():
     )
 
     assert plan.proposed_operation == "create"
-    assert dict(plan.proposed_create or ())["Username"] == "ada@example.com"
+    desired = dict(plan.proposed_create or ())
+    assert desired["Username"] == "ada@example.com"
+    assert desired["Alias"] == "lovela26"
+    assert desired["TimeZoneSidKey"] == "America/Chicago"
+    assert "CommunityNickname" not in desired
     assert plan.required_profile == ParticipantProfile.PARTICIPANT
     assert not plan.blockers
     assert plan.as_dict()["proposed_create"]["ContactId"] == "contact-1"
 
 
-def test_one_active_user_shows_only_differences():
+def test_one_active_user_does_not_copy_contact_mailing_fields():
     user = {
         "Id": "user-1",
         "IsActive": True,
@@ -68,10 +73,36 @@ def test_one_active_user_shows_only_differences():
         CONTACT, [user], [account()], [account()], PROFILES, CONFIG, []
     )
 
-    assert plan.proposed_operation == "update"
-    assert [
-        (change.field, change.current, change.desired) for change in plan.field_changes
-    ] == [("City", "Evanston", "Chicago")]
+    assert plan.proposed_operation == "none"
+    assert not plan.field_changes
+
+
+def test_alias_and_community_nickname_collisions_block_without_suffixes():
+    plan = build_user_reconciliation_plan(
+        CONTACT,
+        [],
+        [account()],
+        [account()],
+        PROFILES,
+        CONFIG,
+        [],
+        alias_matches=[{"Id": "alias-user", "Alias": "lovelaa26"}],
+        community_nickname_matches=[
+            {"Id": "nickname-user", "CommunityNickname": "lovelacea26"}
+        ],
+        community_nickname_required=True,
+        clock=lambda: date(2026, 1, 1),
+    )
+
+    assert dict(plan.desired_user)["CommunityNickname"] == "lovelacea26"
+    assert [item["Id"] for item in plan.alias_collisions] == ["alias-user"]
+    assert [item["Id"] for item in plan.community_nickname_collisions] == [
+        "nickname-user"
+    ]
+    assert {item.code for item in plan.blockers} >= {
+        "alias_collision",
+        "community_nickname_collision",
+    }
 
 
 def test_multiple_active_users_and_inactive_users_are_kept_separate():

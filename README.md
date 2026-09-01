@@ -74,11 +74,22 @@ uv run aisc_salesforce reconcile-user CONTACT_ID --json
 ```
 
 `reconcile-user` never creates, updates, or deletes Salesforce records. It
-uses the Contact's identity and mailing fields as the desired User values and
-uses the Contact email, trimmed and lowercased, as the desired username. The
-command reports blockers—such as a missing email, profile configuration
-problem, username collision, or multiple active linked Users—instead of
-attempting a repair. `--json` provides a stable machine-readable plan.
+uses the Contact's trimmed first name, last name, and normalized email as the
+desired User identity values, and uses that email as the desired username. It
+does not copy or modify User mailing fields. It also generates an Alias from
+five normalized last-name characters, one first-name character, and the
+clock's two-digit year; all generated name characters are casefolded letters
+or digits. When the caller explicitly requires a Community Nickname, it uses
+ten normalized last-name characters, one first-name character, and that same
+clock-based year. The plan sets `en_US` locale and language, `UTF-8` email
+encoding, and maps U.S. state/DC and Canadian province/territory mailing
+addresses to a time zone. Missing or unmapped addresses use `America/Chicago`.
+
+The command reports blockers—such as unusable names, a missing email, profile
+configuration problem, username collision, Alias collision, Community Nickname
+collision, or multiple active linked Users—instead of attempting a repair.
+Generated identifiers are never suffixed to avoid a collision. `--json`
+provides a stable machine-readable plan.
 
 Open the interactive participant-drop menu:
 
