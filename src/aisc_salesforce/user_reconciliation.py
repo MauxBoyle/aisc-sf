@@ -8,15 +8,26 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 from .account_roles import ACCOUNT_ROLE_DEFINITIONS, AccountRole
-from .contact_resolution import normalize_email
 from .profile_updates import escape_soql_string
 from .required_profile_rules import AccountRoleAssignment, determine_required_profile
 from .salesforce import SalesforceClient
+from .user_field_policies import (
+    alias,
+    community_nickname,
+    contact_email,
+    contact_first_name,
+    contact_last_name,
+    fixed_localization_fields,
+    normalized_name_component,
+    time_zone,
+    username_from_email,
+)
 from .user_sync_config import (
     PROFILE_CONFIGURATION,
     ParticipantProfile,
@@ -42,13 +53,14 @@ USER_FIELDS = [
     "FirstName",
     "LastName",
     "Email",
-    "Street",
-    "City",
-    "State",
-    "PostalCode",
-    "Country",
     "ProfileId",
     "Username",
+    "Alias",
+    "CommunityNickname",
+    "TimeZoneSidKey",
+    "LocaleSidKey",
+    "LanguageLocaleKey",
+    "EmailEncodingKey",
 ]
 ACCOUNT_FIELDS = [
     "Id",
@@ -62,23 +74,18 @@ DESIRED_FIELD_ORDER = (
     "FirstName",
     "LastName",
     "Email",
-    "Street",
-    "City",
-    "State",
-    "PostalCode",
-    "Country",
     "ProfileId",
     "Username",
+    "Alias",
+    "TimeZoneSidKey",
+    "LocaleSidKey",
+    "LanguageLocaleKey",
+    "EmailEncodingKey",
 )
 _CONTACT_TO_USER = {
     "FirstName": "FirstName",
     "LastName": "LastName",
     "Email": "Email",
-    "MailingStreet": "Street",
-    "MailingCity": "City",
-    "MailingState": "State",
-    "MailingPostalCode": "PostalCode",
-    "MailingCountry": "Country",
 }
 
 
@@ -138,6 +145,8 @@ class UserReconciliationPlan:
     proposed_create: tuple[tuple[str, str], ...] | None
     field_changes: tuple[UserFieldChange, ...]
     blockers: tuple[ReconciliationBlocker, ...]
+    alias_collisions: tuple[dict[str, Any], ...] = ()
+    community_nickname_collisions: tuple[dict[str, Any], ...] = ()
 
     @property
     def is_blocked(self) -> bool:
@@ -153,6 +162,10 @@ class UserReconciliationPlan:
             "active_users": [dict(item) for item in self.active_users],
             "inactive_users": [dict(item) for item in self.inactive_users],
             "username_collisions": [dict(item) for item in self.username_collisions],
+            "alias_collisions": [dict(item) for item in self.alias_collisions],
+            "community_nickname_collisions": [
+                dict(item) for item in self.community_nickname_collisions
+            ],
             "proposed_operation": self.proposed_operation,
             "proposed_create": (
                 dict(self.proposed_create) if self.proposed_create is not None else None
@@ -175,6 +188,10 @@ def build_user_reconciliation_plan(
     configured_profiles: Mapping[ParticipantProfile, str] | None,
     username_matches: Iterable[Mapping[str, Any]],
     *,
+    alias_matches: Iterable[Mapping[str, Any]] = (),
+    community_nickname_matches: Iterable[Mapping[str, Any]] = (),
+    community_nickname_required: bool = False,
+    clock: Callable[[], date] = date.today,
     configuration_error: str | None = None,
 ) -> UserReconciliationPlan:
     """Build a plan from already-read Salesforce records, without side effects."""
@@ -193,7 +210,10 @@ def build_user_reconciliation_plan(
             (ReconciliationBlocker("contact_not_found", "Contact was not found."),),
         )
     contact_id = _text(contact.get("Id"))
-    desired, blockers = _desired_user(contact)
+    desired, blockers = _desired_user(
+        contact, clock, community_nickname_required=community_nickname_required
+    )
+    desired_field_order = _desired_field_order(community_nickname_required)
     role_assignments = _role_assignments(accounts, contact_id, family_accounts)
     decision = determine_required_profile(
         [
@@ -256,6 +276,21 @@ def build_user_reconciliation_plan(
                 "username_collision", "Another User already owns the desired username."
             )
         )
+    alias_collisions = _identifier_collisions(alias_matches, linked_ids)
+    if alias_collisions:
+        blockers.append(
+            ReconciliationBlocker(
+                "alias_collision", "Another User already owns the desired Alias."
+            )
+        )
+    nickname_collisions = _identifier_collisions(community_nickname_matches, linked_ids)
+    if nickname_collisions:
+        blockers.append(
+            ReconciliationBlocker(
+                "community_nickname_collision",
+                "Another User already owns the desired Community Nickname.",
+            )
+        )
     if len(active) > 1:
         blockers.append(
             ReconciliationBlocker(
@@ -268,19 +303,19 @@ def build_user_reconciliation_plan(
     create: tuple[tuple[str, str], ...] | None = None
     changes: tuple[UserFieldChange, ...] = ()
     if not blockers:
-        desired_items = tuple((field, desired[field]) for field in DESIRED_FIELD_ORDER)
+        desired_items = tuple((field, desired[field]) for field in desired_field_order)
         if not active:
             operation, create = "create", desired_items
         else:
             changes = tuple(
                 UserFieldChange(field, _text(active[0].get(field)), desired[field])
-                for field in DESIRED_FIELD_ORDER
+                for field in desired_field_order
                 if _text(active[0].get(field)) != desired[field]
             )
             operation = "update" if changes else "none"
     return UserReconciliationPlan(
         contact_id,
-        tuple((field, desired.get(field, "")) for field in DESIRED_FIELD_ORDER),
+        tuple((field, desired.get(field, "")) for field in desired_field_order),
         required_profile,
         tuple(role_assignments),
         tuple(map(_user_snapshot, active)),
@@ -290,17 +325,26 @@ def build_user_reconciliation_plan(
         create,
         changes,
         tuple(blockers),
+        alias_collisions,
+        nickname_collisions,
     )
 
 
 class UserReconciliationService:
     """Orchestrate the focused Salesforce reads used by the reconciliation plan."""
 
-    def __init__(self, client: SalesforceClient):
+    def __init__(
+        self, client: SalesforceClient, *, clock: Callable[[], date] = date.today
+    ):
         self.client = client
+        self.clock = clock
 
     def plan(
-        self, contact_id: str, environment: dict[str, str]
+        self,
+        contact_id: str,
+        environment: dict[str, str],
+        *,
+        community_nickname_required: bool = False,
     ) -> UserReconciliationPlan:
         """Read the smallest useful record sets and return a no-write proposal."""
         contact_id = contact_id.strip()
@@ -330,12 +374,36 @@ class UserReconciliationService:
             )
         except UserSyncConfigError as error:
             configuration_error = str(error)
-        username, comparison, _ = normalize_email(contact.get("Email"))
+        email, comparison, _ = contact_email(contact)
+        username = username_from_email(email)
         username_matches = (
             self.client.query_records(
                 "User", USER_FIELDS, where=_where("Username", username)
             )
             if username and comparison
+            else []
+        )
+        alias_value = alias(
+            contact.get("FirstName"), contact.get("LastName"), self.clock
+        )
+        alias_matches = (
+            self.client.query_records(
+                "User", USER_FIELDS, where=_where("Alias", alias_value)
+            )
+            if alias_value
+            else []
+        )
+        nickname_value = community_nickname(
+            contact.get("FirstName"),
+            contact.get("LastName"),
+            self.clock,
+            required=community_nickname_required,
+        )
+        nickname_matches = (
+            self.client.query_records(
+                "User", USER_FIELDS, where=_where("CommunityNickname", nickname_value)
+            )
+            if nickname_value
             else []
         )
         return build_user_reconciliation_plan(
@@ -346,6 +414,10 @@ class UserReconciliationService:
             profiles,
             configured,
             username_matches,
+            alias_matches=alias_matches,
+            community_nickname_matches=nickname_matches,
+            community_nickname_required=community_nickname_required,
+            clock=self.clock,
             configuration_error=configuration_error,
         )
 
@@ -405,6 +477,9 @@ def render_user_reconciliation_plan(plan: UserReconciliationPlan) -> str:
 
 def _desired_user(
     contact: Mapping[str, Any],
+    clock: Callable[[], date],
+    *,
+    community_nickname_required: bool,
 ) -> tuple[dict[str, str], list[ReconciliationBlocker]]:
     desired = {"ContactId": _text(contact.get("Id"))}
     blockers: list[ReconciliationBlocker] = []
@@ -416,9 +491,30 @@ def _desired_user(
                     "missing_contact_data", f"Contact {source} is required."
                 )
             )
-    username, comparison, warnings = normalize_email(contact.get("Email"))
-    desired["Username"] = username
-    if not username or not comparison:
+    email, comparison, warnings = contact_email(contact)
+    desired["FirstName"] = contact_first_name(contact)
+    desired["LastName"] = contact_last_name(contact)
+    desired["Email"] = email
+    desired["Username"] = username_from_email(email)
+    desired["Alias"] = alias(desired["FirstName"], desired["LastName"], clock)
+    nickname = community_nickname(
+        desired["FirstName"],
+        desired["LastName"],
+        clock,
+        required=community_nickname_required,
+    )
+    if nickname is not None:
+        desired["CommunityNickname"] = nickname
+    desired["TimeZoneSidKey"] = time_zone(contact)
+    desired.update(fixed_localization_fields())
+    for field in ("FirstName", "LastName"):
+        if not normalized_name_component(desired[field]):
+            blockers.append(
+                ReconciliationBlocker(
+                    "invalid_name", f"Contact {field} has no usable letters or digits."
+                )
+            )
+    if not desired["Username"] or not comparison:
         blockers.append(
             ReconciliationBlocker(
                 "invalid_email",
@@ -426,6 +522,27 @@ def _desired_user(
             )
         )
     return desired, blockers
+
+
+def _identifier_collisions(
+    matches: Iterable[Mapping[str, Any]], linked_ids: set[str]
+) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        _user_snapshot(item)
+        for item in matches
+        if _text(item.get("Id")) not in linked_ids
+    )
+
+
+def _desired_field_order(community_nickname_required: bool) -> tuple[str, ...]:
+    if not community_nickname_required:
+        return DESIRED_FIELD_ORDER
+    alias_index = DESIRED_FIELD_ORDER.index("Alias") + 1
+    return (
+        *DESIRED_FIELD_ORDER[:alias_index],
+        "CommunityNickname",
+        *DESIRED_FIELD_ORDER[alias_index:],
+    )
 
 
 def _role_assignments(
