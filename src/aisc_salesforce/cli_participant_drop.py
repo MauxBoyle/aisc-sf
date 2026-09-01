@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from .participant_drop import AccountCandidate, ParticipantDropScenario
+from .participant_drop import (
+    AccountCandidate,
+    ParticipantDropAction,
+    ParticipantDropScenario,
+)
 
 
 class CLIParticipantDropInteraction:
@@ -18,6 +22,19 @@ class CLIParticipantDropInteraction:
     ):
         self.input_fn = input_fn
         self.output_fn = output_fn
+
+    def choose_action(self) -> ParticipantDropAction | None:
+        choices = tuple(ParticipantDropAction)
+        self.output_fn("Participant-drop action:")
+        for index, action in enumerate(choices, start=1):
+            self.output_fn(f"  {index}. {action.value}")
+        while True:
+            value = self.input_fn("Choose an action (or 'cancel'): ").strip()
+            if _is_cancel(value):
+                return None
+            if value.isdigit() and 1 <= int(value) <= len(choices):
+                return choices[int(value) - 1]
+            self.output_fn("Enter one of the listed numbers, or 'cancel'.")
 
     def choose_scenario(self) -> ParticipantDropScenario | None:
         choices = tuple(ParticipantDropScenario)

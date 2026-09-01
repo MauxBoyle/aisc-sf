@@ -8,6 +8,13 @@ from enum import StrEnum
 from typing import Protocol
 
 
+class ParticipantDropAction(StrEnum):
+    """The action selected before starting any Salesforce setup."""
+
+    START = "Start a new withdrawal"
+    COMPLETE = "Complete an existing withdrawal"
+
+
 class ParticipantDropScenario(StrEnum):
     """The reason a participant withdrawal is being started."""
 
