@@ -95,12 +95,21 @@ connect to Salesforce until you choose Start.
 
 The related reference and Certification ID are optional; when supplied, the
 command tries them before asking for a company name. If more than one Account
-matches, it requires an explicit selection. Enter `cancel`, `c`, `q`, or `quit`
-at any prompt to exit without writing to Salesforce. Once an Account is
-resolved, the command posts `Withdrawal in progress: <scenario>.` to that
-Account's Chatter feed. Invoice lookup does not use Salesforce's built-in
-`Invoice` object. Instead, it matches the invoice number against
-`Cert_Invoice__c.Name` and uses that record's `Cert_Account__c` Account lookup.
+matches, it requires an explicit selection.
+
+Each intake also has a withdrawal reason. Unpaid Invoice starts with the
+`#NonPayment` default, which can be replaced by one of these choices: Economy,
+Facility/Main office closure, ROI, New Ownership, or New Business model. CRG
+drop automatically uses `#CRG` and does not show a reason menu. Withdrawal
+Request and Other participant drop require one of the five selectable reasons.
+Enter `cancel`, `c`, `q`, or `quit` at any prompt—including the reason menu—to
+exit without writing to Salesforce. Once an Account and reason are resolved,
+the command posts `Withdrawal in progress: <scenario>.` to that Account's
+Chatter feed. Invoice lookup does not use Salesforce's built-in `Invoice`
+object. Instead, it matches the invoice number against `Cert_Invoice__c.Name`
+and uses that record's `Cert_Account__c` Account lookup. The selected reason is
+kept in the Python intake result for later withdrawal processing; this command
+does not create or update a `Certification_Withdrawal__c` record.
 
 Create a read-only application-stage count:
 

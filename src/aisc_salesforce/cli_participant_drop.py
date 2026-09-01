@@ -5,9 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from .participant_drop import (
+    SELECTABLE_REASONS,
     AccountCandidate,
     ParticipantDropAction,
     ParticipantDropScenario,
+    WithdrawalReason,
 )
 
 
@@ -84,6 +86,32 @@ class CLIParticipantDropInteraction:
                 return None
             if value.isdigit() and 1 <= int(value) <= len(candidates):
                 return candidates[int(value) - 1]
+            self.output_fn("Enter one of the listed numbers, or 'cancel'.")
+
+    def choose_withdrawal_reason(
+        self, default_reason: WithdrawalReason | None
+    ) -> WithdrawalReason | None:
+        """Prompt for an allowed withdrawal reason, with an optional process default."""
+        choices = (
+            (default_reason,) if default_reason is not None else ()
+        ) + SELECTABLE_REASONS
+        self.output_fn("Withdrawal reason:")
+        for index, reason in enumerate(choices, start=1):
+            default_marker = " (default)" if reason is default_reason else ""
+            self.output_fn(f"  {index}. {reason.value}{default_marker}")
+
+        prompt = "Choose a withdrawal reason (or 'cancel')"
+        if default_reason is not None:
+            prompt += f"; press Enter for {default_reason.value}"
+        prompt += ": "
+        while True:
+            value = self.input_fn(prompt).strip()
+            if _is_cancel(value):
+                return None
+            if not value and default_reason is not None:
+                return default_reason
+            if value.isdigit() and 1 <= int(value) <= len(choices):
+                return choices[int(value) - 1]
             self.output_fn("Enter one of the listed numbers, or 'cancel'.")
 
     def show(self, message: str) -> None:

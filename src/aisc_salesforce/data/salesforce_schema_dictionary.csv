@@ -76,6 +76,7 @@ Cert_Invoice__c,cert_invoice_account,Cert_Account__c,Lookup (Account),Account us
 Withdrawal_Request__c,withdrawal_request_id,Id,Id,Withdrawal request record ID,TRUE
 Withdrawal_Request__c,withdrawal_request_name,Name,string,Withdrawal request reference used for participant-drop lookup,TRUE
 Withdrawal_Request__c,withdrawal_request_account,Account__c,Lookup (Account),Account used for participant-drop lookup,TRUE
+Certification_Withdrawal__c,certification_withdrawal_cancellation_reason,Certification_Cancellation_Reason__c,picklist,Withdrawal reason available for future withdrawal processing,TRUE
 Case,case_acctid,AccountId,,,TRUE
 Case,case_additional_audit,Additional_Audit__c,,,FALSE
 Case,case_adhere_to_aisc_cosp_2_1,Adhere_to_AISC_CoSP_2_1__c,,,FALSE
