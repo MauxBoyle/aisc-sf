@@ -115,12 +115,12 @@ intake result for later withdrawal processing; this command does not create or
 update a `Certification_Withdrawal__c` record.
 
 For later withdrawal completion-task creation, the due-date policy is based on
-the intake scenario. Withdrawal Request and Unpaid Invoice use the latest
-available certificate expiration date (moving a Saturday or Sunday expiration
-to Monday). CRG drop and Other participant drop instead use the next weekday
-after the current date. If a Withdrawal Request or Unpaid Invoice has no
-available certificate expiration, it also uses that next-weekday fallback.
-Business days exclude weekends only; holidays are not considered.
+the intake scenario. Withdrawal Request and Unpaid Invoice use the next
+business day after the latest available certificate expiration date. CRG drop
+and Other participant drop instead use the next weekday after the current date.
+If a Withdrawal Request or Unpaid Invoice has no available certificate
+expiration, it also uses that next-weekday fallback. Business days exclude
+weekends only; holidays are not considered.
 
 After both Salesforce updates succeed, the terminal displays manual follow-up
 reminders for Data, the Department Head, Invoicing, and Audit Logistics. It

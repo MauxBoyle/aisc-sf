@@ -66,9 +66,10 @@ def calculate_withdrawal_completion_due_date(
 ) -> date:
     """Calculate the due date for a withdrawal completion task.
 
-    Withdrawal Request and Unpaid Invoice use the latest certificate expiration.
-    When no expiration is available, and for CRG and Other scenarios, the due
-    date is the next Monday-through-Friday business day after ``current_date``.
+    Withdrawal Request and Unpaid Invoice use the next Monday-through-Friday
+    business day after the latest certificate expiration. When no expiration is
+    available, and for CRG and Other scenarios, the due date is the next
+    Monday-through-Friday business day after ``current_date``.
     """
     latest_expiration = max(certificate_expirations, default=None)
     if (
@@ -79,7 +80,7 @@ def calculate_withdrawal_completion_due_date(
         )
         and latest_expiration is not None
     ):
-        return _next_or_same_business_day(latest_expiration)
+        return _next_business_day(latest_expiration)
     return _next_business_day(current_date)
 
 

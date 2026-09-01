@@ -81,13 +81,13 @@ class Interaction:
             ParticipantDropScenario.WITHDRAWAL_REQUEST,
             (date(2026, 9, 3), date(2026, 9, 4)),
             date(2026, 9, 1),
-            date(2026, 9, 4),
+            date(2026, 9, 7),
         ),
         (
             ParticipantDropScenario.UNPAID_INVOICE,
             (date(2026, 9, 4),),
             date(2026, 9, 1),
-            date(2026, 9, 4),
+            date(2026, 9, 7),
         ),
         (
             ParticipantDropScenario.WITHDRAWAL_REQUEST,
@@ -256,7 +256,7 @@ def test_unpaid_invoice_records_dated_note_and_posts_exact_message():
     ]
     assert interaction.messages == [
         "Withdrawal intake recorded for Invoice Steel.",
-        "Due 09/30/26: complete withdrawal for Invoice Steel (INV-42)",
+        "Due 10/01/26: complete withdrawal for Invoice Steel (INV-42)",
         "Manual follow-up required:",
         "  - Notify Data: Maureen Boyle.",
         "  - Notify Department Head: Lisa Patel.",
