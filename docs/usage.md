@@ -60,16 +60,19 @@ match proceeds automatically; multiple matches always require an explicit
 choice.
 
 Each intake has a withdrawal reason before it is recorded. Unpaid Invoice
-starts with `#NonPayment`; press Enter to keep that default or choose Economy,
-Facility/Main office closure, ROI, New Ownership, or New Business model instead.
-CRG drop automatically uses `#CRG`, so no reason menu is shown. Withdrawal
-Request and Other participant drop require one of the five selectable reasons.
+starts with `#NonPayment`; press Enter to keep that default or choose
+`#Economy`, `#Closed`, `#ROI`, `#NewOwner`, or `#BusModel` instead. CRG drop
+automatically uses `#CRG`, so no reason menu is shown. Withdrawal Request and
+Other participant drop require one of the five selectable reasons.
 Type `cancel`, `c`, `q`, or `quit` at any prompt, including the reason menu, to
 stop. Cancellation makes no Salesforce write; cancellation from the initial
 menu also avoids a Salesforce connection. A completed intake posts exactly
-`Withdrawal in progress: <scenario>.` to the selected Account's Chatter feed.
-The selected reason is available in the Python intake result for later work;
-this command does not create or update `Certification_Withdrawal__c` records.
+`Withdrawal in progress: <scenario>.` to the selected Account's Chatter feed
+and appends `M/D/YY Withdrawal: <hashtag> <reference>` to its
+`Cert_Notes__c` Certification Notes field. The reference portion is omitted
+when blank, and the workflow preserves existing note text. The selected reason
+is available in the Python intake result for later work; this command does not
+create or update `Certification_Withdrawal__c` records.
 
 ## Participant user-provisioning Profile check
 

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date
 from enum import StrEnum
-from typing import Protocol
+from typing import Callable, Protocol
 
 
 class ParticipantDropAction(StrEnum):
@@ -27,21 +28,26 @@ class ParticipantDropScenario(StrEnum):
 class WithdrawalReason(StrEnum):
     """Reasons recorded for a participant withdrawal."""
 
-    ECONOMY = "Economy"
-    FACILITY_MAIN_OFFICE_CLOSURE = "Facility/Main office closure"
-    ROI = "ROI"
-    NEW_OWNERSHIP = "New Ownership"
-    NEW_BUSINESS_MODEL = "New Business model"
+    ECONOMY = "#Economy"
+    CLOSED = "#Closed"
+    ROI = "#ROI"
+    NEW_OWNER = "#NewOwner"
+    BUSINESS_MODEL = "#BusModel"
     CRG = "#CRG"
     NON_PAYMENT = "#NonPayment"
+
+    # Keep these older Python member names available for existing callers.
+    FACILITY_MAIN_OFFICE_CLOSURE = CLOSED
+    NEW_OWNERSHIP = NEW_OWNER
+    NEW_BUSINESS_MODEL = BUSINESS_MODEL
 
 
 SELECTABLE_REASONS = (
     WithdrawalReason.ECONOMY,
-    WithdrawalReason.FACILITY_MAIN_OFFICE_CLOSURE,
+    WithdrawalReason.CLOSED,
     WithdrawalReason.ROI,
-    WithdrawalReason.NEW_OWNERSHIP,
-    WithdrawalReason.NEW_BUSINESS_MODEL,
+    WithdrawalReason.NEW_OWNER,
+    WithdrawalReason.BUSINESS_MODEL,
 )
 """Reasons a person can select in withdrawal intake."""
 
@@ -59,6 +65,7 @@ class AccountCandidate:
     id: str
     name: str
     certification_id: str | None
+    certification_notes: str | None = None
 
 
 @dataclass(frozen=True)
@@ -109,10 +116,13 @@ _NORMALIZED_SEARCH = re.compile(r"[^a-z0-9]+")
 
 
 class ParticipantDropService:
-    """Find one Account and record the start of its withdrawal in Chatter."""
+    """Find one Account and record the start of its withdrawal."""
 
-    def __init__(self, client: object):
+    def __init__(
+        self, client: object, *, date_provider: Callable[[], date] = date.today
+    ):
         self.client = client
+        self.date_provider = date_provider
 
     def run(self, interaction: ParticipantDropInteraction) -> ParticipantDropResult:
         """Run intake, posting only after one Account has been resolved."""
@@ -165,6 +175,12 @@ class ParticipantDropService:
         if withdrawal_reason is None:
             return self._cancel(interaction)
 
+        note_text = _append_withdrawal_note(
+            account.certification_notes,
+            _format_withdrawal_note(self.date_provider(), withdrawal_reason, reference),
+        )
+        self.client.update_record("Account", account.id, {"Cert_Notes__c": note_text})
+
         message = f"Withdrawal in progress: {scenario.value}."
         self.client.post_feed_message(account.id, message)
         interaction.show(f"Withdrawal intake recorded for {account.name}.")
@@ -215,7 +231,7 @@ class ParticipantDropService:
     def _find_account_by_id(self, account_id: str) -> AccountCandidate | None:
         records = self.client.query_records(
             "Account",
-            ["Id", "Name", "Certification_ID__c"],
+            ["Id", "Name", "Certification_ID__c", "Cert_Notes__c"],
             where=f"Id = '{_soql_literal(account_id)}'",
         )
         candidates = _account_candidates(records)
@@ -229,7 +245,7 @@ class ParticipantDropService:
             return None
         records = self.client.query_records(
             "Account",
-            ["Id", "Name", "Certification_ID__c"],
+            ["Id", "Name", "Certification_ID__c", "Cert_Notes__c"],
             where="Certification_ID__c != NULL",
         )
         candidates = [
@@ -245,7 +261,7 @@ class ParticipantDropService:
             return ()
         records = self.client.query_records(
             "Account",
-            ["Id", "Name", "Certification_ID__c"],
+            ["Id", "Name", "Certification_ID__c", "Cert_Notes__c"],
             where="Name != NULL",
         )
         return tuple(
@@ -270,6 +286,7 @@ def _account_candidates(
         account_id = record.get("Id")
         name = record.get("Name")
         certification_id = record.get("Certification_ID__c")
+        certification_notes = record.get("Cert_Notes__c")
         if (
             not isinstance(account_id, str)
             or not isinstance(name, str)
@@ -281,6 +298,7 @@ def _account_candidates(
                 account_id,
                 name,
                 certification_id if isinstance(certification_id, str) else None,
+                certification_notes if isinstance(certification_notes, str) else None,
             )
         )
         known_ids.add(account_id)
@@ -294,3 +312,22 @@ def _normalize_search(value: str | None) -> str:
 def _soql_literal(value: str) -> str:
     """Escape user text placed inside one quoted SOQL literal."""
     return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _format_withdrawal_note(
+    withdrawal_date: date, reason: WithdrawalReason, reference: str
+) -> str:
+    """Create the dated Certification Notes entry for one withdrawal."""
+    formatted_date = (
+        f"{withdrawal_date.month}/{withdrawal_date.day}/{withdrawal_date.year % 100:02d}"
+    )
+    entry = f"{formatted_date} Withdrawal: {reason.value}"
+    return f"{entry} {reference.strip()}" if reference.strip() else entry
+
+
+def _append_withdrawal_note(existing_note: str | None, entry: str) -> str:
+    """Append an entry while preserving all existing Certification Notes text."""
+    if not existing_note:
+        return entry
+    separator = "" if existing_note.endswith("\n") else "\n"
+    return f"{existing_note}{separator}{entry}"
