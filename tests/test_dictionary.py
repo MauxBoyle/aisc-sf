@@ -117,3 +117,6 @@ def test_schema_dictionary_includes_participant_drop_withdrawal_fields():
         "Name",
         "Cert_Account__c",
     ]
+    assert [field.api_name for field in plan["Certification_Withdrawal__c"]] == [
+        "Certification_Cancellation_Reason__c",
+    ]

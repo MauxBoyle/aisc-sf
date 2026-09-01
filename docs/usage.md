@@ -57,10 +57,19 @@ object and its `Cert_Account__c` Account lookup.
 When a reference does not resolve an Account, the command tries a normalized
 Certification ID and then normalized partial company-name matches. A single
 match proceeds automatically; multiple matches always require an explicit
-choice. Type `cancel`, `c`, `q`, or `quit` at any prompt to stop. Cancellation
-makes no Salesforce write; cancellation from the initial menu also avoids a
-Salesforce connection. A completed intake posts exactly `Withdrawal in
-progress: <scenario>.` to the selected Account's Chatter feed.
+choice.
+
+Each intake has a withdrawal reason before it is recorded. Unpaid Invoice
+starts with `#NonPayment`; press Enter to keep that default or choose Economy,
+Facility/Main office closure, ROI, New Ownership, or New Business model instead.
+CRG drop automatically uses `#CRG`, so no reason menu is shown. Withdrawal
+Request and Other participant drop require one of the five selectable reasons.
+Type `cancel`, `c`, `q`, or `quit` at any prompt, including the reason menu, to
+stop. Cancellation makes no Salesforce write; cancellation from the initial
+menu also avoids a Salesforce connection. A completed intake posts exactly
+`Withdrawal in progress: <scenario>.` to the selected Account's Chatter feed.
+The selected reason is available in the Python intake result for later work;
+this command does not create or update `Certification_Withdrawal__c` records.
 
 ## Participant user-provisioning Profile check
 

@@ -24,6 +24,34 @@ class ParticipantDropScenario(StrEnum):
     OTHER = "Other participant drop"
 
 
+class WithdrawalReason(StrEnum):
+    """Reasons recorded for a participant withdrawal."""
+
+    ECONOMY = "Economy"
+    FACILITY_MAIN_OFFICE_CLOSURE = "Facility/Main office closure"
+    ROI = "ROI"
+    NEW_OWNERSHIP = "New Ownership"
+    NEW_BUSINESS_MODEL = "New Business model"
+    CRG = "#CRG"
+    NON_PAYMENT = "#NonPayment"
+
+
+SELECTABLE_REASONS = (
+    WithdrawalReason.ECONOMY,
+    WithdrawalReason.FACILITY_MAIN_OFFICE_CLOSURE,
+    WithdrawalReason.ROI,
+    WithdrawalReason.NEW_OWNERSHIP,
+    WithdrawalReason.NEW_BUSINESS_MODEL,
+)
+"""Reasons a person can select in withdrawal intake."""
+
+ASSIGNED_REASONS = (WithdrawalReason.CRG, WithdrawalReason.NON_PAYMENT)
+"""Process reasons assigned by the workflow instead of selected from Salesforce values."""
+
+ALL_REASONS = (*SELECTABLE_REASONS, *ASSIGNED_REASONS)
+"""Every supported withdrawal reason, in its workflow display order."""
+
+
 @dataclass(frozen=True)
 class AccountCandidate:
     """The small amount of Account information needed for human selection."""
@@ -38,6 +66,7 @@ class ParticipantDropResult:
     """The outcome of one intake run."""
 
     account: AccountCandidate | None
+    withdrawal_reason: WithdrawalReason | None = None
     cancelled: bool = False
 
 
@@ -56,11 +85,19 @@ class ParticipantDropInteraction(Protocol):
         self, candidates: tuple[AccountCandidate, ...]
     ) -> AccountCandidate | None: ...
 
+    def choose_withdrawal_reason(
+        self, default_reason: WithdrawalReason | None
+    ) -> WithdrawalReason | None: ...
+
     def show(self, message: str) -> None: ...
 
 
 _REFERENCE_LOOKUPS = {
-    ParticipantDropScenario.UNPAID_INVOICE: ("Cert_Invoice__c", "Name", "Cert_Account__c"),
+    ParticipantDropScenario.UNPAID_INVOICE: (
+        "Cert_Invoice__c",
+        "Name",
+        "Cert_Account__c",
+    ),
     ParticipantDropScenario.WITHDRAWAL_REQUEST: (
         "Withdrawal_Request__c",
         "Name",
@@ -88,7 +125,9 @@ class ParticipantDropService:
             return self._cancel(interaction)
         account = self._find_by_reference(scenario, reference)
         if account is None and reference.strip():
-            interaction.show("No Account matched that reference; using fallback search.")
+            interaction.show(
+                "No Account matched that reference; using fallback search."
+            )
 
         if account is None:
             certification_id = interaction.request_certification_id()
@@ -106,7 +145,9 @@ class ParticipantDropService:
                 return self._cancel(interaction)
             candidates = self._find_by_company_name(company_name)
             if not candidates:
-                interaction.show("No Accounts matched that company name; try again or cancel.")
+                interaction.show(
+                    "No Accounts matched that company name; try again or cancel."
+                )
                 continue
             if len(candidates) == 1:
                 account = candidates[0]
@@ -115,13 +156,41 @@ class ParticipantDropService:
             if selected is None:
                 return self._cancel(interaction)
             if selected not in candidates:
-                raise ValueError("Selected Account was not one of the presented candidates.")
+                raise ValueError(
+                    "Selected Account was not one of the presented candidates."
+                )
             account = selected
+
+        withdrawal_reason = self._choose_withdrawal_reason(interaction, scenario)
+        if withdrawal_reason is None:
+            return self._cancel(interaction)
 
         message = f"Withdrawal in progress: {scenario.value}."
         self.client.post_feed_message(account.id, message)
         interaction.show(f"Withdrawal intake recorded for {account.name}.")
-        return ParticipantDropResult(account)
+        return ParticipantDropResult(account, withdrawal_reason)
+
+    @staticmethod
+    def _choose_withdrawal_reason(
+        interaction: ParticipantDropInteraction, scenario: ParticipantDropScenario
+    ) -> WithdrawalReason | None:
+        if scenario is ParticipantDropScenario.CRG_DROP:
+            return WithdrawalReason.CRG
+
+        default_reason = (
+            WithdrawalReason.NON_PAYMENT
+            if scenario is ParticipantDropScenario.UNPAID_INVOICE
+            else None
+        )
+        reason = interaction.choose_withdrawal_reason(default_reason)
+        allowed_reasons = SELECTABLE_REASONS + (
+            (default_reason,) if default_reason is not None else ()
+        )
+        if reason is not None and reason not in allowed_reasons:
+            raise ValueError(
+                "Selected withdrawal reason is not allowed for this scenario."
+            )
+        return reason
 
     def _find_by_reference(
         self, scenario: ParticipantDropScenario, reference: str
@@ -152,7 +221,9 @@ class ParticipantDropService:
         candidates = _account_candidates(records)
         return candidates[0] if len(candidates) == 1 else None
 
-    def _find_by_certification_id(self, certification_id: str) -> AccountCandidate | None:
+    def _find_by_certification_id(
+        self, certification_id: str
+    ) -> AccountCandidate | None:
         normalized = _normalize_search(certification_id)
         if not normalized:
             return None
@@ -189,7 +260,9 @@ class ParticipantDropService:
         return ParticipantDropResult(None, cancelled=True)
 
 
-def _account_candidates(records: list[dict[str, object]]) -> tuple[AccountCandidate, ...]:
+def _account_candidates(
+    records: list[dict[str, object]],
+) -> tuple[AccountCandidate, ...]:
     """Turn valid Account query rows into unique candidates in Salesforce order."""
     candidates: list[AccountCandidate] = []
     known_ids: set[str] = set()
@@ -197,7 +270,11 @@ def _account_candidates(records: list[dict[str, object]]) -> tuple[AccountCandid
         account_id = record.get("Id")
         name = record.get("Name")
         certification_id = record.get("Certification_ID__c")
-        if not isinstance(account_id, str) or not isinstance(name, str) or account_id in known_ids:
+        if (
+            not isinstance(account_id, str)
+            or not isinstance(name, str)
+            or account_id in known_ids
+        ):
             continue
         candidates.append(
             AccountCandidate(
