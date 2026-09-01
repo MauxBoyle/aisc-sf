@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from enum import StrEnum
 from typing import Protocol
 
@@ -59,6 +59,31 @@ ALL_REASONS = (*SELECTABLE_REASONS, *ASSIGNED_REASONS)
 """Every supported withdrawal reason, in its workflow display order."""
 
 
+def calculate_withdrawal_completion_due_date(
+    scenario: ParticipantDropScenario,
+    certificate_expirations: Iterable[date],
+    current_date: date,
+) -> date:
+    """Calculate the due date for a withdrawal completion task.
+
+    Withdrawal Request and Unpaid Invoice use the next Monday-through-Friday
+    business day after the latest certificate expiration. When no expiration is
+    available, and for CRG and Other scenarios, the due date is the next
+    Monday-through-Friday business day after ``current_date``.
+    """
+    latest_expiration = max(certificate_expirations, default=None)
+    if (
+        scenario
+        in (
+            ParticipantDropScenario.WITHDRAWAL_REQUEST,
+            ParticipantDropScenario.UNPAID_INVOICE,
+        )
+        and latest_expiration is not None
+    ):
+        return _next_business_day(latest_expiration)
+    return _next_business_day(current_date)
+
+
 @dataclass(frozen=True)
 class AccountCandidate:
     """The small amount of Account information needed for human selection."""
@@ -67,6 +92,7 @@ class AccountCandidate:
     name: str
     certification_id: str | None
     certification_notes: str | None = None
+    certificate_expiration: date | None = None
 
 
 @dataclass(frozen=True)
@@ -184,15 +210,24 @@ class ParticipantDropService:
         if withdrawal_reason is None:
             return self._cancel(interaction)
 
+        current_date = self.date_provider()
         note_text = _append_withdrawal_note(
             account.certification_notes,
-            _format_withdrawal_note(self.date_provider(), withdrawal_reason, reference),
+            _format_withdrawal_note(current_date, withdrawal_reason, reference),
         )
         self.client.update_record("Account", account.id, {"Cert_Notes__c": note_text})
 
         message = f"Withdrawal in progress: {scenario.value}."
         self.client.post_feed_message(account.id, message)
         interaction.show(f"Withdrawal intake recorded for {account.name}.")
+        due_date = calculate_withdrawal_completion_due_date(
+            scenario,
+            (account.certificate_expiration,)
+            if account.certificate_expiration is not None
+            else (),
+            current_date,
+        )
+        interaction.show(_format_withdrawal_due_notice(due_date, account.name, reference))
         for reminder in _manual_follow_up_reminders():
             interaction.show(reminder)
         return ParticipantDropResult(account, withdrawal_reason)
@@ -242,7 +277,13 @@ class ParticipantDropService:
     def _find_account_by_id(self, account_id: str) -> AccountCandidate | None:
         records = self.client.query_records(
             "Account",
-            ["Id", "Name", "Certification_ID__c", "Cert_Notes__c"],
+            [
+                "Id",
+                "Name",
+                "Certification_ID__c",
+                "Cert_Notes__c",
+                "Cert_Scheduling_2_0_Cert_Month__c",
+            ],
             where=f"Id = '{_soql_literal(account_id)}'",
         )
         candidates = _account_candidates(records)
@@ -256,7 +297,13 @@ class ParticipantDropService:
             return None
         records = self.client.query_records(
             "Account",
-            ["Id", "Name", "Certification_ID__c", "Cert_Notes__c"],
+            [
+                "Id",
+                "Name",
+                "Certification_ID__c",
+                "Cert_Notes__c",
+                "Cert_Scheduling_2_0_Cert_Month__c",
+            ],
             where="Certification_ID__c != NULL",
         )
         candidates = [
@@ -298,6 +345,9 @@ def _account_candidates(
         name = record.get("Name")
         certification_id = record.get("Certification_ID__c")
         certification_notes = record.get("Cert_Notes__c")
+        certificate_expiration = _parse_certificate_expiration(
+            record.get("Cert_Scheduling_2_0_Cert_Month__c")
+        )
         if (
             not isinstance(account_id, str)
             or not isinstance(name, str)
@@ -310,6 +360,7 @@ def _account_candidates(
                 name,
                 certification_id if isinstance(certification_id, str) else None,
                 certification_notes if isinstance(certification_notes, str) else None,
+                certificate_expiration,
             )
         )
         known_ids.add(account_id)
@@ -318,6 +369,30 @@ def _account_candidates(
 
 def _normalize_search(value: str | None) -> str:
     return _NORMALIZED_SEARCH.sub("", (value or "").casefold())
+
+
+def _parse_certificate_expiration(value: object) -> date | None:
+    """Return the date portion of a Salesforce certificate-expiration value."""
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+
+
+def _next_or_same_business_day(value: date) -> date:
+    """Move a weekend date forward to Monday, leaving weekdays unchanged."""
+    while value.weekday() >= 5:
+        value += timedelta(days=1)
+    return value
+
+
+def _next_business_day(value: date) -> date:
+    """Return the first Monday-through-Friday date strictly after ``value``."""
+    return _next_or_same_business_day(value + timedelta(days=1))
 
 
 def _soql_literal(value: str) -> str:
@@ -332,6 +407,17 @@ def _format_withdrawal_note(
     formatted_date = f"{withdrawal_date.month}/{withdrawal_date.day}/{withdrawal_date.year % 100:02d}"
     entry = f"{formatted_date} Withdrawal: {reason.value}"
     return f"{entry} {reference.strip()}" if reference.strip() else entry
+
+
+def _format_withdrawal_due_notice(
+    due_date: date, account_name: str, reference: str
+) -> str:
+    """Create the terminal reminder for the next withdrawal step."""
+    reference_text = f" ({reference.strip()})" if reference.strip() else ""
+    return (
+        f"Due {due_date:%m/%d/%y}: complete withdrawal for "
+        f"{account_name}{reference_text}"
+    )
 
 
 def _manual_follow_up_reminders() -> tuple[str, ...]:

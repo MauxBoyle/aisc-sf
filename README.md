@@ -114,11 +114,21 @@ the invoice number against `Cert_Invoice__c.Name` and uses that record's
 intake result for later withdrawal processing; this command does not create or
 update a `Certification_Withdrawal__c` record.
 
+For later withdrawal completion-task creation, the due-date policy is based on
+the intake scenario. Withdrawal Request and Unpaid Invoice use the next
+business day after the latest available certificate expiration date. CRG drop
+and Other participant drop instead use the next weekday after the current date.
+If a Withdrawal Request or Unpaid Invoice has no available certificate
+expiration, it also uses that next-weekday fallback. Business days exclude
+weekends only; holidays are not considered.
+
 After both Salesforce updates succeed, the terminal displays manual follow-up
 reminders for Data, the Department Head, Invoicing, and Audit Logistics. It
 also asks Audit Logistics to remove the Account's Audit Package. The command
 does not send or verify those notifications, and it does not remove or verify
-removal of the Audit Package.
+removal of the Audit Package. Before those reminders, it displays the next
+step's due date, for example: `Due 12/31/26: complete withdrawal for Industrial
+Fabricators (IN-28037)`.
 
 Create a read-only application-stage count:
 

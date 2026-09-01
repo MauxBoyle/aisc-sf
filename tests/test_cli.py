@@ -119,8 +119,11 @@ def test_participant_drop_cli_displays_manual_follow_up_reminders(monkeypatch):
         == 0
     )
 
-    assert output[-8:] == [
-        "Withdrawal intake recorded for Invoice Steel.",
+    assert output[-9] == "Withdrawal intake recorded for Invoice Steel."
+    assert output[-8].startswith("Due ") and output[-8].endswith(
+        "complete withdrawal for Invoice Steel (INV-42)"
+    )
+    assert output[-7:] == [
         "Manual follow-up required:",
         "  - Notify Data: Maureen Boyle.",
         "  - Notify Department Head: Lisa Patel.",

@@ -12,6 +12,7 @@ from aisc_salesforce.participant_drop import (
     ParticipantDropScenario,
     ParticipantDropService,
     WithdrawalReason,
+    calculate_withdrawal_completion_due_date,
 )
 
 
@@ -71,6 +72,64 @@ class Interaction:
 
     def show(self, message):
         self.messages.append(message)
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expirations", "current_date", "expected_due_date"),
+    [
+        (
+            ParticipantDropScenario.WITHDRAWAL_REQUEST,
+            (date(2026, 9, 3), date(2026, 9, 4)),
+            date(2026, 9, 1),
+            date(2026, 9, 7),
+        ),
+        (
+            ParticipantDropScenario.UNPAID_INVOICE,
+            (date(2026, 9, 4),),
+            date(2026, 9, 1),
+            date(2026, 9, 7),
+        ),
+        (
+            ParticipantDropScenario.WITHDRAWAL_REQUEST,
+            (date(2026, 9, 5),),
+            date(2026, 9, 1),
+            date(2026, 9, 7),
+        ),
+        (
+            ParticipantDropScenario.UNPAID_INVOICE,
+            (date(2026, 9, 6),),
+            date(2026, 9, 1),
+            date(2026, 9, 7),
+        ),
+        (
+            ParticipantDropScenario.CRG_DROP,
+            (date(2026, 9, 30),),
+            date(2026, 9, 4),
+            date(2026, 9, 7),
+        ),
+        (
+            ParticipantDropScenario.OTHER,
+            (date(2026, 9, 30),),
+            date(2026, 9, 5),
+            date(2026, 9, 7),
+        ),
+        (
+            ParticipantDropScenario.WITHDRAWAL_REQUEST,
+            (),
+            date(2026, 9, 4),
+            date(2026, 9, 7),
+        ),
+    ],
+)
+def test_calculate_withdrawal_completion_due_date(
+    scenario, expirations, current_date, expected_due_date
+):
+    assert (
+        calculate_withdrawal_completion_due_date(
+            scenario, expirations, current_date
+        )
+        == expected_due_date
+    )
 
 
 def test_withdrawal_reason_collections_match_the_workflow_contract():
@@ -165,6 +224,7 @@ def test_unpaid_invoice_records_dated_note_and_posts_exact_message():
                     "Name": "Invoice Steel",
                     "Certification_ID__c": "C-1",
                     "Cert_Notes__c": "Prior note",
+                    "Cert_Scheduling_2_0_Cert_Month__c": "2026-09-30T00:00:00.000+0000",
                 }
             ],
         ]
@@ -176,7 +236,7 @@ def test_unpaid_invoice_records_dated_note_and_posts_exact_message():
     )
 
     assert result.account == AccountCandidate(
-        "001invoice", "Invoice Steel", "C-1", "Prior note"
+        "001invoice", "Invoice Steel", "C-1", "Prior note", date(2026, 9, 30)
     )
     assert result.withdrawal_reason is WithdrawalReason.NON_PAYMENT
     assert client.queries[0] == (
@@ -196,6 +256,7 @@ def test_unpaid_invoice_records_dated_note_and_posts_exact_message():
     ]
     assert interaction.messages == [
         "Withdrawal intake recorded for Invoice Steel.",
+        "Due 10/01/26: complete withdrawal for Invoice Steel (INV-42)",
         "Manual follow-up required:",
         "  - Notify Data: Maureen Boyle.",
         "  - Notify Department Head: Lisa Patel.",
@@ -204,6 +265,35 @@ def test_unpaid_invoice_records_dated_note_and_posts_exact_message():
         "  - Ask Audit Logistics (Kim Swiss) to remove the Account's Audit Package.",
         "These notifications and Audit Package removal are not performed or verified by the script.",
     ]
+
+
+def test_due_notice_uses_the_next_business_day_when_expiration_is_unavailable():
+    client = Client(
+        [
+            [
+                {
+                    "Id": "001a",
+                    "Name": "Industrial Fabricators",
+                    "Certification_ID__c": "C-1",
+                }
+            ]
+        ]
+    )
+    interaction = Interaction(
+        ParticipantDropScenario.OTHER,
+        "IN-28037",
+        certification_ids=["C-1"],
+        withdrawal_reasons=[WithdrawalReason.ECONOMY],
+    )
+
+    ParticipantDropService(client, date_provider=lambda: date(2026, 9, 4)).run(
+        interaction
+    )
+
+    assert (
+        "Due 09/07/26: complete withdrawal for Industrial Fabricators (IN-28037)"
+        in interaction.messages
+    )
 
 
 @pytest.mark.parametrize(
