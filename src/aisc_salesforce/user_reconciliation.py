@@ -11,6 +11,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 from .account_roles import ACCOUNT_ROLE_DEFINITIONS, AccountRole
@@ -82,6 +83,7 @@ DESIRED_FIELD_ORDER = (
     "LanguageLocaleKey",
     "EmailEncodingKey",
 )
+APPLY_FIELD_ORDER = ("ProfileId", "FirstName", "LastName", "Email", "Username")
 _CONTACT_TO_USER = {
     "FirstName": "FirstName",
     "LastName": "LastName",
@@ -147,6 +149,9 @@ class UserReconciliationPlan:
     blockers: tuple[ReconciliationBlocker, ...]
     alias_collisions: tuple[dict[str, Any], ...] = ()
     community_nickname_collisions: tuple[dict[str, Any], ...] = ()
+    # This deliberately excludes Alias, CommunityNickname, and localization.
+    # It is the small optimistic-lock snapshot used by a reviewed apply plan.
+    expected_current_user: tuple[tuple[str, str], ...] | None = None
 
     @property
     def is_blocked(self) -> bool:
@@ -172,6 +177,11 @@ class UserReconciliationPlan:
             ),
             "field_changes": [item.as_dict() for item in self.field_changes],
             "blockers": [item.as_dict() for item in self.blockers],
+            "expected_current_user": (
+                dict(self.expected_current_user)
+                if self.expected_current_user is not None
+                else None
+            ),
         }
 
     def to_json(self) -> str:
@@ -310,7 +320,7 @@ def build_user_reconciliation_plan(
             changes = tuple(
                 UserFieldChange(field, _text(active[0].get(field)), desired[field])
                 for field in desired_field_order
-                if _text(active[0].get(field)) != desired[field]
+                if not _field_values_equal(field, active[0].get(field), desired[field])
             )
             operation = "update" if changes else "none"
     return UserReconciliationPlan(
@@ -327,6 +337,76 @@ def build_user_reconciliation_plan(
         tuple(blockers),
         alias_collisions,
         nickname_collisions,
+        (
+            tuple((field, _text(active[0].get(field))) for field in APPLY_FIELD_ORDER)
+            if len(active) == 1
+            else None
+        ),
+    )
+
+
+class ReconciliationPlanError(ValueError):
+    """A saved reconciliation plan is not safe to use."""
+
+
+@dataclass(frozen=True)
+class UserReconciliationApplyResult:
+    """The machine-readable outcome of an allowed User update."""
+
+    contact_id: str
+    user_id: str
+    fields: tuple[dict[str, str], ...]
+    events: tuple[dict[str, Any], ...]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "contact_id": self.contact_id,
+            "user_id": self.user_id,
+            "fields": [dict(item) for item in self.fields],
+            "events": [dict(item) for item in self.events],
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.as_dict(), indent=2, sort_keys=True)
+
+
+def load_user_reconciliation_plan(path: Path) -> UserReconciliationPlan:
+    """Load a reviewed JSON plan, rejecting incomplete or hand-shaped input."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ReconciliationPlanError(f"Could not read reconciliation plan: {error}") from error
+    if not isinstance(raw, dict):
+        raise ReconciliationPlanError("Reconciliation plan must be a JSON object.")
+    required = {"contact_id", "desired_user", "active_users", "blockers", "expected_current_user"}
+    if not required.issubset(raw):
+        raise ReconciliationPlanError("Reconciliation plan is missing required review data.")
+    if not isinstance(raw["contact_id"], str) or not raw["contact_id"].strip():
+        raise ReconciliationPlanError("Reconciliation plan has no Contact ID.")
+    desired = raw["desired_user"]
+    expected = raw["expected_current_user"]
+    active = raw["active_users"]
+    if not isinstance(desired, dict) or not isinstance(expected, dict) or not isinstance(active, list):
+        raise ReconciliationPlanError("Reconciliation plan has invalid User review data.")
+    if (
+        len(active) != 1
+        or not isinstance(active[0], dict)
+        or active[0].get("IsActive") is not True
+        or not _text(active[0].get("Id"))
+    ):
+        raise ReconciliationPlanError("Reconciliation plan must target exactly one active User.")
+    for field in APPLY_FIELD_ORDER:
+        if not isinstance(desired.get(field), str) or not isinstance(expected.get(field), str):
+            raise ReconciliationPlanError(f"Reconciliation plan is missing {field} review values.")
+    if _text(desired.get("ContactId")) != raw["contact_id"].strip():
+        raise ReconciliationPlanError("Reconciliation plan Contact IDs do not match.")
+    # Reconstructing every descriptive field is unnecessary for apply safety;
+    # the fresh plan is the authority for all Salesforce-derived context.
+    return UserReconciliationPlan(
+        raw["contact_id"].strip(), tuple(desired.items()), raw.get("required_profile"), (),
+        (dict(active[0]),), (), (), raw.get("proposed_operation"), None, (),
+        tuple(ReconciliationBlocker(str(item.get("code", "")), str(item.get("message", ""))) for item in raw["blockers"] if isinstance(item, dict)),
+        expected_current_user=tuple((field, expected[field]) for field in APPLY_FIELD_ORDER),
     )
 
 
@@ -420,6 +500,50 @@ class UserReconciliationService:
             clock=self.clock,
             configuration_error=configuration_error,
         )
+
+    def apply(
+        self,
+        reviewed_plan: UserReconciliationPlan,
+        contact_id: str,
+        environment: dict[str, str],
+    ) -> UserReconciliationApplyResult:
+        """Re-read Salesforce, then apply only a still-current reviewed update."""
+        if reviewed_plan.contact_id != contact_id.strip():
+            raise ReconciliationPlanError("Contact ID does not match the reviewed plan.")
+        fresh = self.plan(contact_id, environment)
+        _validate_apply_plan(reviewed_plan, fresh)
+        user_id = _text(fresh.active_users[0].get("Id"))
+        desired = dict(fresh.desired_user)
+        current = dict(fresh.expected_current_user or ())
+        values = {
+            field: desired[field]
+            for field in APPLY_FIELD_ORDER
+            if not _field_values_equal(field, current.get(field), desired[field])
+        }
+        # A single PATCH keeps the five related identity fields together.  No
+        # User fields outside this explicit allow-list can reach Salesforce.
+        if values:
+            self.client.update_record("User", user_id, values)
+        fields = tuple(
+            {
+                "field": field,
+                "status": "applied" if field in values else "skipped",
+                "current": current.get(field, ""),
+                "desired": desired[field],
+            }
+            for field in APPLY_FIELD_ORDER
+        )
+        identity_fields = [field for field in ("Email", "Username") if field in values]
+        events: tuple[dict[str, Any], ...] = ()
+        if identity_fields:
+            events = (
+                {
+                    "type": "login_identity_changed",
+                    "user_id": user_id,
+                    "fields": identity_fields,
+                },
+            )
+        return UserReconciliationApplyResult(fresh.contact_id, user_id, fields, events)
 
     def _read_family_accounts(
         self, accounts: Iterable[Mapping[str, Any]]
@@ -609,6 +733,38 @@ def _user_snapshot(user: Mapping[str, Any]) -> dict[str, Any]:
 
 def _text(value: Any) -> str:
     return "" if value is None else str(value).strip()
+
+
+def _field_values_equal(field: str, current: Any, desired: Any) -> bool:
+    """Compare login email values without treating cosmetic casing as a change."""
+    if field in {"Email", "Username"}:
+        return _text(current).casefold() == _text(desired).casefold()
+    return _text(current) == _text(desired)
+
+
+def _validate_apply_plan(
+    reviewed: UserReconciliationPlan, fresh: UserReconciliationPlan
+) -> None:
+    """Reject stale, blocked, create, and no-op plans before any PATCH."""
+    if reviewed.blockers:
+        raise ReconciliationPlanError("Reviewed reconciliation plan is blocked; no User was updated.")
+    if reviewed.proposed_operation != "update":
+        raise ReconciliationPlanError("Reviewed reconciliation plan is not an active-User update.")
+    if fresh.blockers:
+        raise ReconciliationPlanError("Fresh reconciliation plan is blocked; no User was updated.")
+    if fresh.proposed_operation != "update" or len(fresh.active_users) != 1:
+        raise ReconciliationPlanError("Fresh reconciliation plan is not an active-User update.")
+    reviewed_expected = dict(reviewed.expected_current_user or ())
+    fresh_expected = dict(fresh.expected_current_user or ())
+    reviewed_user_id = _text(reviewed.active_users[0].get("Id")) if len(reviewed.active_users) == 1 else ""
+    fresh_user_id = _text(fresh.active_users[0].get("Id"))
+    if (
+        reviewed.contact_id != fresh.contact_id
+        or reviewed_user_id != fresh_user_id
+        or reviewed_expected != fresh_expected
+        or dict(reviewed.desired_user) != dict(fresh.desired_user)
+    ):
+        raise ReconciliationPlanError("Reviewed reconciliation plan is stale or no longer safe to apply.")
 
 
 def _where(field: str, value: str) -> str:

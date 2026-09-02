@@ -117,8 +117,25 @@ uv run aisc_salesforce reconcile-user CONTACT_ID --json
 This is a read-only command: it authenticates and performs focused Salesforce
 queries, but never creates, updates, or deletes a record. The regular output
 is a short review summary. `--json` prints a stable, automation-friendly plan
-with desired values, role assignments, linked Users, proposed changes, and
-blockers.
+with desired values, role assignments, linked Users, proposed changes,
+blockers, and the active User's expected values for safe review.
+
+To apply a reviewed update, save that JSON and use both `--plan` and `--apply`:
+
+```bash
+uv run aisc_salesforce reconcile-user CONTACT_ID --json > reviewed-plan.json
+uv run aisc_salesforce reconcile-user CONTACT_ID --plan reviewed-plan.json --apply
+```
+
+Apply fetches Salesforce again and refuses stale, blocked, create, no-op, or
+wrong-target plans. It only updates changed `ProfileId`, `FirstName`,
+`LastName`, `Email`, and `Username` values for one active User. Every allowed
+field is reported as `applied` or `skipped` in `--json` output. Alias,
+Community Nickname, localization, and inactive Users are never changed. When
+Email or Username changes, the console report includes a
+`login_identity_changed` event. The application does not suppress or duplicate
+Salesforce's own User identity emails; see [Salesforce's editing User
+guidance](https://help.salesforce.com/s/articleView?id=sf.users_edit_considerations.htm&language=en_US&release=236.19.0&type=5).
 
 The Contact is the source of the desired `ContactId`, name, email, and mailing
 address values. Its trimmed, lowercased Email is also the desired `Username`.
