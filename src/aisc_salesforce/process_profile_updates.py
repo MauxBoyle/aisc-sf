@@ -34,8 +34,10 @@ from .contact_resolution import (
 )
 from .filesystem import sync_directory
 from .participant_user_provisioning import (
+    AccountEligibilityPolicy,
     ParticipantUserProvisioningError,
     ParticipantUserProvisioningService,
+    ProvisioningConfigurationError,
     ProvisioningOutcome,
 )
 from .profile_updates import AutomationCounts, escape_soql_string
@@ -3353,9 +3355,27 @@ class InteractiveProfileUpdateProcessor:
                 "External User provisioning configuration was not provided."
             )
         try:
-            outcomes = self.participant_user_provisioning.provision(
-                contact_ids, self.provisioning_environment
+            account_eligibility_policy = AccountEligibilityPolicy.from_environment(
+                self.provisioning_environment
             )
+            outcomes = self.participant_user_provisioning.provision(
+                contact_ids,
+                self.provisioning_environment,
+                account_eligibility_policy=account_eligibility_policy,
+            )
+        except ProvisioningConfigurationError as error:
+            error = ParticipantUserProvisioningError(
+                ProvisioningOutcome(
+                    "",
+                    "failed",
+                    str(error),
+                    "provisioning_configuration_invalid",
+                )
+            )
+            self._append_provisioning_audit(batch, error.outcome, ActionStatus.FAILED)
+            raise ProcessingError(
+                f"External User provisioning failed: {error.outcome.message}"
+            ) from error
         except ParticipantUserProvisioningError as error:
             self._append_provisioning_audit(batch, error.outcome, ActionStatus.FAILED)
             subject = (
@@ -3373,6 +3393,8 @@ class InteractiveProfileUpdateProcessor:
                 if outcome.action == "created"
                 else ActionStatus.NOOP
             )
+            if outcome.action == "created":
+                self._display_event(Notice(styled(outcome.message)))
             self._append_provisioning_audit(batch, outcome, status)
 
     def _append_provisioning_audit(

@@ -5,6 +5,7 @@ from datetime import date
 import pytest
 
 from aisc_salesforce.participant_user_provisioning import (
+    AccountEligibilityPolicy,
     ParticipantUserProvisioningError,
     ParticipantUserProvisioningService,
 )
@@ -57,8 +58,10 @@ class Client:
         self.rows = rows or {}
         self.license_error = license_error
         self.created = []
+        self.queries = []
 
     def query_records(self, object_name, fields, *, where=None, order_by=None):
+        self.queries.append((object_name, fields, where))
         if object_name == "UserLicense" and self.license_error:
             raise SalesforceError("not permitted")
         if object_name == "User" and where and not where.startswith("Id ="):
@@ -99,9 +102,14 @@ def service(client):
 
 def test_creates_valid_external_user_payload():
     client = Client(rows=valid_rows())
-    outcomes = service(client).provision({"contact-1"}, ENVIRONMENT)
+    outcomes = service(client).provision(
+        {"contact-1"},
+        ENVIRONMENT,
+        account_eligibility_policy=AccountEligibilityPolicy("Portal_Eligible__c", "Yes"),
+    )
 
     assert outcomes[0].action == "created"
+    assert outcomes[0].message == "User ada@example.com created"
     assert client.created == [
         ("User", {**dict(planned_create().proposed_create or ()), "IsActive": True})
     ]
@@ -132,7 +140,11 @@ def test_preflight_blockers_are_actionable(object_name, replacement, code):
     rows = valid_rows()
     rows[object_name] = replacement
     with pytest.raises(ParticipantUserProvisioningError, match=".") as error:
-        service(Client(rows=rows)).provision({"contact-1"}, ENVIRONMENT)
+        service(Client(rows=rows)).provision(
+            {"contact-1"},
+            ENVIRONMENT,
+            account_eligibility_policy=AccountEligibilityPolicy("Portal_Eligible__c", "Yes"),
+        )
     assert error.value.outcome.code == code
 
 
@@ -140,7 +152,11 @@ def test_exhausted_license_blocks_creation():
     rows = valid_rows()
     rows["UserLicense"][0].update(TotalLicenses=2, UsedLicenses=2)
     with pytest.raises(ParticipantUserProvisioningError) as error:
-        service(Client(rows=rows)).provision({"contact-1"}, ENVIRONMENT)
+        service(Client(rows=rows)).provision(
+            {"contact-1"},
+            ENVIRONMENT,
+            account_eligibility_policy=AccountEligibilityPolicy("Portal_Eligible__c", "Yes"),
+        )
     assert error.value.outcome.code == "license_capacity_exhausted"
 
 
@@ -155,14 +171,20 @@ def test_duplicate_username_blocks_creation():
 
     with pytest.raises(ParticipantUserProvisioningError) as error:
         service(DuplicateClient(rows=valid_rows())).provision(
-            {"contact-1"}, ENVIRONMENT
+            {"contact-1"},
+            ENVIRONMENT,
+            account_eligibility_policy=AccountEligibilityPolicy("Portal_Eligible__c", "Yes"),
         )
     assert error.value.outcome.code == "username_collision"
 
 
 def test_unqueryable_license_capacity_is_a_warning_not_a_blocker():
     client = Client(rows=valid_rows(), license_error=True)
-    outcome = service(client).provision({"contact-1"}, ENVIRONMENT)[0]
+    outcome = service(client).provision(
+        {"contact-1"},
+        ENVIRONMENT,
+        account_eligibility_policy=AccountEligibilityPolicy("Portal_Eligible__c", "Yes"),
+    )[0]
     assert outcome.action == "created"
     assert "could not be queried" in outcome.warning
 
@@ -192,6 +214,46 @@ def test_race_recheck_reuses_active_linked_user():
             )
 
     client = RaceClient()
-    outcome = service(client).provision({"contact-1"}, ENVIRONMENT)[0]
+    outcome = service(client).provision(
+        {"contact-1"},
+        ENVIRONMENT,
+        account_eligibility_policy=AccountEligibilityPolicy("Portal_Eligible__c", "Yes"),
+    )[0]
     assert outcome.action == "reused"
     assert client.created == []
+
+
+def test_provisioning_without_a_policy_does_not_read_or_enforce_eligibility():
+    rows = valid_rows()
+    rows["Account"][0]["Portal_Eligible__c"] = "No"
+    client = Client(rows=rows)
+
+    environment = {
+        key: value
+        for key, value in ENVIRONMENT.items()
+        if "ACCOUNT_ELIGIBILITY" not in key
+    }
+    outcome = service(client).provision({"contact-1"}, environment)[0]
+
+    assert outcome.action == "created"
+    account_query = next(
+        fields for object_name, fields, _ in client.queries if object_name == "Account"
+    )
+    assert "Portal_Eligible__c" not in account_query
+
+
+def test_a_caller_supplied_policy_applies_only_to_that_call():
+    rows = valid_rows()
+    rows["Account"][0]["Portal_Eligible__c"] = "No"
+    client = Client(rows=rows)
+    provisioning = service(client)
+    policy = AccountEligibilityPolicy("Portal_Eligible__c", "Yes")
+
+    with pytest.raises(ParticipantUserProvisioningError) as error:
+        provisioning.provision(
+            {"contact-1"}, ENVIRONMENT, account_eligibility_policy=policy
+        )
+    assert error.value.outcome.code == "account_not_eligible"
+
+    outcome = provisioning.provision({"contact-1"}, ENVIRONMENT)[0]
+    assert outcome.action == "created"

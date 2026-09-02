@@ -26,8 +26,6 @@ class ExternalUserProvisioningConfig:
     """The organization-specific constraints for an external User license."""
 
     license_name: str
-    account_eligibility_field: str
-    account_eligibility_value: str
     role_id: str | None = None
 
     @classmethod
@@ -38,6 +36,29 @@ class ExternalUserProvisioningConfig:
             "EXTERNAL_USER_LICENSE_NAME": environment.get(
                 "EXTERNAL_USER_LICENSE_NAME", ""
             ).strip(),
+        }
+        missing = [name for name, value in values.items() if not value]
+        if missing:
+            raise ProvisioningConfigurationError(
+                "Missing external User provisioning configuration: "
+                + ", ".join(missing)
+            )
+        role_id = environment.get("EXTERNAL_USER_ROLE_ID", "").strip() or None
+        return cls(values["EXTERNAL_USER_LICENSE_NAME"], role_id)
+
+
+@dataclass(frozen=True)
+class AccountEligibilityPolicy:
+    """A caller-owned Account field/value rule for external User creation."""
+
+    field: str
+    value: str
+
+    @classmethod
+    def from_environment(
+        cls, environment: dict[str, str]
+    ) -> AccountEligibilityPolicy:
+        values = {
             "EXTERNAL_USER_ACCOUNT_ELIGIBILITY_FIELD": environment.get(
                 "EXTERNAL_USER_ACCOUNT_ELIGIBILITY_FIELD", ""
             ).strip(),
@@ -51,12 +72,9 @@ class ExternalUserProvisioningConfig:
                 "Missing external User provisioning configuration: "
                 + ", ".join(missing)
             )
-        role_id = environment.get("EXTERNAL_USER_ROLE_ID", "").strip() or None
         return cls(
-            values["EXTERNAL_USER_LICENSE_NAME"],
             values["EXTERNAL_USER_ACCOUNT_ELIGIBILITY_FIELD"],
             values["EXTERNAL_USER_ACCOUNT_ELIGIBILITY_VALUE"],
-            role_id,
         )
 
 
@@ -91,12 +109,17 @@ class ParticipantUserProvisioningService:
         self._planner = UserReconciliationService(client, clock=clock)
 
     def provision(
-        self, contact_ids: set[str], environment: dict[str, str]
+        self,
+        contact_ids: set[str],
+        environment: dict[str, str],
+        *,
+        account_eligibility_policy: AccountEligibilityPolicy | None = None,
     ) -> tuple[ProvisioningOutcome, ...]:
         """Create each eligible missing User, or raise with an actionable blocker.
 
-        A linked active User is a successful no-op.  An ineligible Contact is
-        skipped; it is not an error because it does not require an external User.
+        A linked active User is a successful no-op. A supplied Account policy is
+        applied only to this call; without one, no Account eligibility field is
+        read or enforced.
         """
         try:
             config = ExternalUserProvisioningConfig.from_environment(environment)
@@ -147,7 +170,9 @@ class ParticipantUserProvisioningService:
                     )
                 )
             payload = dict(plan.proposed_create)
-            warning = self._validate_external_requirements(contact_id, payload, config)
+            warning = self._validate_external_requirements(
+                contact_id, payload, config, account_eligibility_policy
+            )
 
             # A concurrent workflow may have created the User while preflight ran.
             active = self.client.query_records(
@@ -182,7 +207,11 @@ class ParticipantUserProvisioningService:
                 ) from error
             outcomes.append(
                 ProvisioningOutcome(
-                    contact_id, "created", user_id=user_id, warning=warning
+                    contact_id,
+                    "created",
+                    f"User {payload['Email']} created",
+                    user_id=user_id,
+                    warning=warning,
                 )
             )
         return tuple(outcomes)
@@ -192,6 +221,7 @@ class ParticipantUserProvisioningService:
         contact_id: str,
         payload: dict[str, Any],
         config: ExternalUserProvisioningConfig,
+        account_eligibility_policy: AccountEligibilityPolicy | None,
     ) -> str:
         contact_rows = self.client.query_records(
             "Contact",
@@ -210,7 +240,15 @@ class ParticipantUserProvisioningService:
             )
         account_rows = self.client.query_records(
             "Account",
-            ["Id", "OwnerId", config.account_eligibility_field],
+            [
+                "Id",
+                "OwnerId",
+                *(
+                    [account_eligibility_policy.field]
+                    if account_eligibility_policy is not None
+                    else []
+                ),
+            ],
             where=f"Id = '{escape_soql_string(account_id)}'",
         )
         account = next(
@@ -220,14 +258,14 @@ class ParticipantUserProvisioningService:
             self._fail(
                 contact_id, "account_not_found", "Contact Account could not be read."
             )
-        if (
-            str(account.get(config.account_eligibility_field) or "").strip()
-            != config.account_eligibility_value
+        if account_eligibility_policy is not None and (
+            str(account.get(account_eligibility_policy.field) or "").strip()
+            != account_eligibility_policy.value
         ):
             self._fail(
                 contact_id,
                 "account_not_eligible",
-                f"Account {config.account_eligibility_field} must be {config.account_eligibility_value!r}.",
+                f"Account {account_eligibility_policy.field} must be {account_eligibility_policy.value!r}.",
             )
         owner_id = str(account.get("OwnerId") or "").strip()
         owners = (
