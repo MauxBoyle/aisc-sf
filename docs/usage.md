@@ -1242,6 +1242,9 @@ Profile Updates open for retry. Existing active linked Users are never
 duplicated. User deactivation and username changes are not part of this
 workflow.
 
+Missing or blank required `EXTERNAL_USER_*` settings follow the same audited,
+retryable path. Correct the deployment configuration and rerun the review.
+
 `Q` or `Quit` is different from an error or keyboard interruption. It writes a
 `stopped early` audit event, keeps the current Case Pending, leaves that Case's
 Profile Updates open, skips response generation for the unfinished row, and

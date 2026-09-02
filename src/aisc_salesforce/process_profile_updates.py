@@ -3358,8 +3358,13 @@ class InteractiveProfileUpdateProcessor:
             )
         except ParticipantUserProvisioningError as error:
             self._append_provisioning_audit(batch, error.outcome, ActionStatus.FAILED)
+            subject = (
+                f" for Contact {error.outcome.contact_id}"
+                if error.outcome.contact_id
+                else ""
+            )
             raise ProcessingError(
-                f"External User provisioning failed for Contact {error.outcome.contact_id}: "
+                f"External User provisioning failed{subject}: "
                 f"{error.outcome.message}"
             ) from error
         for outcome in outcomes:
@@ -3373,6 +3378,9 @@ class InteractiveProfileUpdateProcessor:
     def _append_provisioning_audit(
         self, batch: CaseBatch, outcome: ProvisioningOutcome, status: ActionStatus
     ) -> None:
+        is_configuration_failure = (
+            outcome.code == "provisioning_configuration_invalid"
+        )
         proposal = ChangeProposal(
             source_submission_ids=batch.source_submission_ids,
             case_id=batch.case_id,
@@ -3380,8 +3388,14 @@ class InteractiveProfileUpdateProcessor:
             account_id=batch.account_id,
             account_name=batch.rows[0].get("account_name", ""),
             submitter_email="",
-            target_object="User",
-            target_record_id=outcome.user_id or outcome.contact_id,
+            target_object=(
+                "External User Provisioning Configuration"
+                if is_configuration_failure
+                else "User"
+            ),
+            target_record_id=(
+                "" if is_configuration_failure else outcome.user_id or outcome.contact_id
+            ),
             field_name="Provisioning",
             label="External User provisioning",
             original_value="",
@@ -3392,7 +3406,11 @@ class InteractiveProfileUpdateProcessor:
                 proposal,
                 None,
                 status,
-                action=f"external User {outcome.action}",
+                action=(
+                    f"external User provisioning configuration {outcome.action}"
+                    if is_configuration_failure
+                    else f"external User {outcome.action}"
+                ),
                 error=outcome.message
                 if status is ActionStatus.FAILED
                 else outcome.warning,

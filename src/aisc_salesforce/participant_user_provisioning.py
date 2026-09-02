@@ -98,7 +98,17 @@ class ParticipantUserProvisioningService:
         A linked active User is a successful no-op.  An ineligible Contact is
         skipped; it is not an error because it does not require an external User.
         """
-        config = ExternalUserProvisioningConfig.from_environment(environment)
+        try:
+            config = ExternalUserProvisioningConfig.from_environment(environment)
+        except ProvisioningConfigurationError as error:
+            raise ParticipantUserProvisioningError(
+                ProvisioningOutcome(
+                    "",
+                    "failed",
+                    str(error),
+                    "provisioning_configuration_invalid",
+                )
+            ) from error
         outcomes: list[ProvisioningOutcome] = []
         for contact_id in sorted(
             value.strip() for value in contact_ids if value.strip()

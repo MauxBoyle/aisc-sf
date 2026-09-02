@@ -36,6 +36,10 @@ Set these values in `.env`:
   Account eligibility rule approved for this Salesforce org.
 - `EXTERNAL_USER_ROLE_ID` (optional): the external User role required by that
   license, when applicable.
+
+If a required `EXTERNAL_USER_*` value is missing or blank, the review records
+the configuration error in its audit and keeps the Case and source Profile
+Updates open. Correct the deployment setting, then rerun the review to retry.
 - `SF_LOGIN_URL` (optional): an org URL or complete OAuth token URL. It
   defaults to Salesforce's production login service.
 

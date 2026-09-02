@@ -11,6 +11,9 @@ from aisc_salesforce.contact_resolution import (
     ContactResolutionClassification,
     ContactSource,
 )
+from aisc_salesforce.participant_user_provisioning import (
+    ParticipantUserProvisioningService,
+)
 from aisc_salesforce.process_profile_updates import (
     ActionResult,
     ActionStatus,
@@ -4287,6 +4290,64 @@ def test_unsent_response_closes_sources_but_keeps_case_pending(tmp_path):
         "submission-1",
         {"Status__c": "Closed"},
     ) in client.updated
+    assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
+
+
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("EXTERNAL_USER_LICENSE_NAME", None),
+        ("EXTERNAL_USER_ACCOUNT_ELIGIBILITY_FIELD", None),
+        ("EXTERNAL_USER_ACCOUNT_ELIGIBILITY_VALUE", None),
+        ("EXTERNAL_USER_LICENSE_NAME", ""),
+        ("EXTERNAL_USER_ACCOUNT_ELIGIBILITY_FIELD", "   "),
+        ("EXTERNAL_USER_ACCOUNT_ELIGIBILITY_VALUE", ""),
+    ],
+)
+def test_missing_external_user_configuration_is_audited_and_retryable(
+    tmp_path, setting, value
+):
+    client = FakeClient()
+    environment = {
+        "EXTERNAL_USER_LICENSE_NAME": "Customer Community Plus",
+        "EXTERNAL_USER_ACCOUNT_ELIGIBILITY_FIELD": "Portal_Eligible__c",
+        "EXTERNAL_USER_ACCOUNT_ELIGIBILITY_VALUE": "Yes",
+    }
+    if value is None:
+        del environment[setting]
+    else:
+        environment[setting] = value
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["apply automatically", "yes"]),
+        output_fn=lambda message: None,
+        now=NOW,
+        participant_user_provisioning=ParticipantUserProvisioningService(client),
+        provisioning_environment=environment,
+    )
+
+    with pytest.raises(ProcessingError, match="Missing external User provisioning"):
+        processor.review(
+            [staged_row(revised_company_name="Acme Steel LLC")],
+            tmp_path,
+        )
+
+    audit = [
+        json.loads(line)
+        for line in (tmp_path / "review_audit.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    failure = next(
+        entry
+        for entry in audit
+        if entry["error_code"] == "provisioning_configuration_invalid"
+    )
+    assert failure["result"] == "failed"
+    assert failure["target_object"] == "External User Provisioning Configuration"
+    assert failure["target_record_id"] == ""
+    assert setting in failure["error"]
+    assert not any(item[0] == "Company_Profile_Change__c" for item in client.updated)
     assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
 
 
