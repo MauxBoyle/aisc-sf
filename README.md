@@ -73,7 +73,28 @@ uv run aisc_salesforce reconcile-user CONTACT_ID
 uv run aisc_salesforce reconcile-user CONTACT_ID --json
 ```
 
-`reconcile-user` never creates, updates, or deletes Salesforce records. It
+The commands above are read-only. Save and review the JSON plan before using
+the separate, explicit apply path:
+
+```bash
+uv run aisc_salesforce reconcile-user CONTACT_ID --json > reviewed-plan.json
+uv run aisc_salesforce reconcile-user CONTACT_ID --plan reviewed-plan.json --apply
+uv run aisc_salesforce reconcile-user CONTACT_ID --plan reviewed-plan.json --apply --json
+```
+
+Before writing, the apply command fetches the records again and rejects a
+stale plan, a different Contact/User, blockers, creates, and no-op plans. It
+updates only differing `ProfileId`, `FirstName`, `LastName`, `Email`, and
+`Username` fields on exactly one active linked User; email/username comparisons
+ignore surrounding whitespace and casing. Alias, Community Nickname,
+localization, inactive Users, and every other field remain out of scope. JSON
+apply output reports each allowed field as `applied` or `skipped`, plus a
+console-only `login_identity_changed` event when Email or Username changes.
+Salesforce may send its own identity-change notifications; this application
+neither suppresses nor duplicates them, consistent with [Salesforce's editing
+User guidance](https://help.salesforce.com/s/articleView?id=sf.users_edit_considerations.htm&language=en_US&release=236.19.0&type=5).
+
+The read-only planner
 uses the Contact's trimmed first name, last name, and normalized email as the
 desired User identity values, and uses that email as the desired username. It
 does not copy or modify User mailing fields. It also generates an Alias from

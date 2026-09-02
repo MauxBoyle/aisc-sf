@@ -47,7 +47,9 @@ from .stage_profile_updates import (
     write_staged_profile_updates,
 )
 from .user_reconciliation import (
+    ReconciliationPlanError,
     UserReconciliationService,
+    load_user_reconciliation_plan,
     render_user_reconciliation_plan,
 )
 from .user_sync_config import UserSyncConfigError, UserSyncConfigValidator
@@ -170,6 +172,12 @@ def main(
     reconcile_user_parser.add_argument(
         "--json", action="store_true", help="Print the stable JSON plan contract."
     )
+    reconcile_user_parser.add_argument(
+        "--plan", type=Path, help="Reviewed JSON plan file to verify before applying."
+    )
+    reconcile_user_parser.add_argument(
+        "--apply", action="store_true", help="Apply a still-current reviewed update plan."
+    )
     subparsers.add_parser(
         "participant-drop",
         help="Interactively record that a participant withdrawal is in progress.",
@@ -283,11 +291,21 @@ def main(
             print(f"User sync configuration check failed: {error}", file=sys.stderr)
             return 1
     if args.command == "reconcile-user":
+        if args.plan is not None and not args.apply:
+            print("User reconciliation apply requires --apply; no Salesforce records were changed.", file=sys.stderr)
+            return 1
+        if args.apply and args.plan is None:
+            print("User reconciliation apply requires --plan PATH; no Salesforce records were changed.", file=sys.stderr)
+            return 1
         try:
+            if args.apply:
+                return _run_apply_reconcile_user(
+                    args.contact_id, args.plan, as_json=args.json, output_fn=output_fn
+                )
             return _run_reconcile_user(
                 args.contact_id, as_json=args.json, output_fn=output_fn
             )
-        except (SalesforceError, UserSyncConfigError) as error:
+        except (SalesforceError, UserSyncConfigError, ReconciliationPlanError, OSError) as error:
             print(f"User reconciliation failed: {error}", file=sys.stderr)
             return 1
     if args.command == "participant-drop":
@@ -366,6 +384,36 @@ def _run_reconcile_user(
     return (
         1 if any(item.code == "profile_configuration" for item in plan.blockers) else 0
     )
+
+
+def _run_apply_reconcile_user(
+    contact_id: str,
+    plan_path: Path,
+    *,
+    as_json: bool,
+    output_fn: Callable[[str], None] = print,
+) -> int:
+    """Apply one reviewed plan only after a fresh Salesforce safety check."""
+    reviewed = load_user_reconciliation_plan(plan_path)
+    _load_dotenv(Path(".env"))
+    environment = dict(os.environ)
+    credentials = get_credentials(environment)
+    auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
+    result = UserReconciliationService(SalesforceClient(auth)).apply(
+        reviewed, contact_id, environment
+    )
+    if as_json:
+        output_fn(result.to_json())
+    else:
+        output_fn(f"Updated User {result.user_id} for Contact {result.contact_id}.")
+        for item in result.fields:
+            output_fn(f"  - {item['field']}: {item['status']}")
+        for event in result.events:
+            output_fn(
+                "login_identity_changed: "
+                f"User {event['user_id']} changed {', '.join(event['fields'])}."
+            )
+    return 0
 
 
 def _run_participant_drop(

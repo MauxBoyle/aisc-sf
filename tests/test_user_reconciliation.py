@@ -6,8 +6,10 @@ from datetime import date
 import pytest
 
 from aisc_salesforce.user_reconciliation import (
+    ReconciliationPlanError,
     UserReconciliationService,
     build_user_reconciliation_plan,
+    load_user_reconciliation_plan,
     render_user_reconciliation_plan,
 )
 from aisc_salesforce.user_sync_config import PROFILE_CONFIGURATION, ParticipantProfile
@@ -196,3 +198,66 @@ def test_service_uses_only_filtered_queries():
     assert plan.proposed_operation == "create"
     assert all(where for _, _, where in client.calls)
     assert client.calls[0][2] == "Id = 'contact-1'"
+
+
+def test_apply_updates_only_allowed_changed_fields_and_reports_login_event():
+    current_user = {
+        "Id": "user-1", "IsActive": True, "ProfileId": "old-profile",
+        "FirstName": "Ada", "LastName": "Byron", "Email": "ada@old.example",
+        "Username": "ada@old.example", "Alias": "leave-me-alone",
+    }
+    reviewed = build_user_reconciliation_plan(
+        CONTACT, [current_user], [account()], [account()], PROFILES, CONFIG, []
+    )
+
+    class Client:
+        def update_record(self, object_name, record_id, values):
+            self.updated = (object_name, record_id, values)
+
+    client = Client()
+    service = UserReconciliationService(client)
+    service.plan = lambda contact_id, environment: reviewed  # type: ignore[method-assign]
+
+    result = service.apply(reviewed, "contact-1", {})
+
+    assert client.updated == (
+        "User", "user-1",
+        {
+            "ProfileId": ParticipantProfile.PARTICIPANT.value,
+            "LastName": "Lovelace",
+            "Email": "ada@example.com",
+            "Username": "ada@example.com",
+        },
+    )
+    assert {item["field"]: item["status"] for item in result.fields} == {
+        "ProfileId": "applied", "FirstName": "skipped", "LastName": "applied",
+        "Email": "applied", "Username": "applied",
+    }
+    assert result.events[0]["type"] == "login_identity_changed"
+
+
+def test_apply_rejects_stale_plan_before_writing():
+    user = {"Id": "user-1", "IsActive": True, "Email": "old@example.com"}
+    reviewed = build_user_reconciliation_plan(
+        CONTACT, [user], [account()], [account()], PROFILES, CONFIG, []
+    )
+    stale = build_user_reconciliation_plan(
+        CONTACT, [{**user, "Email": "newer@example.com"}], [account()], [account()], PROFILES, CONFIG, []
+    )
+
+    class Client:
+        def update_record(self, *args):
+            raise AssertionError("stale plan attempted a write")
+
+    service = UserReconciliationService(Client())
+    service.plan = lambda contact_id, environment: stale  # type: ignore[method-assign]
+    with pytest.raises(ReconciliationPlanError, match="stale"):
+        service.apply(reviewed, "contact-1", {})
+
+
+def test_load_plan_requires_expected_active_user_values(tmp_path):
+    path = tmp_path / "plan.json"
+    path.write_text('{"contact_id": "contact-1"}', encoding="utf-8")
+
+    with pytest.raises(ReconciliationPlanError, match="missing required"):
+        load_user_reconciliation_plan(path)
