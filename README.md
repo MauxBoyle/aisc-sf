@@ -31,6 +31,15 @@ Set these values in `.env`:
   `PARTICIPANT_AP_PROFILE_ID`, `PARTICIPANT_QC_PROFILE_ID`, and
   `PARTICIPANT_RAS_PROFILE_ID`: the fixed Profile IDs used by participant user
   provisioning.
+- `EXTERNAL_USER_LICENSE_NAME`, `EXTERNAL_USER_ACCOUNT_ELIGIBILITY_FIELD`, and
+  `EXTERNAL_USER_ACCOUNT_ELIGIBILITY_VALUE`: the exact external license and
+  Account eligibility rule approved for this Salesforce org.
+- `EXTERNAL_USER_ROLE_ID` (optional): the external User role required by that
+  license, when applicable.
+
+If a required `EXTERNAL_USER_*` value is missing or blank, the review records
+the configuration error in its audit and keeps the Case and source Profile
+Updates open. Correct the deployment setting, then rerun the review to retry.
 - `SF_LOGIN_URL` (optional): an org URL or complete OAuth token URL. It
   defaults to Salesforce's production login service.
 
@@ -43,6 +52,15 @@ For a specific Salesforce org or sandbox, for example:
 ```bash
 SF_LOGIN_URL=https://aisc.my.salesforce.com/services/oauth2/token
 ```
+
+Before using `process-profile-updates`, verify the license name, Account field
+API name/value, and any role requirement with your Salesforce administrator.
+After every response email is confirmed sent, the workflow checks the Contact,
+participant Profile/license, Account eligibility, Account owner, username, and
+license capacity before creating a missing active external User. If any check
+or creation fails, it records an actionable audit event, leaves the Case
+Pending and source Profile Updates open, and can be safely retried. A User that
+appears during the final recheck is reused rather than duplicated.
 
 ## Commands
 

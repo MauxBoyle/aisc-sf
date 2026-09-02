@@ -33,6 +33,11 @@ from .contact_resolution import (
     resolve_contact,
 )
 from .filesystem import sync_directory
+from .participant_user_provisioning import (
+    ParticipantUserProvisioningError,
+    ParticipantUserProvisioningService,
+    ProvisioningOutcome,
+)
 from .profile_updates import AutomationCounts, escape_soql_string
 from .queried_fields import (
     ACCOUNT_HISTORY_FIELDS,
@@ -1253,6 +1258,8 @@ class InteractiveProfileUpdateProcessor:
         input_fn: Callable[[str], str] | None = None,
         output_fn: Callable[[str], None] | None = None,
         now: datetime | None = None,
+        participant_user_provisioning: ParticipantUserProvisioningService | None = None,
+        provisioning_environment: dict[str, str] | None = None,
     ):
         self.client = client
         if ui is None:
@@ -1273,6 +1280,8 @@ class InteractiveProfileUpdateProcessor:
         self._active_change_id: str | None = None
         self._review_rows: list[dict[str, str]] | None = None
         self._resuming_session = False
+        self.participant_user_provisioning = participant_user_provisioning
+        self.provisioning_environment = provisioning_environment
 
     def prepare_review_queue(
         self, rows: list[dict[str, str]], artifact_dir: Path
@@ -1841,6 +1850,7 @@ class InteractiveProfileUpdateProcessor:
             results,
             account_results,
             role_responses,
+            {item.contact_id for item in contact_items if item.contact_id},
         )
 
     def _collect_contact_work(
@@ -3283,6 +3293,7 @@ class InteractiveProfileUpdateProcessor:
         results: list[ActionResult],
         account_results: list[ActionResult],
         role_responses: list[_RoleResponse],
+        contact_ids: set[str],
     ) -> bool:
         emails = format_response_emails(account_results, role_responses)
         all_sent = True
@@ -3309,6 +3320,8 @@ class InteractiveProfileUpdateProcessor:
             not response.submitter_email.strip() for response in role_responses
         )
         all_sent = all_sent and not successful_without_email and not missing_role_email
+        if all_sent and self.participant_user_provisioning is not None:
+            self._provision_missing_participant_users(batch, contact_ids)
         for source_id in batch.source_submission_ids:
             self._update_status_with_audit(
                 batch,
@@ -3326,6 +3339,84 @@ class InteractiveProfileUpdateProcessor:
             case_status,
         )
         return not all_sent
+
+    def _provision_missing_participant_users(
+        self, batch: CaseBatch, contact_ids: set[str]
+    ) -> None:
+        """Create required external Users before finalizing this batch.
+
+        Raising here is intentional: the outer review handler records the Case
+        as pending, while the source Profile Updates remain New for a retry.
+        """
+        if self.provisioning_environment is None:
+            raise ProcessingError(
+                "External User provisioning configuration was not provided."
+            )
+        try:
+            outcomes = self.participant_user_provisioning.provision(
+                contact_ids, self.provisioning_environment
+            )
+        except ParticipantUserProvisioningError as error:
+            self._append_provisioning_audit(batch, error.outcome, ActionStatus.FAILED)
+            subject = (
+                f" for Contact {error.outcome.contact_id}"
+                if error.outcome.contact_id
+                else ""
+            )
+            raise ProcessingError(
+                f"External User provisioning failed{subject}: "
+                f"{error.outcome.message}"
+            ) from error
+        for outcome in outcomes:
+            status = (
+                ActionStatus.APPLIED
+                if outcome.action == "created"
+                else ActionStatus.NOOP
+            )
+            self._append_provisioning_audit(batch, outcome, status)
+
+    def _append_provisioning_audit(
+        self, batch: CaseBatch, outcome: ProvisioningOutcome, status: ActionStatus
+    ) -> None:
+        is_configuration_failure = (
+            outcome.code == "provisioning_configuration_invalid"
+        )
+        proposal = ChangeProposal(
+            source_submission_ids=batch.source_submission_ids,
+            case_id=batch.case_id,
+            case_number=batch.case_number,
+            account_id=batch.account_id,
+            account_name=batch.rows[0].get("account_name", ""),
+            submitter_email="",
+            target_object=(
+                "External User Provisioning Configuration"
+                if is_configuration_failure
+                else "User"
+            ),
+            target_record_id=(
+                "" if is_configuration_failure else outcome.user_id or outcome.contact_id
+            ),
+            field_name="Provisioning",
+            label="External User provisioning",
+            original_value="",
+            proposed_value=outcome.action,
+        )
+        self._append_audit(
+            ActionResult(
+                proposal,
+                None,
+                status,
+                action=(
+                    f"external User provisioning configuration {outcome.action}"
+                    if is_configuration_failure
+                    else f"external User {outcome.action}"
+                ),
+                error=outcome.message
+                if status is ActionStatus.FAILED
+                else outcome.warning,
+                error_code=outcome.code,
+            )
+        )
 
     def _checkpoint_row(self, row: dict[str, str]) -> None:
         account_name = (

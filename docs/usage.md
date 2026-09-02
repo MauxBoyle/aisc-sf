@@ -1218,6 +1218,33 @@ artifacts and refresh only the captured records. Values applied before the
 interruption are fetched again and recorded as no-ops, so they are not applied
 or emailed twice.
 
+### External User provisioning
+
+When every response email is confirmed sent, and before finalizing the Case and
+source Profile Updates, the workflow provisions missing active external Users
+for eligible Contacts. Deployment must set `EXTERNAL_USER_LICENSE_NAME`,
+`EXTERNAL_USER_ACCOUNT_ELIGIBILITY_FIELD`, and
+`EXTERNAL_USER_ACCOUNT_ELIGIBILITY_VALUE`; set `EXTERNAL_USER_ROLE_ID` only if
+the selected license requires a role. Confirm these organization-specific
+values with the Salesforce administrator.
+
+The preflight checks Contact/Account relationship, calculated participant
+Profile compatibility with the configured license, the Account eligibility
+field, an active internal Account owner with a role, required User values,
+username uniqueness, and license capacity when `UserLicense` can be read. A
+capacity-read permission failure is recorded as a warning and Salesforce
+enforces capacity during creation. The workflow rechecks active linked Users
+immediately before creation, so a concurrently created User is reused.
+
+Any provisioning blocker, access issue, or Salesforce create failure writes an
+actionable `review_audit.jsonl` event and leaves the Case Pending and the source
+Profile Updates open for retry. Existing active linked Users are never
+duplicated. User deactivation and username changes are not part of this
+workflow.
+
+Missing or blank required `EXTERNAL_USER_*` settings follow the same audited,
+retryable path. Correct the deployment configuration and rerun the review.
+
 `Q` or `Quit` is different from an error or keyboard interruption. It writes a
 `stopped early` audit event, keeps the current Case Pending, leaves that Case's
 Profile Updates open, skips response generation for the unfinished row, and
