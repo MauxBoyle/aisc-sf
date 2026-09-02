@@ -1222,11 +1222,13 @@ or emailed twice.
 
 When every response email is confirmed sent, and before finalizing the Case and
 source Profile Updates, the workflow provisions missing active external Users
-for eligible Contacts. Deployment must set `EXTERNAL_USER_LICENSE_NAME`,
-`EXTERNAL_USER_ACCOUNT_ELIGIBILITY_FIELD`, and
+for eligible Contacts. This profile-update workflow must set
+`EXTERNAL_USER_LICENSE_NAME`, `EXTERNAL_USER_ACCOUNT_ELIGIBILITY_FIELD`, and
 `EXTERNAL_USER_ACCOUNT_ELIGIBILITY_VALUE`; set `EXTERNAL_USER_ROLE_ID` only if
-the selected license requires a role. Confirm these organization-specific
-values with the Salesforce administrator.
+the selected license requires a role. The shared provisioning service does not
+apply these Account field/value settings unless its caller explicitly supplies
+that policy, so future workflows can use their own business rule. Confirm these
+organization-specific values with the Salesforce administrator.
 
 The preflight checks Contact/Account relationship, calculated participant
 Profile compatibility with the configured license, the Account eligibility
@@ -1242,8 +1244,9 @@ Profile Updates open for retry. Existing active linked Users are never
 duplicated. User deactivation and username changes are not part of this
 workflow.
 
-Missing or blank required `EXTERNAL_USER_*` settings follow the same audited,
-retryable path. Correct the deployment configuration and rerun the review.
+Missing or blank settings required by this profile-update workflow follow the
+same audited, retryable path. Correct the deployment configuration and rerun
+the review.
 
 `Q` or `Quit` is different from an error or keyboard interruption. It writes a
 `stopped early` audit event, keeps the current Case Pending, leaves that Case's
