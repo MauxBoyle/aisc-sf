@@ -19,6 +19,7 @@ from .cli_review_ui import CLIReviewUI, ColorMode, print_profile_error
 from .dictionary import DictionaryError, load_export_plan
 from .imis_contacts import ContactConsolidationError, consolidate_contactbasic
 from .participant_drop import ParticipantDropAction, ParticipantDropService
+from .participant_user_provisioning import ParticipantUserProvisioningService
 from .picklist_audit import (
     PicklistAuditError,
     PicklistAuditResult,
@@ -557,6 +558,8 @@ def _run_process_profile_updates(
                 output_fn=output_fn,
                 color_mode=color_mode,
             ),
+            participant_user_provisioning=ParticipantUserProvisioningService(client),
+            provisioning_environment=environment,
         )
     else:  # Compatibility for injected processors using the former constructor.
         processor = InteractiveProfileUpdateProcessor(
@@ -650,6 +653,7 @@ def _run_review_profile_update_session(
     client, queue_id, responder_id = _profile_update_client_with_configuration(
         output_fn
     )
+    environment = dict(os.environ)
     processor = InteractiveProfileUpdateProcessor(
         client,
         CLIReviewUI(
@@ -657,6 +661,8 @@ def _run_review_profile_update_session(
             output_fn=output_fn,
             color_mode=color_mode,
         ),
+        participant_user_provisioning=ParticipantUserProvisioningService(client),
+        provisioning_environment=environment,
     )
     workflow = ProfileUpdateProcessingWorkflow(
         ProfileUpdateService(client, queue_id, responder_id),
