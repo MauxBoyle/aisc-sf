@@ -17,6 +17,12 @@ from .application_snapshot import (
 from .cli_participant_drop import CLIParticipantDropInteraction
 from .cli_review_ui import CLIReviewUI, ColorMode, print_profile_error
 from .dictionary import DictionaryError, load_export_plan
+from .external_email import (
+    ExternalEmailRecipientError,
+    ExternalEmailService,
+    SalesforceExternalEmailSender,
+    append_attempt_log,
+)
 from .imis_contacts import ContactConsolidationError, consolidate_contactbasic
 from .participant_drop import ParticipantDropAction, ParticipantDropService
 from .participant_user_provisioning import ParticipantUserProvisioningService
@@ -183,6 +189,22 @@ def main(
         "participant-drop",
         help="Interactively record that a participant withdrawal is in progress.",
     )
+    external_email_parser = subparsers.add_parser(
+        "send-external-email-test",
+        help="Preview or explicitly send the fixed external-email test.",
+    )
+    external_email_parser.add_argument("recipient", help="One approved test address.")
+    external_email_parser.add_argument(
+        "--send",
+        action="store_true",
+        help="Send the fixed test email instead of previewing it.",
+    )
+    external_email_parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=Path("external_email_attempts.jsonl"),
+        help="Credential-free JSON Lines attempt log (default: external_email_attempts.jsonl).",
+    )
     args = parser.parse_args(argv)
     if args.command == "snapshot":
         try:
@@ -315,6 +337,52 @@ def main(
         except (SalesforceError, ValueError) as error:
             print(f"Participant drop failed: {error}", file=sys.stderr)
             return 1
+    if args.command == "send-external-email-test":
+        try:
+            return _run_external_email_test(
+                args.recipient,
+                send=args.send,
+                log_file=args.log_file,
+                output_fn=output_fn,
+            )
+        except (ExternalEmailRecipientError, SalesforceError, OSError) as error:
+            print(f"External-email test failed: {error}", file=sys.stderr)
+            return 1
+    return 1
+
+
+def _run_external_email_test(
+    recipient: str,
+    *,
+    send: bool,
+    log_file: Path,
+    output_fn: Callable[[str], None],
+) -> int:
+    """Run the deliberately separate fixed-message email proof of concept."""
+    # Validate before configuration is read or a client can be constructed.
+    ExternalEmailService().attempt(recipient, send=False)
+    if not send:
+        attempt = ExternalEmailService().attempt(recipient, send=False)
+        append_attempt_log(log_file, attempt)
+        output_fn(f"Previewed the fixed test email for {recipient}; no email was sent.")
+        output_fn(f"Subject: {attempt.message.subject}")
+        output_fn(f"Body: {attempt.message.body}")
+        return 0
+
+    _load_dotenv(Path(".env"))
+    environment = dict(os.environ)
+    credentials = get_credentials(environment)
+    auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
+    sender = SalesforceExternalEmailSender(SalesforceClient(auth))
+    attempt = ExternalEmailService(sender).attempt(recipient, send=True)
+    append_attempt_log(log_file, attempt)
+    if attempt.outcome == "sent":
+        output_fn(f"Sent the fixed test email to {recipient}.")
+        return 0
+    print(
+        "External-email test failed safely; see the credential-free attempt log.",
+        file=sys.stderr,
+    )
     return 1
 
 
