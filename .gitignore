@@ -139,6 +139,7 @@ profile_updates.csv
 review_queue.json
 review_audit.jsonl
 response_emails.txt
+external_email_attempts.jsonl
 .envrc
 .venv
 env/

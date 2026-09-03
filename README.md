@@ -68,6 +68,59 @@ appears during the final recheck is reused rather than duplicated.
 
 ## Commands
 
+### External-email proof of concept
+
+`send-external-email-test` is a standalone proof of concept. It is not part of
+User reconciliation or participant messaging. It accepts exactly these test
+addresses: `boyle@aisc.org`, `mauxboyle@gmail.com`, and
+`maureen7780@yahoo.com`.
+
+Preview is the default and does not load Salesforce credentials or contact
+Salesforce:
+
+```bash
+uv run aisc_salesforce send-external-email-test boyle@aisc.org
+```
+
+The preview (and any send) is only for this fixed wording:
+
+> Subject: `[TEST] AISC external-email proof of concept`
+>
+> This is a test of the AISC external-email proof of concept. No action is
+> required. Please do not reply to this email.
+
+To send it, use the separate explicit flag only after reviewing the preview:
+
+```bash
+uv run aisc_salesforce send-external-email-test boyle@aisc.org --send
+```
+
+Each valid preview or send appends one credential-free JSON Lines record to
+`external_email_attempts.jsonl`. It contains only the UTC timestamp,
+recipient, mode, transport, fixed template ID, and safe outcome (`previewed`,
+`sent`, or `failed`); failures also contain a safe error category. It never
+records credentials or raw Salesforce responses. Choose a different local log
+location with `--log-file PATH`. The default log is ignored by Git, but it
+still identifies recipients and should be handled appropriately.
+
+Before using `--send`, deploy the included Apex endpoint and its test to a
+sandbox with the Salesforce CLI, then run its test:
+
+```bash
+sf project deploy start --source-dir force-app/main/default/classes --target-org YOUR_SANDBOX
+sf apex run test --tests AiscExternalEmailTestEndpointTest --target-org YOUR_SANDBOX --wait 10
+```
+
+The Python client sends only the recipient to that endpoint. The endpoint
+separately enforces the same exact allowlist and fixed content before using
+`Messaging.SingleEmailMessage`. Manually preview first, then send once to one
+approved address and confirm the fixed message and credential-free log record.
+
+Coordinate this POC with Experience Cloud's **Send welcome email** setting.
+Do not enable this POC alongside native welcome notifications for participant
+messaging, or recipients can receive duplicate messages. This remains separate
+from User reconciliation. See Salesforce's [external-user creation guidance](https://help.salesforce.com/s/articleView?id=sf.networks_create_external_users.htm&language=en_US&type=5).
+
 Create a read-only snapshot:
 
 ```bash
