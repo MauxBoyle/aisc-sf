@@ -246,7 +246,42 @@ def test_cli_renders_a_concise_summary_from_the_complete_queue_event():
 
     ui.display(ReviewQueueSnapshot(build_review_queue([])))
 
-    assert output == ["Review queue: 0 batch(es), 0 pending change(s); next: none"]
+    assert output == [
+        "Review queue status: 0 batch(es), 0 pending change(s); next: none"
+    ]
+
+
+def test_cli_renders_choice_context_after_queue_status_and_before_prompt():
+    output = []
+    prompts = []
+    ui = CLIReviewUI(
+        input_fn=lambda prompt: prompts.append(prompt) or "continue",
+        output_fn=output.append,
+    )
+
+    ui.display(ReviewQueueSnapshot(build_review_queue([])))
+    ui.ask(
+        ChoiceQuestion(
+            styled("Continue: "),
+            (ReviewChoice("continue", "continue"),),
+            styled("Choose continue."),
+            pre_prompt_events=(
+                Heading(styled("Recovery context"), "-" * 4),
+                ScalarComparison(
+                    "Email",
+                    ValueFragment(""),
+                    ValueFragment("new@example.com", ValueOrigin.SUBMITTED),
+                ),
+            ),
+        )
+    )
+
+    assert output == [
+        "Review queue status: 0 batch(es), 0 pending change(s); next: none",
+        "\n----\nRecovery context\n----",
+        "\nEmail\nCurrent Salesforce value: (blank)\nProposed value: new@example.com",
+    ]
+    assert prompts == ["Continue: "]
 
 
 def test_cli_renders_parent_conflict_and_no_active_child_events():

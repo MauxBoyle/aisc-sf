@@ -765,7 +765,10 @@ appearing in decision prompts.
 If a Contact create is blocked by Salesforce with `DUPLICATES_DETECTED`, the
 structured error is retained and the reviewer can create manually, update an
 existing Contact manually, use a Contact with another email, or ignore that
-entry. Manual recovery is verified by querying the normalized submitted email;
+entry. Before each recovery choice, the CLI shows the Contact name, exact
+proposed Contact fields, Case number, Account name, and Salesforce error code
+and message. Lines beginning `Review queue status:` are progress snapshots, not
+extra decision prompts. Manual recovery is verified by querying the normalized submitted email;
 the alternate-email choice queries the entered email. Multiple results always
 require an explicit candidate selection. Unrelated Salesforce errors remain
 fatal and leave the Case retryable.

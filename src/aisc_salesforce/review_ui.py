@@ -259,6 +259,7 @@ class ChoiceQuestion:
     choices: tuple[ReviewChoice, ...]
     invalid_feedback: StyledText
     default_key: str | None = None
+    pre_prompt_events: tuple[ReviewEvent, ...] = ()
 
 
 @dataclass(frozen=True)
