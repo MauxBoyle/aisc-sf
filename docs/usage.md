@@ -1149,6 +1149,11 @@ actions:
 3. Use a Contact with another email.
 4. Ignore this entry.
 
+Before every recovery choice, the CLI repeats a recovery-context block with
+the Contact name, exact proposed Contact fields, Case number, Account name,
+and Salesforce error code and message. Review-queue lines are status updates;
+they show progress and the next item, rather than another decision prompt.
+
 Manual create and update choices are verified by querying the normalized
 submitted email. The alternate-email choice queries the entered email.
 Multiple matches show candidates and require an explicit selection. The

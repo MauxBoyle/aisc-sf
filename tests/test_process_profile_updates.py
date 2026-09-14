@@ -17,6 +17,7 @@ from aisc_salesforce.participant_user_provisioning import (
 from aisc_salesforce.process_profile_updates import (
     ActionResult,
     ActionStatus,
+    CaseBatch,
     ChangeProposal,
     InteractiveProfileUpdateProcessor,
     ProcessingError,
@@ -39,10 +40,13 @@ from aisc_salesforce.review_queue import (
     write_review_queue,
 )
 from aisc_salesforce.review_ui import (
+    AcknowledgementAnswer,
     ChoiceAnswer,
     ChoiceQuestion,
+    ContextLine,
     FreeTextAnswer,
     FreeTextQuestion,
+    MappingComparison,
 )
 from aisc_salesforce.salesforce import SalesforceError
 from aisc_salesforce.stage_profile_updates import CSV_COLUMNS, StagingResult
@@ -909,7 +913,11 @@ def test_missing_submission_account_unique_certification_id_is_assigned_automati
     client = AccountResolutionClient(
         accounts_by_certification_id={
             "C-100": [
-                {"Id": "account-1", "Name": "Acme Steel", "Certification_ID__c": "C-100"}
+                {
+                    "Id": "account-1",
+                    "Name": "Acme Steel",
+                    "Certification_ID__c": "C-100",
+                }
             ]
         }
     )
@@ -944,8 +952,14 @@ def test_multiple_submission_account_matches_offer_numbered_certification_id_cho
 
     processor.resolve_missing_submission_accounts()
 
-    question = next(question for question in ui.questions if isinstance(question, ChoiceQuestion))
-    assert [choice.key for choice in question.choices] == ["1", "2", "different_certification_id"]
+    question = next(
+        question for question in ui.questions if isinstance(question, ChoiceQuestion)
+    )
+    assert [choice.key for choice in question.choices] == [
+        "1",
+        "2",
+        "different_certification_id",
+    ]
     assert [choice.label for choice in question.choices[:2]] == [
         "Acme Steel (Certification ID C-100)",
         "Beta Steel (Certification ID C-100)",
@@ -995,7 +1009,11 @@ def test_missing_submission_certification_id_requests_and_validates_certificatio
         certification_id="",
         accounts_by_certification_id={
             "C-200": [
-                {"Id": "account-2", "Name": "Beta Steel", "Certification_ID__c": "C-200"}
+                {
+                    "Id": "account-2",
+                    "Name": "Beta Steel",
+                    "Certification_ID__c": "C-200",
+                }
             ]
         },
     )
@@ -1008,9 +1026,15 @@ def test_missing_submission_certification_id_requests_and_validates_certificatio
     assert account_query[2] == "Certification_ID__c = 'C-200'"
     assert len(ui.questions) == 2
     assert all(isinstance(question, FreeTextQuestion) for question in ui.questions)
-    prompt = "".join(fragment.text for fragment in ui.questions[0].prompt if hasattr(fragment, "text"))
+    prompt = "".join(
+        fragment.text
+        for fragment in ui.questions[0].prompt
+        if hasattr(fragment, "text")
+    )
     assert "Certification ID" in prompt
-    feedback = "".join(fragment.text for fragment in ui.events[0].message if hasattr(fragment, "text"))
+    feedback = "".join(
+        fragment.text for fragment in ui.events[0].message if hasattr(fragment, "text")
+    )
     assert feedback == "Certification ID cannot be blank."
 
 
@@ -1020,7 +1044,11 @@ def test_unmatched_certification_id_reports_and_allows_retry():
         accounts_by_certification_id={
             "C-missing": [],
             "C-200": [
-                {"Id": "account-2", "Name": "Beta Steel", "Certification_ID__c": "C-200"}
+                {
+                    "Id": "account-2",
+                    "Name": "Beta Steel",
+                    "Certification_ID__c": "C-200",
+                }
             ],
         },
     )
@@ -1030,9 +1058,16 @@ def test_unmatched_certification_id_reports_and_allows_retry():
     processor.resolve_missing_submission_accounts()
 
     assert client.updated[0][2] == {"Account__c": "account-2"}
-    feedback = "".join(fragment.value if hasattr(fragment, "value") else fragment.text for fragment in ui.events[0].message)
+    feedback = "".join(
+        fragment.value if hasattr(fragment, "value") else fragment.text
+        for fragment in ui.events[0].message
+    )
     assert feedback == "No Account was found for Certification ID C-missing."
-    prompt = "".join(fragment.text for fragment in ui.questions[0].prompt if hasattr(fragment, "text"))
+    prompt = "".join(
+        fragment.text
+        for fragment in ui.questions[0].prompt
+        if hasattr(fragment, "text")
+    )
     assert "to find the Salesforce Account" in prompt
 
 
@@ -2093,8 +2128,7 @@ def test_incomplete_new_contact_can_use_manual_creation_path(tmp_path):
     verified = next(
         json.loads(line)
         for line in result.audit_path.read_text(encoding="utf-8").splitlines()
-        if '"field": "FirstName"' in line
-        and '"result": "verified manually"' in line
+        if '"field": "FirstName"' in line and '"result": "verified manually"' in line
     )
     assert verified["final_value"] == "Only"
 
@@ -2178,9 +2212,7 @@ def test_new_contract_reuses_submitter_role_contact_and_assigns_case(tmp_path):
             "Cert_Phone__c": "312-555-0101",
         }
     )
-    feeder = Feeder(
-        ["apply automatically"] * 5 + ["yes"]
-    )
+    feeder = Feeder(["apply automatically"] * 5 + ["yes"])
     processor = InteractiveProfileUpdateProcessor(
         client,
         input_fn=feeder,
@@ -3060,9 +3092,7 @@ def test_rejected_reconciled_contact_has_no_contact_write(tmp_path):
             staged_row(
                 contact_resolutions=staged_resolution(
                     email="alex@example.com",
-                    sources=[
-                        ContactSource("role", "certification", "submission-1")
-                    ],
+                    sources=[ContactSource("role", "certification", "submission-1")],
                     submitted={"title": "Director"},
                     classification=ContactResolutionClassification.USE_EXISTING,
                     selected=contact,
@@ -3112,7 +3142,9 @@ def test_contact_fields_have_independent_decisions_and_one_grouped_write(tmp_pat
         if prompt.startswith("Continue with this staged row"):
             return ""
         if prompt.startswith("Decision ["):
-            decisions = iter(("apply automatically", "will not be made", "make manually"))
+            decisions = iter(
+                ("apply automatically", "will not be made", "make manually")
+            )
             answer.decisions = getattr(answer, "decisions", decisions)
             return next(answer.decisions)
         if prompt.startswith("Make the Contact Phone change"):
@@ -3135,9 +3167,7 @@ def test_contact_fields_have_independent_decisions_and_one_grouped_write(tmp_pat
             staged_row(
                 contact_resolutions=staged_resolution(
                     email="alex@example.com",
-                    sources=[
-                        ContactSource("role", "certification", "submission-1")
-                    ],
+                    sources=[ContactSource("role", "certification", "submission-1")],
                     submitted={
                         "first_name": "Alexa",
                         "title": "Director",
@@ -3168,7 +3198,10 @@ def test_contact_fields_have_independent_decisions_and_one_grouped_write(tmp_pat
     assert by_field["Phone"]["decision"] == "make manually"
     assert by_field["Phone"]["final_value"] == "312.555.0199"
     displayed = "\n".join(output)
-    assert "\n========================================================================\nManual Contact Follow-up" in displayed
+    assert (
+        "\n========================================================================\nManual Contact Follow-up"
+        in displayed
+    )
     queue = json.loads(result.queue_path.read_text(encoding="utf-8"))
     outcomes = {
         change["field"]: change["outcome"]
@@ -3265,9 +3298,9 @@ def test_differing_manual_contact_value_defaults_to_accepting_salesforce(tmp_pat
         account=account_record(Cert_Certification_Contact__c="contact-1"),
         contacts=[contact],
     )
-    client.records[("Company_Profile_Change__c", "submission-1")][
-        "Cert_Title__c"
-    ] = "Director"
+    client.records[("Company_Profile_Change__c", "submission-1")]["Cert_Title__c"] = (
+        "Director"
+    )
 
     def answer(prompt):
         if prompt.startswith("Continue with this staged row"):
@@ -3315,9 +3348,9 @@ def test_declined_manual_contact_override_fails_and_keeps_batch_retryable(tmp_pa
         account=account_record(Cert_Certification_Contact__c="contact-1"),
         contacts=[contact],
     )
-    client.records[("Company_Profile_Change__c", "submission-1")][
-        "Cert_Title__c"
-    ] = "Director"
+    client.records[("Company_Profile_Change__c", "submission-1")]["Cert_Title__c"] = (
+        "Director"
+    )
 
     def answer(prompt):
         if prompt.startswith("Continue with this staged row"):
@@ -3339,9 +3372,7 @@ def test_declined_manual_contact_override_fails_and_keeps_batch_retryable(tmp_pa
                 staged_row(
                     contact_resolutions=staged_resolution(
                         sources=[
-                            ContactSource(
-                                "role", "certification", "submission-1"
-                            )
+                            ContactSource("role", "certification", "submission-1")
                         ],
                         submitted={"title": "Director"},
                         classification=ContactResolutionClassification.USE_EXISTING,
@@ -3365,9 +3396,7 @@ def test_declined_manual_contact_override_fails_and_keeps_batch_retryable(tmp_pa
 
 
 @pytest.mark.parametrize("interruption", [KeyboardInterrupt(), EOFError()])
-def test_manual_contact_confirmation_interruption_is_audited(
-    tmp_path, interruption
-):
+def test_manual_contact_confirmation_interruption_is_audited(tmp_path, interruption):
     contact = {
         "Id": "contact-1",
         "AccountId": "account-1",
@@ -3381,9 +3410,9 @@ def test_manual_contact_confirmation_interruption_is_audited(
         account=account_record(Cert_Certification_Contact__c="contact-1"),
         contacts=[contact],
     )
-    client.records[("Company_Profile_Change__c", "submission-1")][
-        "Cert_Title__c"
-    ] = "Director"
+    client.records[("Company_Profile_Change__c", "submission-1")]["Cert_Title__c"] = (
+        "Director"
+    )
     feeder = Feeder(["make manually", interruption])
 
     with pytest.raises(ProcessingInterrupted):
@@ -3420,9 +3449,9 @@ def test_manual_contact_salesforce_read_failure_is_audited(tmp_path):
         account=account_record(Cert_Certification_Contact__c="contact-1"),
         contacts=[contact],
     )
-    client.records[("Company_Profile_Change__c", "submission-1")][
-        "Cert_Title__c"
-    ] = "Director"
+    client.records[("Company_Profile_Change__c", "submission-1")]["Cert_Title__c"] = (
+        "Director"
+    )
     original_get = client.get_record
 
     def fail_manual_read(object_name, record_id, fields):
@@ -3559,9 +3588,7 @@ def test_manual_contact_decisions_verify_fields_individually(tmp_path):
         for line in result.audit_path.read_text(encoding="utf-8").splitlines()
     ]
     verified = [
-        entry
-        for entry in entries
-        if entry["action"] == "verify Contact field manually"
+        entry for entry in entries if entry["action"] == "verify Contact field manually"
     ]
     assert {entry["field"] for entry in verified} == {"Title", "Phone"}
     assert all(entry["result"] == "verified manually" for entry in verified)
@@ -3650,8 +3677,7 @@ def test_contact_failure_is_audited_and_same_input_retries_then_becomes_noop(
         for line in noop_result.audit_path.read_text(encoding="utf-8").splitlines()
     ]
     assert any(
-        entry["action"] == "Contact field already current"
-        for entry in noop_entries
+        entry["action"] == "Contact field already current" for entry in noop_entries
     )
 
 
@@ -3783,6 +3809,99 @@ def test_duplicate_create_can_recover_with_an_alternate_email_contact(tmp_path):
     assert recovered["selected_contact"]["Id"] == "alternate-contact"
     assert recovered["proposed_value"] == "new.person@example.com"
     assert recovered["final_value"] == "other@example.com"
+
+
+def test_duplicate_recovery_choice_shows_complete_submitted_context_and_repeats_on_retry():
+    class RecoveryUI:
+        def __init__(self):
+            self.questions = []
+            self.choices = iter(["create_manually", "ignore"])
+
+        def display(self, event):
+            pass
+
+        def ask(self, question):
+            self.questions.append(question)
+            if isinstance(question, ChoiceQuestion):
+                key = next(self.choices)
+                return ChoiceAnswer(
+                    next(choice for choice in question.choices if choice.key == key)
+                )
+            return AcknowledgementAnswer()
+
+    ui = RecoveryUI()
+    processor = InteractiveProfileUpdateProcessor(FakeClient(), ui, now=NOW)
+    row = staged_row()
+    batch = CaseBatch("account-1", "case-1", "00010001", [row], NOW)
+    proposal = ChangeProposal(
+        source_submission_ids=("submission-1",),
+        case_id="case-1",
+        case_number="00010001",
+        account_id="account-1",
+        account_name="Acme Steel",
+        submitter_email="sam@example.com",
+        target_object="Contact",
+        target_record_id="(new)",
+        field_name="Contact",
+        label="Contact: Alex McDonald <new.contact@example.com>",
+        original_value={},
+        proposed_value={
+            "AccountId": "account-1",
+            "FirstName": "Alex",
+            "LastName": "McDonald",
+            "Title": "Chief QA Officer",
+            "Email": "new.contact@example.com",
+            "Phone": "312.555.0105 x42",
+        },
+    )
+    resolution = ContactResolution(
+        ContactResolutionClassification.CREATE_NEW,
+        "new.contact@example.com",
+        "newcontact@example.com",
+    )
+    error = SalesforceError(
+        "Salesforce failed to create Contact: duplicate.",
+        error_code="DUPLICATES_DETECTED",
+        salesforce_message="A matching Contact already exists.",
+    )
+
+    result = processor._recover_duplicate_contact(
+        batch, row, proposal, resolution, error, append_audit=False
+    )
+
+    recovery_questions = [
+        question for question in ui.questions if isinstance(question, ChoiceQuestion)
+    ]
+    assert result.status is ActionStatus.REJECTED
+    assert len(recovery_questions) == 2
+    assert (
+        recovery_questions[0].pre_prompt_events
+        == recovery_questions[1].pre_prompt_events
+    )
+    events = recovery_questions[0].pre_prompt_events
+    context_lines = {
+        event.label: "".join(
+            fragment.text if hasattr(fragment, "text") else fragment.value
+            for fragment in event.value
+        )
+        for event in events
+        if isinstance(event, ContextLine)
+    }
+    fields = next(event for event in events if isinstance(event, MappingComparison))
+    assert context_lines == {
+        "Contact name": "Alex McDonald",
+        "Case number": "00010001",
+        "Account": "Acme Steel",
+        "Salesforce error code": "DUPLICATES_DETECTED",
+        "Salesforce error message": "A matching Contact already exists.",
+    }
+    assert [(field.label, field.proposed.value) for field in fields.rows] == [
+        ("First Name", "Alex"),
+        ("Last Name", "McDonald"),
+        ("Title", "Chief QA Officer"),
+        ("Email", "new.contact@example.com"),
+        ("Phone", "312.555.0105 x42"),
+    ]
 
 
 def test_duplicate_exact_email_matches_are_audited_and_keep_case_retryable(tmp_path):
@@ -4065,12 +4184,10 @@ def test_role_response_uses_contact_details_from_start_of_batch(tmp_path):
         "mary@example.com, 312.555.0100"
     ) in response
     assert (
-        "Replaces Mike Miller, Certification Manager, "
-        "mike@example.com, 555-555-5555"
+        "Replaces Mike Miller, Certification Manager, mike@example.com, 555-555-5555"
     ) in response
     assert (
-        "Replaces Mike Miller, Certification Manager, "
-        "mike@example.com, 222.222.2222"
+        "Replaces Mike Miller, Certification Manager, mike@example.com, 222.222.2222"
     ) not in response
     persisted_artifacts = "\n".join(
         path.read_text(encoding="utf-8")
@@ -4078,10 +4195,9 @@ def test_role_response_uses_contact_details_from_start_of_batch(tmp_path):
     )
     assert "role_contact_snapshot" not in persisted_artifacts
     assert all("snapshot" not in column.casefold() for column in CSV_COLUMNS)
-    salesforce_values = [
-        values
-        for _, _, values in client.updated
-    ] + [values for _, values in client.created]
+    salesforce_values = [values for _, _, values in client.updated] + [
+        values for _, values in client.created
+    ]
     assert all(
         "snapshot" not in field_name.casefold()
         for values in salesforce_values
@@ -4262,8 +4378,7 @@ def test_email_formatter_creates_one_paragraph_per_submitter():
         "Thank you for updating your information with AISC. The changes are "
         "summarized below. An updated Participant Portal login will be sent by a "
         "separate email, if needed. Unless otherwise noted, previous contacts will "
-        "remain in the Acme Steel contact list."
-        in emails["first@example.com"]
+        "remain in the Acme Steel contact list." in emails["first@example.com"]
     )
     assert "Company Name: Acme Steel" in emails["first@example.com"]
     assert "Billing City: Chicago" in emails["second@example.com"]
@@ -4334,9 +4449,9 @@ def test_missing_external_user_configuration_is_audited_and_retryable(
 
     audit = [
         json.loads(line)
-        for line in (tmp_path / "review_audit.jsonl").read_text(
-            encoding="utf-8"
-        ).splitlines()
+        for line in (tmp_path / "review_audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
     failure = next(
         entry

@@ -1506,8 +1506,7 @@ class InteractiveProfileUpdateProcessor:
             lookup_ids = _certification_id_lookup_candidates(certification_id)
             if len(lookup_ids) == 1:
                 account_where = (
-                    "Certification_ID__c = "
-                    f"'{escape_soql_string(lookup_ids[0])}'"
+                    f"Certification_ID__c = '{escape_soql_string(lookup_ids[0])}'"
                 )
             else:
                 quoted_lookup_ids = ", ".join(
@@ -1557,7 +1556,9 @@ class InteractiveProfileUpdateProcessor:
                 ":\n",
             ]
             for choice in choices:
-                marker = "P" if choice.key == "different_certification_id" else choice.key
+                marker = (
+                    "P" if choice.key == "different_certification_id" else choice.key
+                )
                 prompt_fragments.extend(
                     (f"{marker}. ", ValueFragment(choice.label), "\n")
                 )
@@ -2539,7 +2540,9 @@ class InteractiveProfileUpdateProcessor:
                     if recovery.status is ActionStatus.REJECTED:
                         item.ignored = True
                         for field_name in approved:
-                            suffix, field_label = self._contact_field_metadata(field_name)
+                            suffix, field_label = self._contact_field_metadata(
+                                field_name
+                            )
                             proposal = self._contact_field_proposal(
                                 batch, item, suffix, field_name, field_label
                             )
@@ -2557,9 +2560,7 @@ class InteractiveProfileUpdateProcessor:
                             self._append_audit(result)
                         return []
                     item.contact_id = recovery.proposal.target_record_id
-                    item.current_contact = dict(
-                        item.resolution.selected_contact or {}
-                    )
+                    item.current_contact = dict(item.resolution.selected_contact or {})
                     action = recovery.action
                     result_status = ActionStatus.VERIFIED_MANUAL
                     recovery_error = error
@@ -2710,9 +2711,7 @@ class InteractiveProfileUpdateProcessor:
                 raise ProcessingError(str(error)) from error
             if not _values_equal(fresh.get("AccountId"), batch.account_id):
                 error = "The manually created Contact belongs to a different Account."
-                self._manual_contact_failure(
-                    item, proposal, ActionStatus.FAILED, error
-                )
+                self._manual_contact_failure(item, proposal, ActionStatus.FAILED, error)
                 raise ProcessingError(error)
             item.contact_id = contact_id
             item.current_contact = fresh
@@ -2783,7 +2782,9 @@ class InteractiveProfileUpdateProcessor:
                     )
                 )
             )
-            fresh = self.client.get_record("Contact", item.contact_id, ["Id", field_name])
+            fresh = self.client.get_record(
+                "Contact", item.contact_id, ["Id", field_name]
+            )
             final_value = fresh.get(field_name)
             if not _values_equal(final_value, proposal.proposed_value):
                 self._display_event(
@@ -3243,8 +3244,7 @@ class InteractiveProfileUpdateProcessor:
             results.append(result)
             previous_contact = original_contact
             contact_changed = any(
-                result.status
-                in {ActionStatus.APPLIED, ActionStatus.VERIFIED_MANUAL}
+                result.status in {ActionStatus.APPLIED, ActionStatus.VERIFIED_MANUAL}
                 for result in (item.results or {}).values()
             )
             changed = contact_changed or result.status in {
@@ -3384,8 +3384,7 @@ class InteractiveProfileUpdateProcessor:
                 else ""
             )
             raise ProcessingError(
-                f"External User provisioning failed{subject}: "
-                f"{error.outcome.message}"
+                f"External User provisioning failed{subject}: {error.outcome.message}"
             ) from error
         for outcome in outcomes:
             status = (
@@ -3400,9 +3399,7 @@ class InteractiveProfileUpdateProcessor:
     def _append_provisioning_audit(
         self, batch: CaseBatch, outcome: ProvisioningOutcome, status: ActionStatus
     ) -> None:
-        is_configuration_failure = (
-            outcome.code == "provisioning_configuration_invalid"
-        )
+        is_configuration_failure = outcome.code == "provisioning_configuration_invalid"
         proposal = ChangeProposal(
             source_submission_ids=batch.source_submission_ids,
             case_id=batch.case_id,
@@ -3416,7 +3413,9 @@ class InteractiveProfileUpdateProcessor:
                 else "User"
             ),
             target_record_id=(
-                "" if is_configuration_failure else outcome.user_id or outcome.contact_id
+                ""
+                if is_configuration_failure
+                else outcome.user_id or outcome.contact_id
             ),
             field_name="Provisioning",
             label="External User provisioning",
@@ -3988,6 +3987,7 @@ class InteractiveProfileUpdateProcessor:
                         ReviewChoice("ignore", "ignore this entry", ("4",)),
                     ),
                     styled("Choose 1, 2, 3, or 4."),
+                    pre_prompt_events=self._duplicate_recovery_context(proposal, error),
                 )
             )
             if choice == "ignore":
@@ -4077,6 +4077,54 @@ class InteractiveProfileUpdateProcessor:
             if append_audit:
                 self._append_audit(result)
             return result
+
+    def _duplicate_recovery_context(
+        self, proposal: ChangeProposal, error: SalesforceError
+    ) -> tuple[ReviewEvent, ...]:
+        """Build the submitted values and Salesforce error shown before recovery."""
+        proposed = proposal.proposed_value
+        if not isinstance(proposed, dict):
+            raise ProcessingError(
+                "Duplicate Contact recovery requires a field payload."
+            )
+        contact_name = (
+            " ".join(
+                value
+                for value in (
+                    _display(proposed.get("FirstName")),
+                    _display(proposed.get("LastName")),
+                )
+                if value
+            )
+            or "(unnamed)"
+        )
+        rows = tuple(
+            MappingComparisonRow(
+                CONTACT_FIELD_LABELS[field_name],
+                ValueFragment(""),
+                ValueFragment(_display(proposed[field_name]), ValueOrigin.SUBMITTED),
+            )
+            for field_name in ("FirstName", "LastName", "Title", "Email", "Phone")
+            if field_name in proposed
+        )
+        return (
+            Heading(styled("Duplicate Contact recovery context"), "-" * 72),
+            ContextLine(
+                "Contact name",
+                styled(ValueFragment(contact_name, ValueOrigin.SUBMITTED)),
+            ),
+            MappingComparison("Proposed Contact fields", rows, is_new=True),
+            ContextLine("Case number", styled(ValueFragment(proposal.case_number))),
+            ContextLine("Account", styled(ValueFragment(proposal.account_name))),
+            ContextLine(
+                "Salesforce error code",
+                styled(ValueFragment(error.error_code or "(not provided)")),
+            ),
+            ContextLine(
+                "Salesforce error message",
+                styled(ValueFragment(error.salesforce_message or str(error))),
+            ),
+        )
 
     def _select_contact_by_email(self, email: str) -> dict[str, Any] | None:
         contacts = self.client.query_records(
@@ -4459,9 +4507,7 @@ class InteractiveProfileUpdateProcessor:
                 f"Unknown review decision answer {answer!r}."
             ) from error
 
-    def _prompt_yes_no(
-        self, prompt: StyledText, *, default_yes: bool = False
-    ) -> bool:
+    def _prompt_yes_no(self, prompt: StyledText, *, default_yes: bool = False) -> bool:
         answer = self._ask_choice(
             ChoiceQuestion(
                 prompt,
@@ -4934,17 +4980,19 @@ def _account_choice_label(account: dict[str, Any]) -> str:
 
 def _certification_id_lookup_candidates(certification_id: str) -> tuple[str, ...]:
     """Return exact and known equivalent Certification IDs for Account lookup."""
-    match = re.fullmatch(r"(\d{1,4})-(\d{1,2})-(\d{1,2})-(\d{1,6})([A-Za-z])", certification_id)
+    match = re.fullmatch(
+        r"(\d{1,4})-(\d{1,2})-(\d{1,2})-(\d{1,6})([A-Za-z])", certification_id
+    )
     if match is None:
         return (certification_id,)
 
     year, month, day, sequence, suffix = match.groups()
-    normalized = (
-        f"{year.zfill(4)}-{month.zfill(2)}-{day.zfill(2)}-{sequence.zfill(6)}"
-    )
+    normalized = f"{year.zfill(4)}-{month.zfill(2)}-{day.zfill(2)}-{sequence.zfill(6)}"
     candidates = [certification_id, f"{normalized}{suffix.upper()}"]
     if suffix.upper() == "O":
-        candidates.extend(f"{normalized}{replacement}" for replacement in ("F", "E", "P"))
+        candidates.extend(
+            f"{normalized}{replacement}" for replacement in ("F", "E", "P")
+        )
     return tuple(dict.fromkeys(candidates))
 
 

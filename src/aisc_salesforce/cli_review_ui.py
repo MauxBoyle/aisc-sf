@@ -262,7 +262,7 @@ class CLIReviewUI:
             next_label = next_change.label if next_change is not None else "none"
             self._emit(
                 Text(
-                    f"Review queue: {len(event.manifest.batches)} batch(es), "
+                    f"Review queue status: {len(event.manifest.batches)} batch(es), "
                     f"{pending} pending change(s); next: {next_label}"
                 )
             )
@@ -274,6 +274,8 @@ class CLIReviewUI:
     def ask(self, question: ReviewQuestion) -> ReviewAnswer:
         """Parse terminal input for each supported question type."""
         if isinstance(question, ChoiceQuestion):
+            for event in question.pre_prompt_events:
+                self.display(event)
             aliases = {
                 alias.casefold(): choice
                 for choice in question.choices
