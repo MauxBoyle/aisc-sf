@@ -47,6 +47,9 @@ from .queried_fields import (
     SUBMISSION_FIELDS,
 )
 from .review_queue import (
+    CaseBatch as QueuedCaseBatch,
+)
+from .review_queue import (
     QueueBlocker,
     QueuePhase,
     QueueStatus,
@@ -1608,11 +1611,24 @@ class InteractiveProfileUpdateProcessor:
             with _AuditWriter(audit_path, lambda: datetime.now(UTC)) as audit:
                 self._audit = audit
                 for batch in batches:
-                    queued_status = self._queued_batch_status(batch)
-                    if queued_status is QueueStatus.COMPLETED:
+                    queued_batch = self._queued_batch(batch)
+                    if (
+                        queued_batch is not None
+                        and queued_batch.status is QueueStatus.COMPLETED
+                    ):
                         completed += 1
                         continue
-                    if queued_status is QueueStatus.BLOCKED:
+                    blockers = self._queued_batch_blockers(queued_batch)
+                    if blockers and not self._contact_blockers_are_reviewable(blockers):
+                        self._show_blocked_queue_batch(queued_batch, blockers)
+                        pending += 1
+                        continue
+                    if (
+                        queued_batch is not None
+                        and queued_batch.status is QueueStatus.BLOCKED
+                        and not blockers
+                    ):
+                        self._show_blocked_queue_batch(queued_batch, blockers)
                         pending += 1
                         continue
                     try:
@@ -1673,8 +1689,8 @@ class InteractiveProfileUpdateProcessor:
             stopped_early=stopped_early,
         )
 
-    def _queued_batch_status(self, batch: CaseBatch) -> QueueStatus | None:
-        """Find the durable queue batch that represents one runtime batch."""
+    def _queued_batch(self, batch: CaseBatch) -> QueuedCaseBatch | None:
+        """Return the durable queue batch that represents one runtime batch."""
         if self._queue_store is None or not self._resuming_session:
             return None
         source_ids = set(batch.source_submission_ids)
@@ -1695,15 +1711,58 @@ class InteractiveProfileUpdateProcessor:
         if queued is None:
             return None
         if queued.status is not QueueStatus.COMPLETED:
-            return queued.status
+            return queued
         completed_ids = _completed_submission_ids_from_audit(
             self._queue_store.path.parent / "review_audit.jsonl"
         )
         return (
-            QueueStatus.COMPLETED
-            if set(batch.source_submission_ids).issubset(completed_ids)
-            else None
+            queued if set(batch.source_submission_ids).issubset(completed_ids) else None
         )
+
+    @staticmethod
+    def _queued_batch_blockers(
+        queued: QueuedCaseBatch | None,
+    ) -> tuple[QueueBlocker, ...]:
+        """Collect each distinct blocker from a persisted batch and its children."""
+        if queued is None:
+            return ()
+        blockers = [*queued.blockers]
+        for row in queued.rows:
+            blockers.extend(row.blockers)
+            for change in row.changes:
+                blockers.extend(change.blockers)
+        return tuple(
+            QueueBlocker(code, message)
+            for code, message in dict.fromkeys(
+                (blocker.code, blocker.message) for blocker in blockers
+            )
+        )
+
+    @staticmethod
+    def _contact_blockers_are_reviewable(
+        blockers: tuple[QueueBlocker, ...],
+    ) -> bool:
+        """Return whether every blocker can be resolved by Contact review."""
+        codes = {blocker.code for blocker in blockers}
+        return "ambiguous_contact" in codes and codes <= {
+            "ambiguous_contact",
+            "unresolved_role_contact",
+        }
+
+    def _show_blocked_queue_batch(
+        self,
+        queued: QueuedCaseBatch,
+        blockers: tuple[QueueBlocker, ...],
+    ) -> None:
+        """Keep hard-blocked resumed work visible without touching Salesforce."""
+        self._display_event(
+            Heading(styled(ValueFragment(queued.label)), STAGE_SEPARATOR)
+        )
+        messages = tuple(dict.fromkeys(blocker.message for blocker in blockers))
+        if not messages:
+            messages = ("This batch remains blocked and requires manual follow-up.",)
+        for message in messages:
+            self._display_event(WarningNotice(styled(message)))
 
     def _review_batch(self, batch: CaseBatch, response_writer: _ResponseWriter) -> bool:
         return self._review_resilient_batch(batch, response_writer)

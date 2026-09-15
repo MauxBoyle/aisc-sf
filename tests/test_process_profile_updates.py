@@ -536,6 +536,161 @@ def test_completed_session_review_is_a_noop(tmp_path):
     assert any("already complete" in message for message in output)
 
 
+def test_resumed_ambiguous_contact_reviews_all_qualifying_parent_children(tmp_path):
+    contact = {
+        "Id": "contact-1",
+        "AccountId": "account-1",
+        "FirstName": "Alex",
+        "LastName": "Smith",
+        "Title": "Certification Manager",
+        "Email": "info@example.com",
+        "Phone": "312.555.0100",
+    }
+    children = [
+        account_record(
+            Id=f"child-{index}",
+            Name=f"Child {index}",
+            ParentId="account-1",
+            Cert_Certification_Status__c=status,
+            Cert_Certification_Contact__c="",
+        )
+        for index, status in enumerate(("Certified", "Initials", "Certified"), start=1)
+    ]
+    client = FakeClient(
+        source=source_record(
+            Cert_First_Name__c="Alex",
+            Cert_Last_Name__c="Smith",
+            Cert_Title__c="Certification Manager",
+            Cert_Email__c="info@example.com",
+            Cert_Phone__c="312.555.0100",
+        ),
+        children=children,
+        contacts=[contact],
+    )
+    row = staged_row(
+        is_parent_account="true",
+        affected_accounts=json.dumps(
+            [
+                {
+                    "id": child["Id"],
+                    "name": child["Name"],
+                    "certification_status": child["Cert_Certification_Status__c"],
+                }
+                for child in children
+            ]
+        ),
+        certification_first_name="Alex",
+        certification_last_name="Smith",
+        certification_title="Certification Manager",
+        certification_email="info@example.com",
+        certification_phone="312.555.0100",
+        contact_resolutions=staged_resolution(
+            email="info@example.com",
+            sources=[
+                ContactSource(
+                    "role", role="certification", submission_id="submission-1"
+                )
+            ],
+            submitted={
+                "first_name": "Alex",
+                "last_name": "Smith",
+                "title": "Certification Manager",
+                "email": "info@example.com",
+                "phone": "312.555.0100",
+            },
+            classification=ContactResolutionClassification.AMBIGUOUS,
+            candidates=[contact],
+        ),
+    )
+    queue_path = tmp_path / "review_queue.json"
+    store = ReviewQueueStore(queue_path, build_review_queue([row], now=NOW))
+    for change in tuple(iter_changes(store.manifest)):
+        if change.status is QueueStatus.PENDING:
+            store.transition(change.id, QueueStatus.COMPLETED, outcome="noop")
+    assert store.manifest.batches[0].status is QueueStatus.BLOCKED
+    output = []
+    feeder = Feeder(["1", "a", "a", "a", "yes"], row_answers=[""])
+    processor = InteractiveProfileUpdateProcessor(
+        client, input_fn=feeder, output_fn=output.append, now=NOW
+    )
+    processor.load_review_queue([row], tmp_path, resume=True)
+
+    result = processor.review([row], tmp_path)
+
+    assert any("Contact choice" in prompt for prompt in feeder.prompts)
+    assert {
+        record_id
+        for object_name, record_id, values in client.updated
+        if object_name == "Account"
+        and values == {"Cert_Certification_Contact__c": "contact-1"}
+    } == {"child-1", "child-2", "child-3"}
+    assert result.pending_batches == 0
+    assert (
+        read_review_queue(result.queue_path).batches[0].status is QueueStatus.COMPLETED
+    )
+
+
+def test_resumed_hard_blocker_is_visible_and_performs_no_salesforce_work(tmp_path):
+    row = staged_row(warnings="Account account-1 could not be retrieved.")
+    write_review_queue(
+        build_review_queue([row], now=NOW), tmp_path / "review_queue.json"
+    )
+    client = FakeClient()
+    output = []
+    feeder = Feeder([])
+    processor = InteractiveProfileUpdateProcessor(
+        client, input_fn=feeder, output_fn=output.append, now=NOW
+    )
+    processor.load_review_queue([row], tmp_path, resume=True)
+
+    result = processor.review([row], tmp_path)
+
+    rendered = "\n".join(output)
+    assert "00010001: Acme Steel" in rendered
+    assert "Account account-1 is unavailable." in rendered
+    assert feeder.prompts == []
+    assert client.gets == []
+    assert client.queries == []
+    assert client.created == []
+    assert client.updated == []
+    assert result.completed_batches == 0
+    assert result.pending_batches == 1
+    assert read_review_queue(result.queue_path).batches[0].status is QueueStatus.BLOCKED
+
+
+def test_resumed_contact_ambiguity_does_not_bypass_another_blocker(tmp_path):
+    row = staged_row(
+        warnings="Account account-1 could not be retrieved.",
+        contact_resolutions=staged_resolution(
+            classification=ContactResolutionClassification.AMBIGUOUS,
+            submitted={"email": "info@example.com"},
+        ),
+    )
+    write_review_queue(
+        build_review_queue([row], now=NOW), tmp_path / "review_queue.json"
+    )
+    client = FakeClient()
+    output = []
+    feeder = Feeder([])
+    processor = InteractiveProfileUpdateProcessor(
+        client, input_fn=feeder, output_fn=output.append, now=NOW
+    )
+    processor.load_review_queue([row], tmp_path, resume=True)
+
+    result = processor.review([row], tmp_path)
+
+    rendered = "\n".join(output)
+    assert "Account account-1 is unavailable." in rendered
+    assert "Contact identity requires reviewer resolution." in rendered
+    assert rendered.count("Contact identity requires reviewer resolution.") == 1
+    assert feeder.prompts == []
+    assert client.gets == []
+    assert client.queries == []
+    assert client.created == []
+    assert client.updated == []
+    assert result.pending_batches == 1
+
+
 def test_review_skips_case_setup_completed_by_prepare(tmp_path):
     row = staged_row()
     session = publish_staging_session([row], tmp_path, now=NOW)
