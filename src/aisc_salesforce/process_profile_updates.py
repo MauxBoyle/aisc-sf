@@ -34,7 +34,6 @@ from .contact_resolution import (
 )
 from .filesystem import sync_directory
 from .participant_user_provisioning import (
-    AccountEligibilityPolicy,
     ParticipantUserProvisioningError,
     ParticipantUserProvisioningService,
     ProvisioningConfigurationError,
@@ -3355,13 +3354,9 @@ class InteractiveProfileUpdateProcessor:
                 "External User provisioning configuration was not provided."
             )
         try:
-            account_eligibility_policy = AccountEligibilityPolicy.from_environment(
-                self.provisioning_environment
-            )
             outcomes = self.participant_user_provisioning.provision(
                 contact_ids,
                 self.provisioning_environment,
-                account_eligibility_policy=account_eligibility_policy,
             )
         except ProvisioningConfigurationError as error:
             error = ParticipantUserProvisioningError(

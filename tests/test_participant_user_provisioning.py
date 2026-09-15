@@ -4,6 +4,7 @@ from datetime import date
 
 import pytest
 
+from aisc_salesforce.account_roles import ACCOUNT_ROLE_DEFINITIONS
 from aisc_salesforce.participant_user_provisioning import (
     AccountEligibilityPolicy,
     ParticipantUserProvisioningError,
@@ -14,8 +15,6 @@ from aisc_salesforce.user_reconciliation import UserReconciliationPlan
 
 ENVIRONMENT = {
     "EXTERNAL_USER_LICENSE_NAME": "Customer Community Plus",
-    "EXTERNAL_USER_ACCOUNT_ELIGIBILITY_FIELD": "Portal_Eligible__c",
-    "EXTERNAL_USER_ACCOUNT_ELIGIBILITY_VALUE": "Yes",
     "PARTICIPANT_PROFILE_ID": "00e5w000000k7KfAAI",
     "PARTICIPANT_PRINCIPAL_PROFILE_ID": "00e5w000000kDqiAAE",
     "PARTICIPANT_AP_PROFILE_ID": "00e5w000000kDqdAAE",
@@ -77,7 +76,13 @@ def valid_rows():
     return {
         "Contact": [{"Id": "contact-1", "AccountId": "account-1"}],
         "Account": [
-            {"Id": "account-1", "OwnerId": "owner-1", "Portal_Eligible__c": "Yes"}
+            {
+                "Id": "account-1",
+                "OwnerId": "owner-1",
+                "Cert_Certification_Status__c": "Certified",
+                "Cert_Certification_Contact__c": "contact-1",
+                "Portal_Eligible__c": "Yes",
+            }
         ],
         "User": [{"Id": "owner-1", "IsActive": True, "UserRoleId": "role-1"}],
         "Profile": [
@@ -102,11 +107,7 @@ def service(client):
 
 def test_creates_valid_external_user_payload():
     client = Client(rows=valid_rows())
-    outcomes = service(client).provision(
-        {"contact-1"},
-        ENVIRONMENT,
-        account_eligibility_policy=AccountEligibilityPolicy("Portal_Eligible__c", "Yes"),
-    )
+    outcomes = service(client).provision({"contact-1"}, ENVIRONMENT)
 
     assert outcomes[0].action == "created"
     assert outcomes[0].message == "User ada@example.com created"
@@ -119,11 +120,6 @@ def test_creates_valid_external_user_payload():
     ("object_name", "replacement", "code"),
     [
         ("Contact", [{"Id": "contact-1", "AccountId": ""}], "contact_account_missing"),
-        (
-            "Account",
-            [{"Id": "account-1", "OwnerId": "owner-1", "Portal_Eligible__c": "No"}],
-            "account_not_eligible",
-        ),
         (
             "User",
             [{"Id": "owner-1", "IsActive": False, "UserRoleId": ""}],
@@ -140,11 +136,7 @@ def test_preflight_blockers_are_actionable(object_name, replacement, code):
     rows = valid_rows()
     rows[object_name] = replacement
     with pytest.raises(ParticipantUserProvisioningError, match=".") as error:
-        service(Client(rows=rows)).provision(
-            {"contact-1"},
-            ENVIRONMENT,
-            account_eligibility_policy=AccountEligibilityPolicy("Portal_Eligible__c", "Yes"),
-        )
+        service(Client(rows=rows)).provision({"contact-1"}, ENVIRONMENT)
     assert error.value.outcome.code == code
 
 
@@ -152,11 +144,7 @@ def test_exhausted_license_blocks_creation():
     rows = valid_rows()
     rows["UserLicense"][0].update(TotalLicenses=2, UsedLicenses=2)
     with pytest.raises(ParticipantUserProvisioningError) as error:
-        service(Client(rows=rows)).provision(
-            {"contact-1"},
-            ENVIRONMENT,
-            account_eligibility_policy=AccountEligibilityPolicy("Portal_Eligible__c", "Yes"),
-        )
+        service(Client(rows=rows)).provision({"contact-1"}, ENVIRONMENT)
     assert error.value.outcome.code == "license_capacity_exhausted"
 
 
@@ -171,20 +159,14 @@ def test_duplicate_username_blocks_creation():
 
     with pytest.raises(ParticipantUserProvisioningError) as error:
         service(DuplicateClient(rows=valid_rows())).provision(
-            {"contact-1"},
-            ENVIRONMENT,
-            account_eligibility_policy=AccountEligibilityPolicy("Portal_Eligible__c", "Yes"),
+            {"contact-1"}, ENVIRONMENT
         )
     assert error.value.outcome.code == "username_collision"
 
 
 def test_unqueryable_license_capacity_is_a_warning_not_a_blocker():
     client = Client(rows=valid_rows(), license_error=True)
-    outcome = service(client).provision(
-        {"contact-1"},
-        ENVIRONMENT,
-        account_eligibility_policy=AccountEligibilityPolicy("Portal_Eligible__c", "Yes"),
-    )[0]
+    outcome = service(client).provision({"contact-1"}, ENVIRONMENT)[0]
     assert outcome.action == "created"
     assert "could not be queried" in outcome.warning
 
@@ -214,11 +196,7 @@ def test_race_recheck_reuses_active_linked_user():
             )
 
     client = RaceClient()
-    outcome = service(client).provision(
-        {"contact-1"},
-        ENVIRONMENT,
-        account_eligibility_policy=AccountEligibilityPolicy("Portal_Eligible__c", "Yes"),
-    )[0]
+    outcome = service(client).provision({"contact-1"}, ENVIRONMENT)[0]
     assert outcome.action == "reused"
     assert client.created == []
 
@@ -228,18 +206,61 @@ def test_provisioning_without_a_policy_does_not_read_or_enforce_eligibility():
     rows["Account"][0]["Portal_Eligible__c"] = "No"
     client = Client(rows=rows)
 
-    environment = {
-        key: value
-        for key, value in ENVIRONMENT.items()
-        if "ACCOUNT_ELIGIBILITY" not in key
-    }
-    outcome = service(client).provision({"contact-1"}, environment)[0]
+    outcome = service(client).provision({"contact-1"}, ENVIRONMENT)[0]
 
     assert outcome.action == "created"
     account_query = next(
         fields for object_name, fields, _ in client.queries if object_name == "Account"
     )
     assert "Portal_Eligible__c" not in account_query
+
+
+@pytest.mark.parametrize("role", ACCOUNT_ROLE_DEFINITIONS)
+def test_certified_account_role_qualifies_a_contact_with_blank_home_status(role):
+    rows = valid_rows()
+    rows["Account"] = [
+        {
+            "Id": "account-1",
+            "OwnerId": "owner-1",
+            "Cert_Certification_Status__c": "",
+        },
+        {
+            "Id": "role-account-1",
+            "OwnerId": "owner-2",
+            "Cert_Certification_Status__c": "Certified",
+            role.account_lookup: "contact-1",
+        },
+    ]
+
+    outcome = service(Client(rows=rows)).provision({"contact-1"}, ENVIRONMENT)[0]
+
+    assert outcome.action == "created"
+
+
+@pytest.mark.parametrize("status", ["", "Initials", "Dropped"])
+def test_non_certified_account_roles_block_provisioning_with_actionable_reason(status):
+    rows = valid_rows()
+    rows["Account"] = [
+        {
+            "Id": "account-1",
+            "OwnerId": "owner-1",
+            "Cert_Certification_Status__c": "",
+        },
+        {
+            "Id": "role-account-1",
+            "OwnerId": "owner-2",
+            "Cert_Certification_Status__c": status,
+            "Cert_Certification_Contact__c": "contact-1",
+        },
+    ]
+    client = Client(rows=rows)
+
+    with pytest.raises(ParticipantUserProvisioningError) as error:
+        service(client).provision({"contact-1"}, ENVIRONMENT)
+
+    assert error.value.outcome.code == "contact_no_certified_account_role"
+    assert "Certified Account role" in error.value.outcome.message
+    assert client.created == []
 
 
 def test_a_caller_supplied_policy_applies_only_to_that_call():

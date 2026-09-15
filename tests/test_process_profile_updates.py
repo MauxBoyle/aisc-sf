@@ -4412,11 +4412,7 @@ def test_unsent_response_closes_sources_but_keeps_case_pending(tmp_path):
     ("setting", "value"),
     [
         ("EXTERNAL_USER_LICENSE_NAME", None),
-        ("EXTERNAL_USER_ACCOUNT_ELIGIBILITY_FIELD", None),
-        ("EXTERNAL_USER_ACCOUNT_ELIGIBILITY_VALUE", None),
         ("EXTERNAL_USER_LICENSE_NAME", ""),
-        ("EXTERNAL_USER_ACCOUNT_ELIGIBILITY_FIELD", "   "),
-        ("EXTERNAL_USER_ACCOUNT_ELIGIBILITY_VALUE", ""),
     ],
 )
 def test_missing_external_user_configuration_is_audited_and_retryable(
@@ -4425,8 +4421,6 @@ def test_missing_external_user_configuration_is_audited_and_retryable(
     client = FakeClient()
     environment = {
         "EXTERNAL_USER_LICENSE_NAME": "Customer Community Plus",
-        "EXTERNAL_USER_ACCOUNT_ELIGIBILITY_FIELD": "Portal_Eligible__c",
-        "EXTERNAL_USER_ACCOUNT_ELIGIBILITY_VALUE": "Yes",
     }
     if value is None:
         del environment[setting]

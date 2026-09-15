@@ -33,10 +33,6 @@ Set these values in `.env`:
   provisioning.
 - `EXTERNAL_USER_LICENSE_NAME`: the external license approved for this
   Salesforce org.
-- `EXTERNAL_USER_ACCOUNT_ELIGIBILITY_FIELD` and
-  `EXTERNAL_USER_ACCOUNT_ELIGIBILITY_VALUE`: the Account eligibility rule used
-  only when `process-profile-updates` creates a missing User. Other provisioning
-  workflows supply their own policy when they need one.
 - `EXTERNAL_USER_ROLE_ID` (optional): the external User role required by that
   license, when applicable.
 
@@ -57,14 +53,18 @@ For a specific Salesforce org or sandbox, for example:
 SF_LOGIN_URL=https://aisc.my.salesforce.com/services/oauth2/token
 ```
 
-Before using `process-profile-updates`, verify the license name, Account field
-API name/value, and any role requirement with your Salesforce administrator.
+Before using `process-profile-updates`, verify the license name and any role
+requirement with your Salesforce administrator.
 After every response email is confirmed sent, the workflow checks the Contact,
-participant Profile/license, configured Account eligibility, Account owner,
-username, and license capacity before creating a missing active external User. If any check
-or creation fails, it records an actionable audit event, leaves the Case
-Pending and source Profile Updates open, and can be safely retried. A User that
-appears during the final recheck is reused rather than duplicated.
+participant Profile/license, and whether the Contact holds at least one
+supported Account role on an Account whose certification status is exactly
+`Certified`. The Contact must still be directly related to an Account, whose
+owner must be an active internal User with a role. The Contact's direct Account
+does not itself need to be Certified. The workflow also checks username and
+license capacity before creating a missing active external User. If any check
+or creation fails, it records an actionable audit event, leaves the Case Pending
+and source Profile Updates open, and can be safely retried. A User that appears
+during the final recheck is reused rather than duplicated.
 
 ## Commands
 

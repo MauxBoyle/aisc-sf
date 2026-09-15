@@ -1228,19 +1228,19 @@ or emailed twice.
 When every response email is confirmed sent, and before finalizing the Case and
 source Profile Updates, the workflow provisions missing active external Users
 for eligible Contacts. This profile-update workflow must set
-`EXTERNAL_USER_LICENSE_NAME`, `EXTERNAL_USER_ACCOUNT_ELIGIBILITY_FIELD`, and
-`EXTERNAL_USER_ACCOUNT_ELIGIBILITY_VALUE`; set `EXTERNAL_USER_ROLE_ID` only if
-the selected license requires a role. The shared provisioning service does not
-apply these Account field/value settings unless its caller explicitly supplies
-that policy, so future workflows can use their own business rule. Confirm these
-organization-specific values with the Salesforce administrator.
+`EXTERNAL_USER_LICENSE_NAME`; set `EXTERNAL_USER_ROLE_ID` only if the selected
+license requires a role. Confirm these organization-specific values with the
+Salesforce administrator.
 
-The preflight checks Contact/Account relationship, calculated participant
-Profile compatibility with the configured license, the Account eligibility
-field, an active internal Account owner with a role, required User values,
-username uniqueness, and license capacity when `UserLicense` can be read. A
-capacity-read permission failure is recorded as a warning and Salesforce
-enforces capacity during creation. The workflow rechecks active linked Users
+The preflight checks that the Contact has a direct Account relationship and at
+least one supported Account role on an Account whose
+`Cert_Certification_Status__c` is exactly `Certified`. The direct Account does
+not need to be Certified. It also checks calculated participant Profile
+compatibility with the configured license, an active internal direct-Account
+owner with a role, required User values, username uniqueness, and license
+capacity when `UserLicense` can be read. A capacity-read permission failure is
+recorded as a warning and Salesforce enforces capacity during creation. The
+workflow rechecks active linked Users
 immediately before creation, so a concurrently created User is reused.
 
 Any provisioning blocker, access issue, or Salesforce create failure writes an

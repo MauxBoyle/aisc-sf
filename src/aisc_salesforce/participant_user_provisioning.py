@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from .account_roles import ACCOUNT_ROLE_DEFINITIONS
 from .profile_updates import escape_soql_string
 from .salesforce import SalesforceClient, SalesforceError
 from .user_reconciliation import USER_FIELDS, UserReconciliationService
@@ -117,9 +118,10 @@ class ParticipantUserProvisioningService:
     ) -> tuple[ProvisioningOutcome, ...]:
         """Create each eligible missing User, or raise with an actionable blocker.
 
-        A linked active User is a successful no-op. A supplied Account policy is
-        applied only to this call; without one, no Account eligibility field is
-        read or enforced.
+        A linked active User is a successful no-op. The Contact must have a
+        supported role on at least one Certified Account; a supplied Account
+        policy adds an optional caller-specific rule for the Contact's direct
+        Account.
         """
         try:
             config = ExternalUserProvisioningConfig.from_environment(environment)
@@ -257,6 +259,33 @@ class ParticipantUserProvisioningService:
         if account is None:
             self._fail(
                 contact_id, "account_not_found", "Contact Account could not be read."
+            )
+        role_accounts = self.client.query_records(
+            "Account",
+            [
+                "Id",
+                "Cert_Certification_Status__c",
+                *(role.account_lookup for role in ACCOUNT_ROLE_DEFINITIONS),
+            ],
+            where=" OR ".join(
+                f"{role.account_lookup} = '{escape_soql_string(contact_id)}'"
+                for role in ACCOUNT_ROLE_DEFINITIONS
+            ),
+        )
+        if not any(
+            str(role_account.get("Cert_Certification_Status__c") or "").strip()
+            == "Certified"
+            and any(
+                str(role_account.get(role.account_lookup) or "").strip()
+                == contact_id
+                for role in ACCOUNT_ROLE_DEFINITIONS
+            )
+            for role_account in role_accounts
+        ):
+            self._fail(
+                contact_id,
+                "contact_no_certified_account_role",
+                "Contact must have a supported Certified Account role before an external User can be created.",
             )
         if account_eligibility_policy is not None and (
             str(account.get(account_eligibility_policy.field) or "").strip()
