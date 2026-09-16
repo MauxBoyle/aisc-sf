@@ -237,8 +237,8 @@ def test_certified_account_role_qualifies_a_contact_with_blank_home_status(role)
     assert outcome.action == "created"
 
 
-@pytest.mark.parametrize("status", ["", "Initials", "Dropped"])
-def test_non_certified_account_roles_block_provisioning_with_actionable_reason(status):
+@pytest.mark.parametrize("role", ACCOUNT_ROLE_DEFINITIONS)
+def test_initials_only_account_role_defers_applicant_portal_access(role):
     rows = valid_rows()
     rows["Account"] = [
         {
@@ -249,9 +249,80 @@ def test_non_certified_account_roles_block_provisioning_with_actionable_reason(s
         {
             "Id": "role-account-1",
             "OwnerId": "owner-2",
-            "Cert_Certification_Status__c": status,
+            "Cert_Certification_Status__c": "Initials",
+            role.account_lookup: "contact-1",
+        },
+    ]
+    client = Client(rows=rows)
+
+    outcome = service(client).provision({"contact-1"}, ENVIRONMENT)[0]
+
+    assert outcome.action == "skipped"
+    assert outcome.code == "applicant_portal_access_deferred"
+    assert outcome.message == (
+        "This is an applicant account, so Portal access will not be created "
+        "automatically."
+    )
+    assert client.created == []
+
+
+def test_certified_role_wins_when_contact_also_has_an_initials_role():
+    rows = valid_rows()
+    rows["Account"].append(
+        {
+            "Id": "applicant-account-1",
+            "Cert_Certification_Status__c": "Initials",
+            "Cert_Principal_Contact__c": "contact-1",
+        }
+    )
+
+    outcome = service(Client(rows=rows)).provision({"contact-1"}, ENVIRONMENT)[0]
+
+    assert outcome.action == "created"
+
+
+def test_initials_role_with_nonqualifying_roles_still_defers_portal_access():
+    rows = valid_rows()
+    rows["Account"] = [
+        {
+            "Id": "account-1",
+            "OwnerId": "owner-1",
+            "Cert_Certification_Status__c": "",
+        },
+        {
+            "Id": "applicant-account-1",
+            "Cert_Certification_Status__c": "Initials",
             "Cert_Certification_Contact__c": "contact-1",
         },
+        {
+            "Id": "dropped-account-1",
+            "Cert_Certification_Status__c": "Dropped",
+            "Cert_Principal_Contact__c": "contact-1",
+        },
+    ]
+
+    outcome = service(Client(rows=rows)).provision({"contact-1"}, ENVIRONMENT)[0]
+
+    assert outcome.code == "applicant_portal_access_deferred"
+
+
+@pytest.mark.parametrize("statuses", [("",), ("Dropped",), ("", "Dropped")])
+def test_nonqualifying_account_roles_still_block_provisioning(statuses):
+    rows = valid_rows()
+    rows["Account"] = [
+        {
+            "Id": "account-1",
+            "OwnerId": "owner-1",
+            "Cert_Certification_Status__c": "",
+        },
+        *[
+            {
+                "Id": f"role-account-{index}",
+                "Cert_Certification_Status__c": status,
+                "Cert_Certification_Contact__c": "contact-1",
+            }
+            for index, status in enumerate(statuses, start=1)
+        ],
     ]
     client = Client(rows=rows)
 

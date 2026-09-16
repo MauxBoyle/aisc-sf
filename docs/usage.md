@@ -702,8 +702,10 @@ selecting a participant Profile from Account-role assignments. It accepts an
 `AccountRole`, Salesforce Account ID, and certification status for each
 assignment, then returns a Profile decision and its ordered, deduplicated
 causes. It performs no Salesforce reads or writes. A later orchestration layer
-is responsible for obtaining assignments and using the result. Only
-`Certified` and `Initials` assignments are eligible. That layer can also pass
+is responsible for obtaining assignments and using the result. `Certified` and
+`Initials` assignments are eligible for Profile selection; `Initials` means the
+Account is still an Applicant, so this eligibility does not by itself grant
+Portal access. That layer can also pass
 the IDs of Accounts in multi-account Families (Accounts with a parent, child,
 or sibling). A qualifying assignment on one of those IDs has first priority and
 selects Participant RAS. A standalone root Account does not qualify for this
@@ -1250,6 +1252,18 @@ capacity when `UserLicense` can be read. A capacity-read permission failure is
 recorded as a warning and Salesforce enforces capacity during creation. The
 workflow rechecks active linked Users
 immediately before creation, so a concurrently created User is reused.
+
+An `Initials` Account is an Applicant Account. Its Profile Updates and supported
+role assignments remain eligible for the normal review workflow, but Portal
+access is deferred until certification. When a missing User has at least one
+supported role on an `Initials` Account and no supported role on a `Certified`
+Account, the processor explains the deferral and waits for Enter. Roles on
+other statuses do not affect that classification. After the reviewer
+acknowledges it, the processor records
+`applicant_portal_access_deferred` as a successful `no-op`, closes the completed
+source Profile Updates and Case normally, and continues to the next batch.
+Blank, `Dropped`, `Suspended`, and other statuses do not qualify for this
+Applicant outcome. Existing active linked Users are still reused.
 
 Any provisioning blocker, access issue, or Salesforce create failure writes an
 actionable `review_audit.jsonl` event and leaves the Case Pending and the source

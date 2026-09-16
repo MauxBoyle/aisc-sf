@@ -3441,6 +3441,27 @@ class InteractiveProfileUpdateProcessor:
                 f"External User provisioning failed{subject}: {error.outcome.message}"
             ) from error
         for outcome in outcomes:
+            if outcome.code == "applicant_portal_access_deferred":
+                try:
+                    self._acknowledge(
+                        AcknowledgementQuestion(
+                            styled(
+                                outcome.message,
+                                " Press Enter to acknowledge and continue: ",
+                            )
+                        )
+                    )
+                except (KeyboardInterrupt, EOFError) as error:
+                    self._append_batch_event(
+                        batch,
+                        ActionStatus.INTERRUPTED,
+                        action="acknowledge deferred Applicant Portal access",
+                        error="Reviewer interrupted processing.",
+                    )
+                    raise ProcessingInterrupted(
+                        "Profile Update review was interrupted before Applicant "
+                        "Portal access deferral was acknowledged."
+                    ) from error
             status = (
                 ActionStatus.APPLIED
                 if outcome.action == "created"
@@ -3486,9 +3507,12 @@ class InteractiveProfileUpdateProcessor:
                     if is_configuration_failure
                     else f"external User {outcome.action}"
                 ),
-                error=outcome.message
-                if status is ActionStatus.FAILED
-                else outcome.warning,
+                error=(
+                    outcome.message
+                    if status is ActionStatus.FAILED
+                    or outcome.code == "applicant_portal_access_deferred"
+                    else outcome.warning
+                ),
                 error_code=outcome.code,
             )
         )
