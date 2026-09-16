@@ -956,6 +956,14 @@ first unblocked change whose status is `pending`; it advances after completion
 or becomes `null` when no reviewable pending change remains. Empty queues also
 use `null`.
 
+When a saved session is resumed, a batch whose only blockers are
+`ambiguous_contact` and the dependent `unresolved_role_contact` is still
+reviewable through the interactive Contact choices. Selecting an existing
+Contact, creating one, or ignoring the entry uses the normal audited queue
+transitions. Any additional blocker makes the entire batch non-reviewable: the
+CLI displays its heading and each distinct blocker explanation, counts it as
+pending, and performs no Salesforce reads or writes for that batch.
+
 The file is replaced atomically, not edited in place. A snapshot is persisted
 before and after each queue transition or Salesforce mutation and immediately
 before each reviewer question. On a failure, interruption, or deliberate safe

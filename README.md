@@ -617,9 +617,14 @@ The session stores an append-only `review_audit.jsonl` and deduplicated
 `response_emails.txt`. Explicitly resuming `prepare` or `review` keeps completed
 and blocked work, resets interrupted, failed, `in_progress`, and
 `stopped_early` work to pending, skips completed Case batches, and refetches
-Salesforce before retrying unfinished batches. A fully completed session is a
-successful no-op with a clear message. Submissions arriving after `stage` are
-excluded from every later phase of that session.
+Salesforce before retrying unfinished batches. A batch blocked only by an
+ambiguous Contact and its dependent unresolved role links enters the normal
+interactive Contact choices, where the reviewer can select an existing Contact,
+create one, or ignore the entry. Any other blocker keeps the whole batch
+write-safe: the batch heading and each distinct reason are displayed, the batch
+remains pending, and no Salesforce records are read or written for it. A fully
+completed session is a successful no-op with a clear message. Submissions
+arriving after `stage` are excluded from every later phase of that session.
 
 The commands print progress around authentication, publication, Account
 resolution, Case preparation, refresh, and review. Section separators make
