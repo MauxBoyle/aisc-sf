@@ -66,6 +66,15 @@ or creation fails, it records an actionable audit event, leaves the Case Pending
 and source Profile Updates open, and can be safely retried. A User that appears
 during the final recheck is reused rather than duplicated.
 
+`Initials` identifies an Applicant Account. Profile Updates and supported role
+assignments on Applicant Accounts remain eligible for review. A Contact with at
+least one supported role on an `Initials` Account and none on a `Certified`
+Account does not receive a new Portal User yet; roles on other statuses do not
+qualify. The reviewer acknowledges that Portal access is deferred until
+certification, and the workflow records a successful no-op before closing the
+completed Profile Updates and Case. A role on any `Certified` Account keeps the
+normal automatic provisioning behavior.
+
 ## Commands
 
 Create a read-only snapshot:
@@ -477,7 +486,9 @@ is established Salesforce schema, not a mapping error.
 participant Profile from Account-role assignments. It does not read from or
 write to Salesforce; future orchestration can pass it already-known Account
 IDs, roles, certification statuses, and the IDs of Accounts in multi-account
-Families. Only `Certified` and `Initials` assignments qualify. When a
+Families. `Certified` and `Initials` assignments qualify for Profile selection
+and Profile Update work; `Initials` means the Account is still an Applicant and
+does not by itself qualify the Contact for Portal User creation. When a
 qualifying assignment belongs to a multi-account Family, it selects the
 Participant RAS Profile before the usual single-role, New York, and
 multiple-role rules. Accounts outside that supplied ID set keep the usual

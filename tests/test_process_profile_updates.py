@@ -13,6 +13,7 @@ from aisc_salesforce.contact_resolution import (
 )
 from aisc_salesforce.participant_user_provisioning import (
     ParticipantUserProvisioningService,
+    ProvisioningOutcome,
 )
 from aisc_salesforce.process_profile_updates import (
     ActionResult,
@@ -41,6 +42,7 @@ from aisc_salesforce.review_queue import (
 )
 from aisc_salesforce.review_ui import (
     AcknowledgementAnswer,
+    AcknowledgementQuestion,
     ChoiceAnswer,
     ChoiceQuestion,
     ContextLine,
@@ -4560,6 +4562,157 @@ def test_unsent_response_closes_sources_but_keeps_case_pending(tmp_path):
         "submission-1",
         {"Status__c": "Closed"},
     ) in client.updated
+    assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
+
+
+class ApplicantProvisioning:
+    def __init__(self):
+        self.calls = []
+
+    def provision(self, contact_ids, environment):
+        self.calls.append((contact_ids, environment))
+        return (
+            ProvisioningOutcome(
+                "contact-1",
+                "skipped",
+                "This is an applicant account, so Portal access will not be "
+                "created automatically.",
+                "applicant_portal_access_deferred",
+            ),
+        )
+
+
+class ApplicantAcknowledgementUI:
+    def __init__(self, *, audit_path=None, interrupt=False):
+        self.audit_path = audit_path
+        self.interrupt = interrupt
+        self.events = []
+        self.questions = []
+        self.acknowledgement_checks = []
+
+    def display(self, event):
+        self.events.append(event)
+
+    def ask(self, question):
+        self.questions.append(question)
+        if isinstance(question, AcknowledgementQuestion):
+            audit_text = (
+                self.audit_path.read_text(encoding="utf-8")
+                if self.audit_path is not None and self.audit_path.exists()
+                else ""
+            )
+            prior_acknowledgements = sum(
+                isinstance(item, AcknowledgementQuestion)
+                for item in self.questions[:-1]
+            )
+            self.acknowledgement_checks.append(
+                audit_text.count("applicant_portal_access_deferred")
+                == prior_acknowledgements
+            )
+            if self.interrupt:
+                raise KeyboardInterrupt
+            return AcknowledgementAnswer()
+        if isinstance(question, ChoiceQuestion):
+            preferred = next(
+                (
+                    choice
+                    for key in ("apply automatically", "yes")
+                    for choice in question.choices
+                    if choice.key == key
+                ),
+                question.choices[0],
+            )
+            return ChoiceAnswer(preferred)
+        raise AssertionError(type(question))
+
+
+def test_applicant_provisioning_is_acknowledged_then_audited_and_batches_continue(
+    tmp_path,
+):
+    client = FakeClient()
+    second_source = source_record(Id="submission-2", Name="PU-101")
+    client.records[("Company_Profile_Change__c", "submission-2")] = second_source
+    client.records[("Case", "case-2")] = {
+        "Id": "case-2",
+        "CaseNumber": "00010002",
+        "Status": "Pending",
+    }
+    audit_path = tmp_path / "review_audit.jsonl"
+    ui = ApplicantAcknowledgementUI(audit_path=audit_path)
+    provisioning = ApplicantProvisioning()
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        ui=ui,
+        now=NOW,
+        participant_user_provisioning=provisioning,
+        provisioning_environment={"EXTERNAL_USER_LICENSE_NAME": "license"},
+    )
+    second_row = staged_row(
+        source_submission_ids=json.dumps(["submission-2"]),
+        source_submission_names=json.dumps(["PU-101"]),
+        case_id="case-2",
+        case_number="00010002",
+        revised_company_name="Acme Steel Two",
+    )
+
+    processor.review(
+        [staged_row(revised_company_name="Acme Steel One"), second_row],
+        tmp_path,
+    )
+
+    acknowledgement_questions = [
+        question
+        for question in ui.questions
+        if isinstance(question, AcknowledgementQuestion)
+    ]
+    assert len(acknowledgement_questions) == 2
+    assert all(
+        "This is an applicant account, so Portal access will not be created "
+        "automatically."
+        in "".join(fragment.text for fragment in question.prompt)
+        for question in acknowledgement_questions
+    )
+    assert all(ui.acknowledgement_checks)
+    audit = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    applicant_results = [
+        entry
+        for entry in audit
+        if entry["error_code"] == "applicant_portal_access_deferred"
+    ]
+    assert len(applicant_results) == 2
+    assert all(entry["result"] == "no-op" for entry in applicant_results)
+    assert all("applicant account" in entry["error"] for entry in applicant_results)
+    assert (
+        "Company_Profile_Change__c",
+        "submission-2",
+        {"Status__c": "Closed"},
+    ) in client.updated
+    assert ("Case", "case-2", {"Status": "Closed"}) in client.updated
+    assert len(provisioning.calls) == 2
+
+
+def test_applicant_acknowledgement_interruption_leaves_batch_retryable(tmp_path):
+    client = FakeClient()
+    ui = ApplicantAcknowledgementUI(
+        audit_path=tmp_path / "review_audit.jsonl", interrupt=True
+    )
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        ui=ui,
+        now=NOW,
+        participant_user_provisioning=ApplicantProvisioning(),
+        provisioning_environment={"EXTERNAL_USER_LICENSE_NAME": "license"},
+    )
+
+    with pytest.raises(ProcessingInterrupted):
+        processor.review(
+            [staged_row(revised_company_name="Acme Steel LLC")],
+            tmp_path,
+        )
+
+    audit_text = (tmp_path / "review_audit.jsonl").read_text(encoding="utf-8")
+    assert "applicant_portal_access_deferred" not in audit_text
+    assert not any(item[0] == "Company_Profile_Change__c" for item in client.updated)
     assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
 
 

@@ -15,6 +15,7 @@ from typing import Any
 from .account_roles import ACCOUNT_ROLE_DEFINITIONS
 from .profile_updates import escape_soql_string
 from .salesforce import SalesforceClient, SalesforceError
+from .salesforce_enums import AccountCertificationStatus
 from .user_reconciliation import USER_FIELDS, UserReconciliationService
 
 
@@ -81,7 +82,12 @@ class AccountEligibilityPolicy:
 
 @dataclass(frozen=True)
 class ProvisioningOutcome:
-    """One contact's durable provisioning result or actionable reason to stop."""
+    """One contact's durable provisioning result or actionable reason to stop.
+
+    Applicant-only Contacts use ``action="skipped"`` with code
+    ``applicant_portal_access_deferred`` because their Portal access waits for
+    Account certification.
+    """
 
     contact_id: str
     action: str
@@ -172,9 +178,13 @@ class ParticipantUserProvisioningService:
                     )
                 )
             payload = dict(plan.proposed_create)
-            warning = self._validate_external_requirements(
+            validation = self._validate_external_requirements(
                 contact_id, payload, config, account_eligibility_policy
             )
+            if isinstance(validation, ProvisioningOutcome):
+                outcomes.append(validation)
+                continue
+            warning = validation
 
             # A concurrent workflow may have created the User while preflight ran.
             active = self.client.query_records(
@@ -224,7 +234,7 @@ class ParticipantUserProvisioningService:
         payload: dict[str, Any],
         config: ExternalUserProvisioningConfig,
         account_eligibility_policy: AccountEligibilityPolicy | None,
-    ) -> str:
+    ) -> str | ProvisioningOutcome:
         contact_rows = self.client.query_records(
             "Contact",
             ["Id", "AccountId"],
@@ -272,16 +282,24 @@ class ParticipantUserProvisioningService:
                 for role in ACCOUNT_ROLE_DEFINITIONS
             ),
         )
-        if not any(
+        role_statuses = {
             str(role_account.get("Cert_Certification_Status__c") or "").strip()
-            == "Certified"
-            and any(
+            for role_account in role_accounts
+            if any(
                 str(role_account.get(role.account_lookup) or "").strip()
                 == contact_id
                 for role in ACCOUNT_ROLE_DEFINITIONS
             )
-            for role_account in role_accounts
-        ):
+        }
+        if AccountCertificationStatus.CERTIFIED not in role_statuses:
+            if AccountCertificationStatus.INITIALS in role_statuses:
+                return ProvisioningOutcome(
+                    contact_id,
+                    "skipped",
+                    "This is an applicant account, so Portal access will not be "
+                    "created automatically.",
+                    "applicant_portal_access_deferred",
+                )
             self._fail(
                 contact_id,
                 "contact_no_certified_account_role",

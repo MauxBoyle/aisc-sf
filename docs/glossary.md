@@ -53,6 +53,8 @@ identify the exact data involved.
 
 : The Account value that describes its certification state. `Certified` and
   `Initials` are the statuses considered active by the Profile Update workflow.
+  `Initials` means the Account is still an Applicant: its Profile Updates remain
+  eligible, but Portal access is deferred until certification.
 
 **Child Account**
 
