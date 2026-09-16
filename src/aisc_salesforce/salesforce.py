@@ -293,6 +293,24 @@ class SalesforceClient:
             json=payload,
         )
 
+    def send_external_email_test(self, recipient: str) -> None:
+        """Ask the restricted Apex endpoint to send its fixed test email.
+
+        The request deliberately contains only a recipient. Apex owns the
+        allowlist and all email content, so this client cannot supply arbitrary
+        external-email text.
+        """
+        url = (
+            f"{self.auth.instance_url}/services/apexrest/"
+            "aisc-external-email-test"
+        )
+        self._request(
+            "post",
+            url,
+            action="send external-email proof-of-concept test",
+            json={"recipient": recipient},
+        )
+
     def _request(
         self,
         method: str,
