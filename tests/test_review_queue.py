@@ -209,6 +209,36 @@ def test_contact_change_is_shared_across_source_rows():
     assert len(set(contact_ids)) == 1
 
 
+def test_shared_submitted_role_contacts_remain_reviewable_for_reconciliation():
+    row = queue_row(
+        certification_first_name="Sam",
+        certification_last_name="Smith",
+        certification_email="sam@example.com",
+        certification_resolution_action="use_submitted_contact",
+        quality_first_name="Sam",
+        quality_last_name="Smith",
+        quality_email="sam@example.com",
+        quality_resolution_action="use_submitted_contact",
+    )
+
+    manifest = build_review_queue([row], now=NOW)
+    role_changes = [
+        change for change in iter_changes(manifest) if change.phase == "role_link"
+    ]
+
+    assert {change.field for change in role_changes} == {
+        "Cert_Certification_Contact__c",
+        "Cert_Marketing_Contact__c",
+    }
+    assert all(change.status is QueueStatus.PENDING for change in role_changes)
+    assert all(change.reviewable for change in role_changes)
+    assert all(
+        blocker.code != "unresolved_role_contact"
+        for change in role_changes
+        for blocker in change.blockers
+    )
+
+
 def test_parent_account_and_role_changes_expand_to_active_children_only():
     affected = json.dumps(
         [
