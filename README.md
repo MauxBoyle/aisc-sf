@@ -911,6 +911,21 @@ Run tests with coverage:
 uv run pytest --cov
 ```
 
+## Local Salesforce audit trail
+
+Every Salesforce REST operation writes metadata-only JSON Lines events to
+`.audit/salesforce/salesforce-audit-YYYY-MM-DD.jsonl`. Each event has a UTC
+`timestamp`, shared process `run_id`, safe `caller`, `operation`,
+`http_method`, `object_type`, `success`, and, when known, `record_id`,
+`record_count`, `http_status`, `error_type`, and `error_code`. Request and
+response values, credentials, SOQL, fields, and Salesforce error messages are
+never written there.
+
+Files rotate daily in UTC and the newest 30 daily files are retained. To trace
+a flow, first find its `run_id` in one line, then search the local audit files
+for that ID. The resulting read and write events show the operation sequence
+without exposing Salesforce record content.
+
 ## Documentation
 
 Preview the documentation locally:
