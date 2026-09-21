@@ -767,6 +767,12 @@ should point to it. A partial role without an email uses its current
 Account-role Contact when available and cannot create a new Contact
 automatically without safe identity evidence.
 
+When a role has the `use_submitted_contact` resolution action, its staged
+Account lookup can be blank while the Contact review is still pending. The
+queue keeps that role link reviewable instead of treating it as unresolved;
+the processor reconciles the shared submitted Contact before it applies the
+role lookup.
+
 When a submitter email is also used by a role, the richer role details are used
 for Contact work. Otherwise the submitter name is split at its final space.
 Creating a submitter Contact still requires the normal explicit decision. A

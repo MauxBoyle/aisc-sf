@@ -1129,7 +1129,10 @@ def _role_link_changes(raw: dict[str, str], row: StagedRow) -> list[ProposedChan
             proposed = raw.get(f"{role.prefix}_salesforce_contact_id", "").strip()
             action = raw.get(f"{role.prefix}_resolution_action", "").strip()
             blockers: tuple[QueueBlocker, ...] = ()
-            if not proposed and action != "create_contact":
+            if not proposed and action not in {
+                "create_contact",
+                "use_submitted_contact",
+            }:
                 blockers = (
                     QueueBlocker(
                         "unresolved_role_contact",

@@ -751,10 +751,12 @@ Resolution actions are `update_contact` for an exact match or a title/phone
 update, `change_email` for a new email applied to the Account's current role
 contact, `use_submitted_contact` when another submitted role is the first exact
 match, and `create_contact` when an unmatched submitted name describes a new
-Contact. A missing Contact ID or a `create_contact` action always comes with a
-warning for human review. Resolution sources show whether the match came from
-another submitted role, submitted data for a new Contact, an Account Contact, a
-sibling Account Contact, or the Account's current role lookup.
+Contact. `use_submitted_contact` is a deferred, processor-reconciled role
+action: a blank staged Contact ID remains reviewable while the shared submitted
+Contact is resolved. Other missing Contact IDs and `create_contact` actions
+come with a warning for human review. Resolution sources show whether the match
+came from another submitted role, submitted data for a new Contact, an Account
+Contact, a sibling Account Contact, or the Account's current role lookup.
 
 These prefixed actions explain the read-only staging recommendation; they do
 not override fresh identity resolution during processing. In particular,
