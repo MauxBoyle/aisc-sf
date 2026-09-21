@@ -138,6 +138,7 @@ staged_profile_updates/
 profile_updates.csv
 review_queue.json
 review_audit.jsonl
+.audit/salesforce/
 response_emails.txt
 .envrc
 .venv

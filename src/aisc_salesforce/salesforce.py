@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import requests
 
 from .dictionary import ExportField
+from .salesforce_audit import SalesforceAuditWriter
 
 OAUTH_URL = "https://login.salesforce.com/services/oauth2/token"
 API_VERSION = "v60.0"
@@ -16,6 +17,12 @@ REQUIRED_CREDENTIALS = (
     "SF_CLIENT_ID",
     "SF_CLIENT_SECRET",
 )
+HTTP_METHOD_OPERATIONS = {
+    "GET": "read",
+    "POST": "create",
+    "PATCH": "update",
+    "DELETE": "delete",
+}
 
 
 class SalesforceError(RuntimeError):
@@ -27,10 +34,12 @@ class SalesforceError(RuntimeError):
         *,
         error_code: str | None = None,
         salesforce_message: str | None = None,
+        http_status: int | None = None,
     ):
         super().__init__(message)
         self.error_code = error_code
         self.salesforce_message = salesforce_message
+        self.http_status = http_status
 
 
 @dataclass(frozen=True)
@@ -103,11 +112,15 @@ class SalesforceClient:
     """A small Salesforce REST client used by the application services."""
 
     def __init__(
-        self, auth: SalesforceSession, session: requests.Session | Any = requests
+        self,
+        auth: SalesforceSession,
+        session: requests.Session | Any = requests,
+        audit_writer: SalesforceAuditWriter | None = None,
     ):
         self.auth = auth
         self.session = session
         self.headers = {"Authorization": f"Bearer {auth.access_token}"}
+        self.audit_writer = audit_writer or SalesforceAuditWriter()
 
     def query_all(
         self, object_name: str, fields: list[ExportField]
@@ -124,37 +137,55 @@ class SalesforceClient:
         order_by: str | None = None,
     ) -> list[dict[str, Any]]:
         """Query selected fields, optionally filtering and sorting the records."""
-        field_names = ", ".join(fields)
-        soql = f"SELECT {field_names} FROM {object_name}"
-        if where:
-            soql += f" WHERE {where}"
-        if order_by:
-            soql += f" ORDER BY {order_by}"
-        url = f"{self.auth.instance_url}/services/data/{API_VERSION}/query"
-        params: dict[str, str] | None = {"q": soql}
-        records: list[dict[str, Any]] = []
-        while url:
-            response = self._request(
-                "get",
-                url,
-                action=f"query {object_name}",
-                params=params,
-            )
-            try:
-                payload = response.json()
-                records.extend(payload.get("records", []))
-                done = payload["done"]
-            except (ValueError, KeyError, TypeError, AttributeError) as error:
-                raise SalesforceError(
-                    f"Invalid Salesforce query response for {object_name}."
-                ) from error
-            next_url = payload.get("nextRecordsUrl")
-            url = self._absolute_url(next_url) if not done and next_url else None
-            if not done and not next_url:
-                raise SalesforceError(
-                    f"Salesforce query for {object_name} ended without a next page."
+        try:
+            field_names = ", ".join(fields)
+            soql = f"SELECT {field_names} FROM {object_name}"
+            if where:
+                soql += f" WHERE {where}"
+            if order_by:
+                soql += f" ORDER BY {order_by}"
+            url = f"{self.auth.instance_url}/services/data/{API_VERSION}/query"
+            params: dict[str, str] | None = {"q": soql}
+            records: list[dict[str, Any]] = []
+            http_status: int | None = None
+            while url:
+                response = self._request(
+                    "get", url, action=f"query {object_name}", params=params
                 )
-            params = None
+                http_status = getattr(response, "status_code", None)
+                try:
+                    payload = response.json()
+                    records.extend(payload.get("records", []))
+                    done = payload["done"]
+                except (ValueError, KeyError, TypeError, AttributeError) as error:
+                    raise SalesforceError(
+                        f"Invalid Salesforce query response for {object_name}."
+                    ) from error
+                next_url = payload.get("nextRecordsUrl")
+                url = self._absolute_url(next_url) if not done and next_url else None
+                if not done and not next_url:
+                    raise SalesforceError(
+                        f"Salesforce query for {object_name} ended without a next page."
+                    )
+                params = None
+        except SalesforceError as error:
+            self._audit_failure("query", "GET", object_name, error=error)
+            raise
+        if records:
+            for record in records:
+                record_id = record.get("Id") if isinstance(record, dict) else None
+                self._audit_success(
+                    "query",
+                    "GET",
+                    object_name,
+                    record_id,
+                    record_count=1,
+                    http_status=http_status,
+                )
+        else:
+            self._audit_success(
+                "query", "GET", object_name, record_count=0, http_status=http_status
+            )
         return records
 
     def describe_object(self, object_name: str) -> dict[str, str]:
@@ -163,31 +194,41 @@ class SalesforceClient:
             f"{self.auth.instance_url}/services/data/{API_VERSION}"
             f"/sobjects/{object_name}/describe"
         )
-        response = self._request("get", url, action=f"describe {object_name}")
         try:
-            payload = response.json()
-            raw_fields = payload["fields"]
-            if not isinstance(raw_fields, list):
-                raise TypeError
-            field_types: dict[str, str] = {}
-            for raw_field in raw_fields:
-                if not isinstance(raw_field, dict):
+            try:
+                response = self._request("get", url, action=f"describe {object_name}")
+                payload = response.json()
+                raw_fields = payload["fields"]
+                if not isinstance(raw_fields, list):
                     raise TypeError
-                name = raw_field["name"]
-                field_type = raw_field["type"]
-                if (
-                    not isinstance(name, str)
-                    or not name
-                    or not isinstance(field_type, str)
-                    or not field_type
-                    or name in field_types
-                ):
-                    raise TypeError
-                field_types[name] = field_type
-        except (ValueError, KeyError, TypeError, AttributeError) as error:
-            raise SalesforceError(
-                f"Invalid Salesforce Describe response for {object_name}."
-            ) from error
+                field_types: dict[str, str] = {}
+                for raw_field in raw_fields:
+                    if not isinstance(raw_field, dict):
+                        raise TypeError
+                    name = raw_field["name"]
+                    field_type = raw_field["type"]
+                    if (
+                        not isinstance(name, str)
+                        or not name
+                        or not isinstance(field_type, str)
+                        or not field_type
+                        or name in field_types
+                    ):
+                        raise TypeError
+                    field_types[name] = field_type
+            except (ValueError, KeyError, TypeError, AttributeError) as error:
+                raise SalesforceError(
+                    f"Invalid Salesforce Describe response for {object_name}."
+                ) from error
+        except SalesforceError as error:
+            self._audit_failure("describe", "GET", object_name, error=error)
+            raise
+        self._audit_success(
+            "describe",
+            "GET",
+            object_name,
+            http_status=getattr(response, "status_code", None),
+        )
         return field_types
 
     def create_record(self, object_name: str, values: dict[str, Any]) -> str:
@@ -196,15 +237,26 @@ class SalesforceClient:
             f"{self.auth.instance_url}/services/data/{API_VERSION}"
             f"/sobjects/{object_name}"
         )
-        response = self._request(
-            "post", url, action=f"create {object_name}", json=values
-        )
         try:
-            record_id = response.json()["id"]
-        except (ValueError, KeyError, TypeError) as error:
-            raise SalesforceError(
-                f"Salesforce create response for {object_name} was incomplete."
-            ) from error
+            response = self._request(
+                "post", url, action=f"create {object_name}", json=values
+            )
+            try:
+                record_id = response.json()["id"]
+            except (ValueError, KeyError, TypeError) as error:
+                raise SalesforceError(
+                    f"Salesforce create response for {object_name} was incomplete."
+                ) from error
+        except SalesforceError as error:
+            self._audit_failure("create", "POST", object_name, error=error)
+            raise
+        self._audit_success(
+            "create",
+            "POST",
+            object_name,
+            record_id,
+            http_status=getattr(response, "status_code", None),
+        )
         return record_id
 
     def update_record(
@@ -215,8 +267,19 @@ class SalesforceClient:
             f"{self.auth.instance_url}/services/data/{API_VERSION}"
             f"/sobjects/{object_name}/{record_id}"
         )
-        self._request(
-            "patch", url, action=f"update {object_name} {record_id}", json=values
+        try:
+            response = self._request(
+                "patch", url, action=f"update {object_name} {record_id}", json=values
+            )
+        except SalesforceError as error:
+            self._audit_failure("update", "PATCH", object_name, record_id, error)
+            raise
+        self._audit_success(
+            "update",
+            "PATCH",
+            object_name,
+            record_id,
+            http_status=getattr(response, "status_code", None),
         )
 
     def get_record(
@@ -227,22 +290,33 @@ class SalesforceClient:
             f"{self.auth.instance_url}/services/data/{API_VERSION}"
             f"/sobjects/{object_name}/{record_id}"
         )
-        response = self._request(
-            "get",
-            url,
-            action=f"retrieve {object_name} {record_id}",
-            params={"fields": ",".join(fields)},
-        )
         try:
-            payload = response.json()
-        except ValueError as error:
-            raise SalesforceError(
-                f"Invalid Salesforce response for {object_name} {record_id}."
-            ) from error
-        if not isinstance(payload, dict):
-            raise SalesforceError(
-                f"Invalid Salesforce response for {object_name} {record_id}."
+            response = self._request(
+                "get",
+                url,
+                action=f"retrieve {object_name} {record_id}",
+                params={"fields": ",".join(fields)},
             )
+            try:
+                payload = response.json()
+            except ValueError as error:
+                raise SalesforceError(
+                    f"Invalid Salesforce response for {object_name} {record_id}."
+                ) from error
+            if not isinstance(payload, dict):
+                raise SalesforceError(
+                    f"Invalid Salesforce response for {object_name} {record_id}."
+                )
+        except SalesforceError as error:
+            self._audit_failure("retrieve", "GET", object_name, record_id, error)
+            raise
+        self._audit_success(
+            "retrieve",
+            "GET",
+            object_name,
+            record_id,
+            http_status=getattr(response, "status_code", None),
+        )
         return payload
 
     def get_feed_messages(self, record_id: str) -> list[str]:
@@ -251,28 +325,42 @@ class SalesforceClient:
             f"{self.auth.instance_url}/services/data/{API_VERSION}/connect/"
             f"communities/internal/chatter/feeds/record/{record_id}/feed-elements"
         )
-        messages: list[str] = []
-        while url:
-            response = self._request(
-                "get", url, action=f"read Chatter feed for {record_id}"
-            )
-            try:
-                payload = response.json()
-                elements = payload.get("elements", [])
-                for element in elements:
-                    segments = element.get("body", {}).get("messageSegments", [])
-                    message = "".join(
-                        segment.get("text", "")
-                        for segment in segments
-                        if segment.get("type") == "Text"
-                    )
-                    messages.append(message)
-                next_page = payload.get("nextPageUrl")
-            except (ValueError, AttributeError, TypeError) as error:
-                raise SalesforceError(
-                    f"Invalid Chatter feed response for {record_id}."
-                ) from error
-            url = self._absolute_url(next_page) if next_page else None
+        try:
+            messages: list[str] = []
+            http_status: int | None = None
+            while url:
+                response = self._request(
+                    "get", url, action=f"read Chatter feed for {record_id}"
+                )
+                http_status = getattr(response, "status_code", None)
+                try:
+                    payload = response.json()
+                    elements = payload.get("elements", [])
+                    for element in elements:
+                        segments = element.get("body", {}).get("messageSegments", [])
+                        message = "".join(
+                            segment.get("text", "")
+                            for segment in segments
+                            if segment.get("type") == "Text"
+                        )
+                        messages.append(message)
+                    next_page = payload.get("nextPageUrl")
+                except (ValueError, AttributeError, TypeError) as error:
+                    raise SalesforceError(
+                        f"Invalid Chatter feed response for {record_id}."
+                    ) from error
+                url = self._absolute_url(next_page) if next_page else None
+        except SalesforceError as error:
+            self._audit_failure("chatter_read", "GET", "FeedElement", record_id, error)
+            raise
+        self._audit_success(
+            "chatter_read",
+            "GET",
+            "FeedElement",
+            record_id,
+            record_count=len(messages),
+            http_status=http_status,
+        )
         return messages
 
     def post_feed_message(self, record_id: str, message: str) -> None:
@@ -286,12 +374,77 @@ class SalesforceClient:
             "feedElementType": "FeedItem",
             "subjectId": record_id,
         }
-        self._request(
-            "post",
-            url,
-            action=f"post Chatter message to {record_id}",
-            json=payload,
+        try:
+            response = self._request(
+                "post",
+                url,
+                action=f"post Chatter message to {record_id}",
+                json=payload,
+            )
+        except SalesforceError as error:
+            self._audit_failure("chatter_post", "POST", "FeedElement", record_id, error)
+            raise
+        self._audit_success(
+            "chatter_post",
+            "POST",
+            "FeedElement",
+            record_id,
+            http_status=getattr(response, "status_code", None),
         )
+
+    def _audit_success(
+        self,
+        operation: str,
+        method: str,
+        object_type: str,
+        record_id: str | None = None,
+        *,
+        record_count: int | None = None,
+        http_status: int | None = None,
+    ) -> None:
+        event: dict[str, Any] = {
+            "operation": operation,
+            "http_method": method,
+            "object_type": object_type,
+            "success": True,
+        }
+        if record_id is not None:
+            event["record_id"] = record_id
+        if record_count is not None:
+            event["record_count"] = record_count
+        if http_status is not None:
+            event["http_status"] = http_status
+        self._write_audit(event)
+
+    def _audit_failure(
+        self,
+        operation: str,
+        method: str,
+        object_type: str,
+        record_id: str | None = None,
+        error: SalesforceError | None = None,
+    ) -> None:
+        event: dict[str, Any] = {
+            "operation": operation,
+            "http_method": method,
+            "object_type": object_type,
+            "success": False,
+            "error_type": type(error).__name__ if error else "SalesforceError",
+        }
+        if record_id is not None:
+            event["record_id"] = record_id
+        if error and error.http_status is not None:
+            event["http_status"] = error.http_status
+        if error and error.error_code:
+            event["error_code"] = error.error_code
+        self._write_audit(event)
+
+    def _write_audit(self, event: dict[str, Any]) -> None:
+        """Never turn a completed Salesforce operation into an audit failure."""
+        try:
+            self.audit_writer.write(event)
+        except Exception:
+            return
 
     def _request(
         self,
@@ -320,6 +473,7 @@ class SalesforceClient:
                 f"Salesforce failed to {action}: {details}",
                 error_code=error_code,
                 salesforce_message=salesforce_message,
+                http_status=getattr(response, "status_code", None),
             )
         return response
 

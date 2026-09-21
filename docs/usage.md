@@ -32,6 +32,30 @@ cp .env.example .env
 The CLI loads `.env` without replacing environment variables that are already
 set.
 
+## Local Salesforce audit trail
+
+The shared Salesforce client records each REST operation in repository-local
+JSON Lines files at `.audit/salesforce/salesforce-audit-YYYY-MM-DD.jsonl`.
+Each line is one metadata-only event with a UTC `timestamp`, a process-wide
+`run_id`, safe `caller`, `operation`, `http_method`, `object_type`, and
+`success`. Events include `record_id`, `record_count`, `http_status`,
+`error_type`, and `error_code` only when those details are known.
+
+The writer never records request or response values, access tokens, SOQL,
+field lists, URLs, payloads, or Salesforce error messages. It rotates files
+at the UTC day boundary and keeps the newest 30 daily files. If the local audit
+directory cannot be written, the Salesforce operation still continues.
+
+To diagnose a Salesforce flow, open any recent audit file, copy its `run_id`,
+then search all files for it:
+
+```bash
+rg '"run_id": "<run-id>"' .audit/salesforce/
+```
+
+Events for that ID are the read/write sequence from one command invocation;
+use `operation`, `http_method`, `record_id`, and `success` to follow it.
+
 ## Participant-drop intake
 
 Open the participant-drop menu from the terminal:
