@@ -120,3 +120,94 @@ def test_schema_dictionary_includes_participant_drop_withdrawal_fields():
     assert [field.api_name for field in plan["Certification_Withdrawal__c"]] == [
         "Certification_Cancellation_Reason__c",
     ]
+
+
+def test_schema_dictionary_includes_selected_participant_appeal_fields():
+    dictionary_path = (
+        Path(__file__).parents[1]
+        / "src/aisc_salesforce/data/salesforce_schema_dictionary.csv"
+    )
+
+    plan = load_export_plan(dictionary_path)
+
+    assert [field.api_name for field in plan["AccountHistory"]] == [
+        "Id",
+        "AccountId",
+        "Field",
+        "OldValue",
+        "NewValue",
+        "CreatedDate",
+    ]
+    assert [field.api_name for field in plan["Cert_Audit_Review__c"]] == [
+        "Id",
+        "Cert_Account__c",
+        "Cert_Audit__c",
+        "Cert_CRG_Outcome__c",
+        "CRG_Comments__c",
+        "CreatedDate",
+        "LastModifiedDate",
+    ]
+    assert [field.api_name for field in plan["Cert_Audit_Review__History"]] == [
+        "Id",
+        "ParentId",
+        "Field",
+        "OldValue",
+        "NewValue",
+        "CreatedDate",
+    ]
+
+
+def test_participant_appeal_dictionary_metadata_is_verified_and_complete():
+    dictionary_path = (
+        Path(__file__).parents[1]
+        / "src/aisc_salesforce/data/salesforce_schema_dictionary.csv"
+    )
+    with dictionary_path.open(newline="", encoding="utf-8") as dictionary_file:
+        rows = {
+            (row["Salesforce_Table"], row["Actual_Salesforce_API_Name"]): row
+            for row in csv.DictReader(dictionary_file)
+        }
+
+    expected = {
+        ("Account", "Cert_Notes__c"): (
+            "textarea",
+            "Certification Notes are free-text notes on the Account that future appeal processing can review",
+        ),
+        ("AccountHistory", "OldValue"): (
+            "anyType",
+            "Value before the change; Salesforce can return different value types",
+        ),
+        ("AccountHistory", "NewValue"): (
+            "anyType",
+            "Value after the change; Salesforce can return different value types",
+        ),
+        ("Cert_Audit_Review__c", "Cert_CRG_Outcome__c"): (
+            "picklist",
+            "Controlled CRG decision outcome for this Audit Review",
+        ),
+        ("Cert_Audit_Review__c", "CRG_Comments__c"): (
+            "textarea",
+            "Free-text CRG comments recorded on this Audit Review",
+        ),
+        ("Cert_Audit_Review__History", "Field"): (
+            "picklist",
+            "API name of the Audit Review field that changed",
+        ),
+        ("Cert_Audit_Review__History", "OldValue"): (
+            "anyType",
+            "Value before the change; Salesforce can return different value types",
+        ),
+        ("Cert_Audit_Review__History", "NewValue"): (
+            "anyType",
+            "Value after the change; Salesforce can return different value types",
+        ),
+        ("Cert_Audit__c", "CRG_Review_Status__c"): (
+            "picklist",
+            "CRG Review Status on the parent Audit; separate from Audit Review CRG Outcome and Audit Review Status",
+        ),
+    }
+
+    assert {
+        key: (rows[key]["Data_Type"], rows[key]["Description"])
+        for key in expected
+    } == expected

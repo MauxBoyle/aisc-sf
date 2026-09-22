@@ -10,6 +10,12 @@ from aisc_salesforce.picklist_audit import (
     two_year_cutoff,
 )
 from aisc_salesforce.salesforce import SalesforceError
+from aisc_salesforce.salesforce_enums import (
+    SALESFORCE_ENUMS,
+    AuditReviewHistoryField,
+    CRGOutcome,
+    CRGReviewStatus,
+)
 
 
 class KnownStatus(StrEnum):
@@ -129,9 +135,7 @@ def test_history_objects_filter_on_created_date(object_name):
             assert described_object == object_name
             return {"Field": "picklist", "CreatedDate": "datetime"}
 
-        def query_records(
-            self, queried_object, fields, *, where, order_by
-        ):
+        def query_records(self, queried_object, fields, *, where, order_by):
             self.query = (queried_object, fields, where, order_by)
             return [{"Field": "UnknownHistoryField"}]
 
@@ -189,3 +193,65 @@ def test_non_string_picklist_data_is_rejected_clearly():
 
     with pytest.raises(SalesforceError, match=r"Case\.Status"):
         service.audit({"Case": ("Status",)})
+
+
+def test_participant_appeal_picklists_have_exact_catalogs_and_mappings():
+    assert [member.value for member in CRGOutcome] == [
+        "Certification Recommended",
+        "CRG Follow Up Needed",
+        "Certificate Processed",
+        "CRG Withdrawal",
+        "Recommended with Modification",
+        "On Hold",
+        "Closed Without Certificate",
+    ]
+    assert {member.value for member in AuditReviewHistoryField} >= {
+        "Cert_CRG_Outcome__c",
+        "CRG_Comments__c",
+    }
+    assert [member.value for member in CRGReviewStatus] == [
+        "Failed",
+        "Incomplete",
+        "Pass-Complete",
+        "Pass-Conditional",
+    ]
+    assert (
+        SALESFORCE_ENUMS[("Cert_Audit_Review__c", "Cert_CRG_Outcome__c")] is CRGOutcome
+    )
+    assert (
+        SALESFORCE_ENUMS[("Cert_Audit_Review__History", "Field")]
+        is AuditReviewHistoryField
+    )
+    assert (
+        SALESFORCE_ENUMS[("Cert_Audit__c", "CRG_Review_Status__c")] is CRGReviewStatus
+    )
+
+
+def test_participant_appeal_picklist_audit_has_no_missing_values():
+    class AppealClient:
+        def describe_object(self, object_name):
+            return {
+                "Cert_CRG_Outcome__c": "picklist",
+                "Field": "picklist",
+                "CRG_Review_Status__c": "picklist",
+            }
+
+        def query_records(self, object_name, fields, *, where, order_by):
+            values = {
+                "Cert_Audit_Review__c": {"Cert_CRG_Outcome__c": "On Hold"},
+                "Cert_Audit_Review__History": {"Field": "Cert_CRG_Outcome__c"},
+                "Cert_Audit__c": {"CRG_Review_Status__c": "Pass-Complete"},
+            }
+            return [values[object_name]]
+
+    result = PicklistEnumAuditService(
+        AppealClient(), cutoff=datetime(2024, 1, 1, tzinfo=UTC)
+    ).audit(
+        {
+            "Cert_Audit_Review__c": ("Cert_CRG_Outcome__c",),
+            "Cert_Audit_Review__History": ("Field",),
+            "Cert_Audit__c": ("CRG_Review_Status__c",),
+        }
+    )
+
+    assert result.findings == ()
