@@ -896,8 +896,11 @@ included. To add a field safely, add its object, Salesforce API name, and unique
 `Sensible_Python_Key`, then set that column to `TRUE` and run the tests.
 
 Each run writes `snapshots/YYYY-MM-DDTHH-MM-SSZ/` containing CSV files for
-Account, Contact, Case, `Cert_Audit__c`, and `Company_Profile_Change__c`, plus
-`manifest.json`. Use another parent directory when needed:
+every object selected in the dictionary, plus `manifest.json`. The current
+dictionary also exports Account and Audit Review field-history records for
+future participant-appeal processing. These exports only collect source data;
+they do not identify appeal candidates or change Salesforce. Use another parent
+directory when needed:
 
 ```bash
 uv run aisc_salesforce snapshot --output-dir /secure/snapshot-location

@@ -1,6 +1,8 @@
+from pathlib import Path
+
 import pytest
 
-from aisc_salesforce.dictionary import ExportField
+from aisc_salesforce.dictionary import ExportField, load_export_plan
 from aisc_salesforce.queried_fields import (
     FieldInventoryError,
     build_queried_field_inventory,
@@ -41,3 +43,38 @@ def test_relationship_fields_are_assigned_to_the_owning_object():
 def test_unknown_relationship_owner_is_rejected_instead_of_silently_ignored():
     with pytest.raises(FieldInventoryError, match="Unknown__r.Value__c"):
         build_queried_field_inventory({"Case": ["Unknown__r.Value__c"]})
+
+
+def test_inventory_includes_participant_appeal_relationships_and_history_fields():
+    dictionary_path = (
+        Path(__file__).parents[1]
+        / "src/aisc_salesforce/data/salesforce_schema_dictionary.csv"
+    )
+
+    inventory = build_queried_field_inventory(load_export_plan(dictionary_path))
+
+    assert inventory["Cert_Audit_Review__c"] == (
+        "CRG_Comments__c",
+        "Cert_Account__c",
+        "Cert_Audit__c",
+        "Cert_CRG_Outcome__c",
+        "CreatedDate",
+        "Id",
+        "LastModifiedDate",
+    )
+    assert inventory["AccountHistory"] == (
+        "AccountId",
+        "CreatedDate",
+        "Field",
+        "Id",
+        "NewValue",
+        "OldValue",
+    )
+    assert inventory["Cert_Audit_Review__History"] == (
+        "CreatedDate",
+        "Field",
+        "Id",
+        "NewValue",
+        "OldValue",
+        "ParentId",
+    )

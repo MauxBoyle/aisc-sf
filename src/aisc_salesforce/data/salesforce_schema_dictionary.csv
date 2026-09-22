@@ -16,7 +16,7 @@ Account,acct_status,Cert_Certification_Status__c,Enum,for cert program accounts,
 Account,acct_continent,Cert_Continent__c,Enum,used for billing,FALSE
 Account,acct_join_date,Cert_Join_Date__c,string,I may use this later,FALSE
 Account,acct_qaqccontact,Cert_Marketing_Contact__c,sObject,points to a Contact,TRUE
-Account,acct_cert_notes,Cert_Notes__c,long string,notes abot the account,FALSE
+Account,acct_cert_notes,Cert_Notes__c,textarea,Certification Notes are free-text notes on the Account that future appeal processing can review,TRUE
 Account,acct_prcpcontact,Cert_Principal_Contact__c,sObject,points to a Contact,TRUE
 Account,acct_roi_rec,Cert_Reciprocal_Indemnity_Agreement_Rec__c,boolean,,FALSE
 Account,acct_nycontact,Cert_Safety_Contact__c,sObject,points to a Contact,FALSE
@@ -72,6 +72,12 @@ Account,acct_support_functions,Support_Office_Functions__c,many,,FALSE
 Account,acct_support_location,Support_Office_Location__c,many,,FALSE
 Account,acct_sustainability,Sustainability_Program__c,boolean,,FALSE
 Account,acct_url,Website,string,should be restricted to a url,FALSE
+AccountHistory,account_history_id,Id,id,Unique ID for this immutable Account field-history entry,TRUE
+AccountHistory,account_history_account_id,AccountId,reference,Account whose field changed,TRUE
+AccountHistory,account_history_field,Field,picklist,API name of the Account field that changed,TRUE
+AccountHistory,account_history_old_value,OldValue,anyType,Value before the change; Salesforce can return different value types,TRUE
+AccountHistory,account_history_new_value,NewValue,anyType,Value after the change; Salesforce can return different value types,TRUE
+AccountHistory,account_history_created_date,CreatedDate,datetime,Timestamp when Salesforce recorded the field change,TRUE
 Cert_Invoice__c,cert_invoice_name,Name,string,The invoice number used for participant-drop lookup,TRUE
 Cert_Invoice__c,cert_invoice_account,Cert_Account__c,Lookup (Account),Account used for participant-drop lookup,TRUE
 Withdrawal_Request__c,withdrawal_request_id,Id,Id,Withdrawal request record ID,TRUE
@@ -268,7 +274,7 @@ Cert_Audit__c,audit_check_box,Check_Box__c,,,FALSE
 Cert_Audit__c,audit_profile_change,Company_Profile_Change_Form__c,,,TRUE
 Cert_Audit__c,audit_createdbyid,CreatedById,,,FALSE
 Cert_Audit__c,audit_createddate,CreatedDate,,,FALSE
-Cert_Audit__c,audit_crg_review_status,CRG_Review_Status__c,,,FALSE
+Cert_Audit__c,audit_crg_review_status,CRG_Review_Status__c,picklist,CRG Review Status on the parent Audit; separate from Audit Review CRG Outcome and Audit Review Status,TRUE
 Cert_Audit__c,audit_expedited,Expedited__c,,,FALSE
 Cert_Audit__c,audit_pu_explanation,Explanation_for_Profile_Change_Form__c,,,TRUE
 Cert_Audit__c,audit_exp_fab_travel,Explanation_of_Fab_Process_Travel__c,,,FALSE
@@ -317,6 +323,19 @@ Cert_Audit__c,audit_se1_3_docs_needed,SE1_3_Docs_Needed__c,,,FALSE
 Cert_Audit__c,audit_systemmodstamp,SystemModstamp,,,FALSE
 Cert_Audit__c,audit_travel_for_fab,Travel_for_Fabrication_Processes__c,,,FALSE
 Cert_Audit__c,audit_travel_for_supp,Travel_for_Support_Processes__c,,,FALSE
+Cert_Audit_Review__c,audit_review_id,Id,id,Unique ID for this Audit Review record,TRUE
+Cert_Audit_Review__c,audit_review_account_id,Cert_Account__c,reference,Account related directly to this Audit Review,TRUE
+Cert_Audit_Review__c,audit_review_audit_id,Cert_Audit__c,reference,Parent Audit related to this Audit Review,TRUE
+Cert_Audit_Review__c,audit_review_crg_outcome,Cert_CRG_Outcome__c,picklist,Controlled CRG decision outcome for this Audit Review,TRUE
+Cert_Audit_Review__c,audit_review_crg_comments,CRG_Comments__c,textarea,Free-text CRG comments recorded on this Audit Review,TRUE
+Cert_Audit_Review__c,audit_review_created_date,CreatedDate,datetime,Timestamp when this Audit Review was created,TRUE
+Cert_Audit_Review__c,audit_review_last_modified_date,LastModifiedDate,datetime,Timestamp when this Audit Review was last changed,TRUE
+Cert_Audit_Review__History,audit_review_history_id,Id,id,Unique ID for this immutable Audit Review field-history entry,TRUE
+Cert_Audit_Review__History,audit_review_history_parent_id,ParentId,reference,Audit Review record whose field changed,TRUE
+Cert_Audit_Review__History,audit_review_history_field,Field,picklist,API name of the Audit Review field that changed,TRUE
+Cert_Audit_Review__History,audit_review_history_old_value,OldValue,anyType,Value before the change; Salesforce can return different value types,TRUE
+Cert_Audit_Review__History,audit_review_history_new_value,NewValue,anyType,Value after the change; Salesforce can return different value types,TRUE
+Cert_Audit_Review__History,audit_review_history_created_date,CreatedDate,datetime,Timestamp when Salesforce recorded the field change,TRUE
 Company_Profile_Change__c,],Account__c,Lookup (Account),Automatically healed via Clean_Cert_ID if left blank by submitter,TRUE
 Company_Profile_Change__c,pu_ap_email,AP_Email__c,,,TRUE
 Company_Profile_Change__c,pu_ap_first_name,AP_First_Name__c,,,TRUE

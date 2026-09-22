@@ -118,6 +118,68 @@ class AuditType(StrEnum):
     SPLIT = "Split"
 
 
+class CRGOutcome(StrEnum):
+    """Controlled CRG outcomes recorded on an Audit Review."""
+
+    CERTIFICATION_RECOMMENDED = "Certification Recommended"
+    CRG_FOLLOW_UP_NEEDED = "CRG Follow Up Needed"
+    CERTIFICATE_PROCESSED = "Certificate Processed"
+    CRG_WITHDRAWAL = "CRG Withdrawal"
+    RECOMMENDED_WITH_MODIFICATION = "Recommended with Modification"
+    ON_HOLD = "On Hold"
+    CLOSED_WITHOUT_CERTIFICATE = "Closed Without Certificate"
+
+
+class CRGReviewStatus(StrEnum):
+    """CRG Review Status values on the parent Audit."""
+
+    FAILED = "Failed"
+    INCOMPLETE = "Incomplete"
+    PASS_COMPLETE = "Pass-Complete"
+    PASS_CONDITIONAL = "Pass-Conditional"
+
+
+class AuditReviewHistoryField(StrEnum):
+    """Audit Review fields that can appear in its field-history records."""
+
+    ACCOUNT = "Cert_Account__c"
+    ADDITIONAL_AUDIT_EXPLANATION = "Additional_Audit_Explanation__c"
+    ADDITIONAL_AUDIT_FEE_NEEDED = "Additional_Audit_Fee_Needed__c"
+    AISC_COMMENTS = "AISC_Comments__c"
+    AISC_OUTCOME = "Cert_AISC_Outcome__c"
+    ASSIGNED_REVIEWER = "Cert_Assigned_Reviewer__c"
+    AUDIT = "Cert_Audit__c"
+    AUDIT_DURATION_CHANGE_EXPLANATION = "Audit_Duration_Change_Explanation__c"
+    AUDITOR_COMMENTS = "Auditor_s_Comments__c"
+    AUDIT_REVIEW_NUMBER = "Name"
+    AUDIT_REVIEW_STATUS = "Cert_Audit_Review_Status__c"
+    CERTIFICATION_RECOMMENDATION = "Cert_Certification_Recommendation__c"
+    COMMENTS = "Cert_Comments__c"
+    COMPLETED_DATE = "Cert_Completed_Date__c"
+    CONCUR_WITH_FINAL_REVIEW = "CCert_Concur_with_Final_Review__c"
+    CREATED = "created"
+    CRG_COMMENTS = "CRG_Comments__c"
+    CRG_OUTCOME = "Cert_CRG_Outcome__c"
+    CUSTOM_PERSON_MERGED = "customPersonMerged"
+    EXPEDITED = "Expedited__c"
+    PROFILE_CHANGE_EXPLANATION = "Explanation_for_Profile_Change_Form__c"
+    FAB_PROCESS_TRAVEL_EXPLANATION = "Explanation_of_Fab_Process_Travel__c"
+    SUPPORT_PROCESS_TRAVEL_EXPLANATION = "Explanation_of_Support_Process_Travel__c"
+    FEED_EVENT = "feedEvent"
+    INDIVIDUAL_MERGED = "individualMerged"
+    B_AUDIT_NEEDED = "Is_a_B_Audit_Needed__c"
+    OUTCOME = "Cert_Outcome__c"
+    OWNER = "Owner"
+    OWNER_ACCEPTED = "ownerAccepted"
+    OWNER_ASSIGNMENT = "ownerAssignment"
+    RECOMMENDATION_TO_DENY_OR_WITHDRAW = "Cert_Recommendation_to_deny_or_withdraw__c"
+    RECOMMENDATION_TO_GRANT_OR_RENEW = "Cert_Recommendation_to_Grant_or_Renew__c"
+    RECORD_LOCKED = "locked"
+    RECORD_UNLOCKED = "unlocked"
+    SITE_DOCUMENT_APPROVAL = "Cert_Site_Document_Approval__c"
+    STAGE = "Cert_Stage__c"
+
+
 class ProfileChangeStatus(StrEnum):
     """Company Profile Change statuses read or written by the workflows."""
 
@@ -405,6 +467,9 @@ SALESFORCE_ENUMS: dict[tuple[str, str], type[StrEnum]] = {
     ("Case", "Sub_Label__c"): CaseSubLabel,
     ("Cert_Audit__c", "Cert_Audit_Status__c"): AuditStatus,
     ("Cert_Audit__c", "Cert_Audit_Type__c"): AuditType,
+    ("Cert_Audit__c", "CRG_Review_Status__c"): CRGReviewStatus,
+    ("Cert_Audit_Review__c", "Cert_CRG_Outcome__c"): CRGOutcome,
+    ("Cert_Audit_Review__History", "Field"): AuditReviewHistoryField,
     ("Company_Profile_Change__c", "Status__c"): ProfileChangeStatus,
     ("Company_Profile_Change__c", "Type__c"): ProfileChangeType,
     (

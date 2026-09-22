@@ -42,6 +42,13 @@ identify the exact data involved.
   reported application stages. This is different from the local review audit
   file.
 
+**Audit Review**
+
+: A Salesforce `Cert_Audit_Review__c` record connected to an Account and an
+  Audit. It records review information, including a CRG Outcome and CRG
+  Comments. The schema dictionary exports it as source data only; it does not
+  yet make appeal decisions.
+
 ## C
 
 **Case batch**
@@ -55,6 +62,13 @@ identify the exact data involved.
   `Initials` are the statuses considered active by the Profile Update workflow.
   `Initials` means the Account is still an Applicant: its Profile Updates remain
   eligible, but Portal access is deferred until certification.
+
+**CRG Outcome**
+
+: The controlled Salesforce `Cert_CRG_Outcome__c` picklist value on an Audit
+  Review. It describes the Certification Review Group's recorded outcome, such
+  as `CRG Withdrawal` or `On Hold`. It is different from the parent Audit's
+  `CRG_Review_Status__c` field.
 
 **Child Account**
 
@@ -74,6 +88,15 @@ identify the exact data involved.
   a reviewer to resolve an ambiguity.
 
 ## F
+
+**Field history**
+
+: An immutable Salesforce record of one field change. A history row identifies
+  the changed field, its old and new values, and when the change happened.
+  `AccountHistory` rows belong to Accounts, while
+  `Cert_Audit_Review__History` rows belong to Audit Reviews. Their `OldValue`
+  and `NewValue` fields can contain different kinds of values, so Salesforce
+  labels their type `anyType`.
 
 **Family Accounts**
 
