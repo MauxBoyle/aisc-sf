@@ -49,6 +49,65 @@ identify the exact data involved.
   Comments. The schema dictionary exports it as source data only; it does not
   yet make appeal decisions.
 
+## Certification codes
+
+These abbreviations identify certifications. The Audit Review outcome export
+recognizes them when comments explicitly describe a scope change.
+
+**ABR**
+
+: Bridge Fabricator Advanced certification.
+
+**BEE**
+
+: Bridge Endorsement certification.
+
+**BU**
+
+: Building Fabricator certification.
+
+**CCC**
+
+: Complex Coatings certification. It can appear as `CCC` or with level `1`,
+  `2`, or `3` attached.
+
+**CCE**
+
+: Complex Coatings certification. It can appear as `CCE` or with level `1`,
+  `2`, or `3` attached.
+
+**CPT**
+
+: Highway Component certification.
+
+**CSE**
+
+: Erector certification.
+
+**HYD**
+
+: Hydraulic Fabricator Standard certification.
+
+**HYDA**
+
+: Hydraulic Fabricator Advanced certification.
+
+**IBR**
+
+: Bridge Fabricator Intermediate certification.
+
+**MEE**
+
+: Metal Deck certification.
+
+**SBR**
+
+: Bridge Fabricator Simple certification.
+
+**SEE**
+
+: Seismic certification.
+
 ## C
 
 **Case batch**

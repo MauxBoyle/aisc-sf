@@ -412,6 +412,47 @@ def test_application_snapshot_cli_reports_expected_failures(monkeypatch, capsys,
     assert f"Application snapshot failed: {error}" in capsys.readouterr().err
 
 
+def test_audit_review_outcomes_cli_uses_custom_output_and_is_read_only(
+    monkeypatch, tmp_path
+):
+    output = []
+    monkeypatch.setattr(app, "_load_dotenv", lambda path: None)
+    monkeypatch.setattr(app, "get_credentials", lambda environment: {"ok": "yes"})
+    monkeypatch.setattr(app, "get_oauth_url", lambda environment: "token-url")
+    monkeypatch.setattr(
+        app, "request_access_token", lambda credentials, oauth_url: "auth"
+    )
+    monkeypatch.setattr(app, "SalesforceClient", lambda auth: "client")
+
+    class Service:
+        def __init__(self, client):
+            assert client == "client"
+
+        def build(self):
+            return [{"audit_review": "AR-000123"}]
+
+    monkeypatch.setattr(app, "AuditReviewOutcomeService", Service)
+    monkeypatch.setattr(
+        app,
+        "write_audit_review_outcomes",
+        lambda rows, output_path: output_path,
+    )
+
+    output_path = tmp_path / "audit-review-outcomes.csv"
+    assert (
+        app.main(
+            ["audit-review-outcomes", "--output", str(output_path)],
+            output_fn=output.append,
+        )
+        == 0
+    )
+    assert output == [
+        f"Audit Review outcome export complete: {output_path}",
+        "Audit Reviews: 1",
+        "No Salesforce records were changed.",
+    ]
+
+
 def test_cli_success_uses_custom_output_dir(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(
         app, "load_export_plan", lambda path: {"Account": [ExportField("Name", "name")]}
