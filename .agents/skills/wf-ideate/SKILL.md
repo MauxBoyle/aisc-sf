@@ -39,6 +39,21 @@ Create a GitHub issue that includes:
 - Implementation suggestions (high-level, not a full plan)
 - Any relevant links to official docs
 
+### Project Organization Considerations
+
+  When an idea adds, moves, or generates files, describe the intended ownership of
+  those files: source code, tests, documentation, version-controlled
+  configuration, local operational data, or generated output.
+
+  Prefer a small, purpose-focused repository root. Treat the following as
+  guidance, not an absolute rule: source belongs in `src/`, tests in `tests/`,
+  documentation in `docs/`, reusable scripts in `scripts/`, versioned business
+  configuration in `config/`, local operational data in `data/`, and generated
+  reports in `reports/`.
+
+  If a different layout is justified by deployment, backups, security, or
+  operational needs, state that the implementer may choose it and document why.
+
 Use `gh issue create` to create the issue.
 
 **Do NOT plan the implementation.** The goal is a well-written issue that another developer can pick up — not a step-by-step execution plan.

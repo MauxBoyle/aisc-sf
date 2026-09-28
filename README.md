@@ -199,6 +199,20 @@ Create a read-only application-stage count:
 uv run aisc_salesforce application-snapshot
 ```
 
+Export a rolling two years of Audit Reviews for manual outcome checking:
+
+```bash
+uv run aisc_salesforce audit-review-outcomes
+```
+
+This read-only command creates `audit_review_outcomes.csv` with the Audit Review
+display name and created date, Account name and ID, CRG Outcome, CRG Comments,
+and six mutually exclusive review columns: `standard`, `drop`, `additional`,
+`cautionary_letter`, `scope`, and `needs_manual_review`. A row has one matching
+classification flag or is sent to manual review; empty CRG text has no flags.
+See the [project plan](docs/project-plan.md) for the matching rules and later
+guided review work.
+
 Process recent audit notes and New company profile submissions:
 
 ```bash

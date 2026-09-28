@@ -134,6 +134,7 @@ activemq-data/
 !.env.example
 snapshots/
 application_snapshots/
+audit_review_outcomes.csv
 staged_profile_updates/
 profile_updates.csv
 review_queue.json

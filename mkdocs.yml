@@ -39,4 +39,5 @@ nav:
   - Home: index.md
   - Usage: usage.md
   - Glossary: glossary.md
+  - Project Plan: project-plan.md
   - API Reference: api.md
