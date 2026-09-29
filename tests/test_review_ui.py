@@ -21,6 +21,7 @@ from aisc_salesforce.review_ui import (
     ParentAccountChildValue,
     ParentAccountConflict,
     ParentAccountFieldConflict,
+    ParentAccountHierarchyConflict,
     ParentAccountNoActiveChildren,
     ResponseEmail,
     ReviewChoice,
@@ -284,7 +285,7 @@ def test_cli_renders_choice_context_after_queue_status_and_before_prompt():
     assert prompts == ["Continue: "]
 
 
-def test_cli_renders_parent_conflict_and_no_active_child_events():
+def test_cli_renders_parent_conflict_no_active_child_and_hierarchy_events():
     output = []
     ui = CLIReviewUI(output_fn=output.append)
     children = (
@@ -322,6 +323,18 @@ def test_cli_renders_parent_conflict_and_no_active_child_events():
             ),
         )
     )
+    ui.display(
+        ParentAccountHierarchyConflict(
+            ValueFragment("Qualifying Target (target-1)"),
+            (
+                ParentAccountChildValue(
+                    ValueFragment("child-qualifying"),
+                    ValueFragment("Qualifying Child"),
+                    ValueFragment("Certified"),
+                ),
+            ),
+        )
+    )
 
     rendered = "\n".join(output)
     assert "Company Name" in rendered
@@ -330,6 +343,8 @@ def test_cli_renders_parent_conflict_and_no_active_child_events():
     assert "Second Child (child-2): Other Name" in rendered
     assert "no direct child with status Certified or Initials" in rendered
     assert "Dropped Child (child-dropped): Dropped" in rendered
+    assert "The submitted Account and these direct children have status" in rendered
+    assert "Qualifying Child (child-qualifying): Certified" in rendered
 
 
 def test_cli_retries_invalid_choice_with_question_feedback():

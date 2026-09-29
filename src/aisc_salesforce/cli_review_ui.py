@@ -29,6 +29,7 @@ from .review_ui import (
     MappingComparison,
     Notice,
     ParentAccountConflict,
+    ParentAccountHierarchyConflict,
     ParentAccountNoActiveChildren,
     ResponseEmail,
     ReviewAnswer,
@@ -197,6 +198,24 @@ class CLIReviewUI:
                     lines.append(child.account_name.value or "(unnamed)")
                     lines.append(f" ({child.account_id.value}): ")
                     lines.append_text(_value(child.current))
+            self._emit(lines)
+        elif isinstance(event, ParentAccountHierarchyConflict):
+            title = Text(
+                "Account hierarchy needs manual follow-up: ", style="profile.warning"
+            )
+            title.append_text(_raw_value(event.target))
+            lines = _section_heading(title, "-" * 72)
+            lines.append(
+                "\nThe submitted Account and these direct children have status "
+                "Certified or Initials. This hierarchy is unsafe to route "
+                "automatically, so this entire Case batch will remain open:",
+                style="profile.warning",
+            )
+            for child in event.children:
+                lines.append("\n")
+                lines.append(child.account_name.value or "(unnamed)")
+                lines.append(f" ({child.account_id.value}): ")
+                lines.append_text(_value(child.current))
             self._emit(lines)
         elif isinstance(event, StagedRowSummary):
             heading = Text("Staged row\nAccount: ")

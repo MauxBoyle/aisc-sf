@@ -1618,6 +1618,110 @@ def test_parent_routes_account_updates_to_active_direct_children_only(tmp_path):
     assert {change["outcome"] for change in name_changes} == {"applied"}
 
 
+def test_qualifying_target_with_only_inactive_children_updates_target_account(tmp_path):
+    children = [
+        account_record(
+            Id="child-dropped",
+            ParentId="account-1",
+            Cert_Certification_Status__c="Dropped",
+        ),
+        account_record(
+            Id="child-suspended",
+            ParentId="account-1",
+            Cert_Certification_Status__c="Suspended",
+        ),
+        account_record(
+            Id="child-blank",
+            ParentId="account-1",
+            Cert_Certification_Status__c="",
+        ),
+        account_record(
+            Id="child-other",
+            ParentId="account-1",
+            Cert_Certification_Status__c="On Hold",
+        ),
+    ]
+    client = FakeClient(
+        source=source_record(Revised_Company_Name__c="New Target Name"),
+        account=account_record(Cert_Certification_Status__c="Certified"),
+        children=children,
+    )
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["a", "yes"], row_answers=[""]),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    result = processor.review(
+        [staged_row(revised_company_name="New Target Name")], tmp_path
+    )
+
+    assert ("Account", "account-1", {"Name": "New Target Name"}) in client.updated
+    assert not any(
+        object_name == "Account" and record_id.startswith("child-")
+        for object_name, record_id, _ in client.updated
+    )
+    queue = json.loads(result.queue_path.read_text(encoding="utf-8"))
+    name_change = next(
+        change
+        for queued_batch in queue["batches"]
+        for queued_row in queued_batch["rows"]
+        for change in queued_row["changes"]
+        if change["field"] == "Name"
+    )
+    assert name_change["salesforce"]["record_id"] == "account-1"
+
+
+def test_qualifying_target_with_qualifying_children_blocks_whole_case(tmp_path):
+    children = [
+        account_record(
+            Id="child-certified",
+            Name="Certified Child",
+            ParentId="account-1",
+            Cert_Certification_Status__c="Certified",
+        ),
+        account_record(
+            Id="child-initials",
+            Name="Initials Child",
+            ParentId="account-1",
+            Cert_Certification_Status__c="Initials",
+        ),
+    ]
+    client = FakeClient(
+        source=source_record(Revised_Company_Name__c="Unsafe Target Name"),
+        account=account_record(Cert_Certification_Status__c="Certified"),
+        children=children,
+    )
+    output = []
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder([""]),
+        output_fn=output.append,
+        now=NOW,
+    )
+
+    result = processor.review(
+        [staged_row(revised_company_name="Unsafe Target Name")], tmp_path
+    )
+
+    assert "hierarchy is unsafe to route automatically" in "\n".join(output)
+    assert client.updated == []
+    assert client.created == []
+    assert (
+        client.records[("Company_Profile_Change__c", "submission-1")]["Status__c"]
+        == "New"
+    )
+    assert client.records[("Case", "case-1")]["Status"] == "Pending"
+    audit = [
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(entry["result"] == "deferred manual follow-up" for entry in audit)
+    queue = json.loads(result.queue_path.read_text(encoding="utf-8"))
+    assert queue["batches"][0]["status"] == "blocked"
+
+
 def test_parent_conflict_is_acknowledged_and_blocks_whole_case_without_writes(
     tmp_path,
 ):
@@ -1885,6 +1989,7 @@ def test_blocked_parent_batch_advances_to_the_next_case(tmp_path):
     ]
     client = FakeClient(
         source=source_record(Revised_Company_Name__c="Parent Requested Name"),
+        account=account_record(Cert_Certification_Status__c="Certified"),
         children=children,
     )
     client.records.update(

@@ -21,8 +21,16 @@ identify the exact data involved.
 **Active Account**
 
 : For Profile Update processing, an Account whose certification status is
-  `Certified` or `Initials`. Only active direct child Accounts receive Account
-  field changes and Account-role links.
+  `Certified` or `Initials`. A qualifying submitted Account is updated normally
+  when it has no qualifying direct children. Qualifying direct children receive
+  Account field changes and Account-role links only when the submitted Account
+  is non-qualifying.
+
+**Hierarchy conflict**
+
+: A Profile Update routing shape where the submitted Account and at least one
+  direct child are both Active Accounts. The entire Case batch is deferred for
+  manual follow-up before any Salesforce write.
 
 **Application Case**
 
