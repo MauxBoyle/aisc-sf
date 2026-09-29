@@ -299,7 +299,8 @@ class _ParentRouting:
     def blocked(self) -> bool:
         """Return whether the hierarchy cannot safely receive automatic writes."""
         return bool(self.hierarchy_conflict_children) or (
-            self.is_parent and (not self.target_accounts or bool(self.conflicts))
+            not self.target_qualifies
+            and (not self.target_accounts or bool(self.conflicts))
         )
 
 
@@ -3602,17 +3603,21 @@ class InteractiveProfileUpdateProcessor:
             _display(account.get("Cert_Certification_Status__c"))
             in QUALIFYING_CERTIFICATION_STATUSES
         )
-        if not direct_children:
-            routing = _ParentRouting(account, (), (account,))
-            self._refresh_affected_account_queue(batch, routing)
-            return routing
-
         active_children = tuple(
             child
             for child in direct_children
             if _display(child.get("Cert_Certification_Status__c"))
             in QUALIFYING_CERTIFICATION_STATUSES
         )
+        if not direct_children:
+            routing = _ParentRouting(
+                account,
+                (),
+                (account,) if target_qualifies else (),
+                target_qualifies=target_qualifies,
+            )
+            self._refresh_affected_account_queue(batch, routing)
+            return routing
         hierarchy_conflict_children = active_children if target_qualifies else ()
         conflicts: list[ParentAccountFieldConflict] = []
         if active_children and not target_qualifies:

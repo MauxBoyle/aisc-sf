@@ -351,7 +351,9 @@ dictionaries. Parent Account preflight refetches only direct children and uses
 the submitted Account's status with exact `Certified` and `Initials` child
 statuses to choose a route. A qualifying target with no qualifying children is
 updated normally; a non-qualifying target routes safe Account and role-link work
-to qualifying children. A qualifying target with qualifying children emits a
+to qualifying children. A non-qualifying target with no qualifying direct
+children, including no direct children, is deferred for manual follow-up. A
+qualifying target with qualifying children emits a
 renderer-neutral hierarchy-conflict event and is blocked before any batch write;
 a non-qualifying target with no qualifying children retains the no-active-child
 event. Contact work remains shared and a new Contact stays owned by the

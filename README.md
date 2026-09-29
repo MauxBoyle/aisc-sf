@@ -680,7 +680,9 @@ never targets. The processor classifies the fresh hierarchy using the exact
 `Certified` and `Initials` statuses: a qualifying submitted Account with no
 qualifying children is updated normally; a non-qualifying submitted Account
 with qualifying children routes Account fields and Account-role links to those
-children. The staging CSV records this affected-Account context, and the queue
+children. A non-qualifying submitted Account with no qualifying direct children,
+including no direct children, is deferred for manual follow-up. The staging CSV
+records this affected-Account context, and the queue
 lists either the submitted Account for the normal route or the qualifying child
 IDs for the child route, while keeping Contact work shared.
 
@@ -696,8 +698,9 @@ If a qualifying submitted Account also has qualifying direct children, the CLI
 shows a dedicated hierarchy conflict and blocks the entire batch before any
 write. If child-routed values conflict, the CLI shows every conflicting field,
 its requested value, and every qualifying child's current name, ID, and value.
-If a non-qualifying Parent has direct children but none qualify, it shows their
-statuses instead. Each unsafe condition requires acknowledgement, records a
+If a non-qualifying Parent has no qualifying direct children, including no
+direct children, it shows their statuses when present. Each unsafe condition
+requires acknowledgement, records a
 `deferred manual follow-up` audit outcome, marks the whole Case batch `blocked`
 in the queue, leaves every source Profile Update and the Case open, and
 continues to the next Case. No Contact, Account, role, Case, or submission write

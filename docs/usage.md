@@ -1148,7 +1148,9 @@ are never selected. An Account is qualifying only when
 `Suspended`, blank, and all other statuses are excluded. A qualifying submitted
 Account with no qualifying direct children follows the ordinary target-Account
 route. A non-qualifying submitted Account with qualifying children routes
-Account fields and role links to those children.
+Account fields and role links to those children. A non-qualifying submitted
+Account with no qualifying direct children, including no direct children, is
+deferred for manual follow-up.
 
 Before the Case, Contacts, Accounts, role links, or source submissions can be
 changed, active children are compared for the ordinary Account fields and
@@ -1165,7 +1167,8 @@ It is never routed automatically. A relevant child-route value conflict
 produces a typed summary with the field label, requested value, and every
 qualifying child's current name, ID, and value. A non-qualifying Parent with no
 qualifying direct children produces a typed notice listing the direct children's
-statuses. The reviewer acknowledges any of these messages; the processor then
+statuses when present; this also applies when there are no direct children. The
+reviewer acknowledges any of these messages; the processor then
 writes a `deferred manual follow-up` audit event, marks the complete Case batch
 blocked, leaves every included Profile Update and the Case open, performs no
 Salesforce write for that batch, and advances to the next Case. An interruption
