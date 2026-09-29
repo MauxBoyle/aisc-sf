@@ -82,6 +82,7 @@ from .review_ui import (
     ParentAccountChildValue,
     ParentAccountConflict,
     ParentAccountFieldConflict,
+    ParentAccountHierarchyConflict,
     ParentAccountNoActiveChildren,
     ResponseEmail,
     ReviewChoice,
@@ -286,16 +287,21 @@ class _ParentRouting:
     direct_children: tuple[dict[str, Any], ...]
     target_accounts: tuple[dict[str, Any], ...]
     conflicts: tuple[ParentAccountFieldConflict, ...] = ()
+    target_qualifies: bool = False
+    hierarchy_conflict_children: tuple[dict[str, Any], ...] = ()
 
     @property
     def is_parent(self) -> bool:
-        """Return whether a parent Account routes changes to active direct children."""
-        return bool(self.direct_children)
+        """Return whether a non-qualifying target routes work through children."""
+        return bool(self.direct_children) and not self.target_qualifies
 
     @property
     def blocked(self) -> bool:
-        """Return whether parent routing has no active targets or field conflicts."""
-        return self.is_parent and (not self.target_accounts or bool(self.conflicts))
+        """Return whether the hierarchy cannot safely receive automatic writes."""
+        return bool(self.hierarchy_conflict_children) or (
+            not self.target_qualifies
+            and (not self.target_accounts or bool(self.conflicts))
+        )
 
 
 @dataclass(frozen=True)
@@ -3593,19 +3599,28 @@ class InteractiveProfileUpdateProcessor:
                 key=lambda child: _display(child.get("Id")),
             )
         )
-        if not direct_children:
-            routing = _ParentRouting(account, (), (account,))
-            self._refresh_affected_account_queue(batch, routing)
-            return routing
-
+        target_qualifies = (
+            _display(account.get("Cert_Certification_Status__c"))
+            in QUALIFYING_CERTIFICATION_STATUSES
+        )
         active_children = tuple(
             child
             for child in direct_children
             if _display(child.get("Cert_Certification_Status__c"))
             in QUALIFYING_CERTIFICATION_STATUSES
         )
+        if not direct_children:
+            routing = _ParentRouting(
+                account,
+                (),
+                (account,) if target_qualifies else (),
+                target_qualifies=target_qualifies,
+            )
+            self._refresh_affected_account_queue(batch, routing)
+            return routing
+        hierarchy_conflict_children = active_children if target_qualifies else ()
         conflicts: list[ParentAccountFieldConflict] = []
-        if active_children:
+        if active_children and not target_qualifies:
             seen: set[tuple[str, str]] = set()
             for field_name, label, requested in self._parent_field_requests(
                 batch, submissions_by_id
@@ -3636,8 +3651,10 @@ class InteractiveProfileUpdateProcessor:
         routing = _ParentRouting(
             account,
             direct_children,
-            active_children,
+            (account,) if target_qualifies else active_children,
             tuple(conflicts),
+            target_qualifies,
+            hierarchy_conflict_children,
         )
         self._refresh_affected_account_queue(batch, routing)
         return routing
@@ -3731,7 +3748,27 @@ class InteractiveProfileUpdateProcessor:
             "account_name", ""
         )
         parent_display = f"{parent_label or '(unnamed)'} ({batch.account_id})"
-        if routing.conflicts:
+        if routing.hierarchy_conflict_children:
+            self._display_event(
+                ParentAccountHierarchyConflict(
+                    ValueFragment(parent_display),
+                    tuple(
+                        ParentAccountChildValue(
+                            ValueFragment(_display(child.get("Id"))),
+                            ValueFragment(_display(child.get("Name")) or "(unnamed)"),
+                            ValueFragment(
+                                _display(child.get("Cert_Certification_Status__c"))
+                            ),
+                        )
+                        for child in routing.hierarchy_conflict_children
+                    ),
+                )
+            )
+            reason = (
+                "Submitted Account and qualifying direct children create an unsafe "
+                "hierarchy."
+            )
+        elif routing.conflicts:
             self._display_event(
                 ParentAccountConflict(
                     ValueFragment(parent_display),

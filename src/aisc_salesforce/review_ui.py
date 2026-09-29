@@ -195,6 +195,14 @@ class ParentAccountNoActiveChildren:
 
 
 @dataclass(frozen=True)
+class ParentAccountHierarchyConflict:
+    """A qualifying submitted Account with qualifying direct children."""
+
+    target: ValueFragment
+    children: tuple[ParentAccountChildValue, ...]
+
+
+@dataclass(frozen=True)
 class StagedRowSummary:
     """The safe-stop checkpoint shown before Salesforce writes."""
 
@@ -244,6 +252,7 @@ type ReviewEvent = (
     | ContactFieldConflict
     | ParentAccountConflict
     | ParentAccountNoActiveChildren
+    | ParentAccountHierarchyConflict
     | StagedRowSummary
     | AccountHistory
     | ResponseEmail

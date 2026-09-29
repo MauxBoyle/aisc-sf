@@ -1142,11 +1142,15 @@ Contact create or update. Contact identity and field updates therefore finish
 before role assignment can influence an Account lookup.
 
 At the start of every Case batch, the submitted Account and its direct children
-are fetched again. An Account with at least one direct child is treated as a
-Parent Account. Only that first child level is inspected, so grandchildren are
-never selected. Direct children are active only when
+are fetched again. Only that first child level is inspected, so grandchildren
+are never selected. An Account is qualifying only when
 `Cert_Certification_Status__c` is exactly `Certified` or `Initials`; `Dropped`,
-`Suspended`, blank, and all other statuses are excluded.
+`Suspended`, blank, and all other statuses are excluded. A qualifying submitted
+Account with no qualifying direct children follows the ordinary target-Account
+route. A non-qualifying submitted Account with qualifying children routes
+Account fields and role links to those children. A non-qualifying submitted
+Account with no qualifying direct children, including no direct children, is
+deferred for manual follow-up.
 
 Before the Case, Contacts, Accounts, role links, or source submissions can be
 changed, active children are compared for the ordinary Account fields and
@@ -1157,16 +1161,20 @@ processing. If relevant values agree, Contact reconciliation runs once. A newly
 created Contact keeps the Parent Account as `AccountId`, while the ordinary
 Account proposal and role-link review runs once for each active child.
 
-A relevant conflict produces a typed summary with the field label, requested
-value, and every active child's current name, ID, and value. A Parent with no
-active direct children produces a typed notice listing the direct children's
-statuses. The reviewer acknowledges either message; the processor then writes a
-`deferred manual follow-up` audit event, marks the complete Case batch blocked,
-leaves every included Profile Update and the Case open, performs no Salesforce
-write for that batch, and advances to the next Case. An interruption during the
-acknowledgement also occurs before any Salesforce write. On a later run, staging
-and preflight refetch the hierarchy and values, so manually reconciled work can
-be retried without carrying stale child routing.
+A qualifying submitted Account with qualifying direct children produces a
+dedicated hierarchy-conflict notice listing the target and qualifying children.
+It is never routed automatically. A relevant child-route value conflict
+produces a typed summary with the field label, requested value, and every
+qualifying child's current name, ID, and value. A non-qualifying Parent with no
+qualifying direct children produces a typed notice listing the direct children's
+statuses when present; this also applies when there are no direct children. The
+reviewer acknowledges any of these messages; the processor then
+writes a `deferred manual follow-up` audit event, marks the complete Case batch
+blocked, leaves every included Profile Update and the Case open, performs no
+Salesforce write for that batch, and advances to the next Case. An interruption
+during the acknowledgement also occurs before any Salesforce write. On a later
+run, staging and preflight refetch the hierarchy and values, so manually
+reconciled work can be retried without carrying stale child routing.
 
 Account-role proposals use friendly Contact names and emails for current and
 proposed values. Salesforce IDs remain available internally for record writes

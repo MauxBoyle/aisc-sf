@@ -674,13 +674,17 @@ values; warnings and blockers; statuses; prior Case activity; and
 identity keys. The CLI prints a short summary from each complete queue snapshot,
 while another `ReviewUI` implementation can use the full model for navigation.
 
-Parent Accounts are detected from fresh, direct-child Account records at the
-start of each Case batch. Traversal stops after that one level; grandchildren
-are never targets. Only direct children whose certification status is exactly
-`Certified` or `Initials` receive Account field changes or Account-role links.
-The staging CSV records this affected-Account context, and the queue expands
-child-specific Account and role-link entries to those child IDs while keeping
-Contact work shared.
+At the start of each Case batch, the submitted Account and its direct children
+are fetched again. Traversal stops after that one level; grandchildren are
+never targets. The processor classifies the fresh hierarchy using the exact
+`Certified` and `Initials` statuses: a qualifying submitted Account with no
+qualifying children is updated normally; a non-qualifying submitted Account
+with qualifying children routes Account fields and Account-role links to those
+children. A non-qualifying submitted Account with no qualifying direct children,
+including no direct children, is deferred for manual follow-up. The staging CSV
+records this affected-Account context, and the queue
+lists either the submitted Account for the normal route or the qualifying child
+IDs for the child route, while keeping Contact work shared.
 
 Before any Salesforce write in the batch, the processor compares the active
 children only for Account fields and role lookups actually submitted. Displayed
@@ -690,16 +694,19 @@ Contacts are reconciled once, newly created Contacts remain owned by the Parent
 Account, and each active child follows the normal Account and role review path.
 Inactive children are not updated.
 
-If active child values conflict, the CLI shows every conflicting field, its
-requested value, and every active child's current name, ID, and value. If the
-Parent has direct children but none are active, it shows their statuses instead.
-Either condition requires acknowledgement, records a `deferred manual
-follow-up` audit outcome, marks the whole Case batch `blocked` in the queue,
-leaves every source Profile Update and the Case open, and continues to the next
-Case. No Contact, Account, role, Case, or submission write occurs for that
-blocked batch. A later retry refetches Salesforce, so processing can continue
-normally after manual reconciliation. Rerun `review SESSION_ID`; the refresh
-stays limited to that captured session.
+If a qualifying submitted Account also has qualifying direct children, the CLI
+shows a dedicated hierarchy conflict and blocks the entire batch before any
+write. If child-routed values conflict, the CLI shows every conflicting field,
+its requested value, and every qualifying child's current name, ID, and value.
+If a non-qualifying Parent has no qualifying direct children, including no
+direct children, it shows their statuses when present. Each unsafe condition
+requires acknowledgement, records a
+`deferred manual follow-up` audit outcome, marks the whole Case batch `blocked`
+in the queue, leaves every source Profile Update and the Case open, and
+continues to the next Case. No Contact, Account, role, Case, or submission write
+occurs for that blocked batch. A later retry refetches Salesforce, so processing
+can continue normally after manual reconciliation. Rerun `review SESSION_ID`;
+the refresh stays limited to that captured session.
 
 Before each staged CSV row, the command shows the Account, submitter, and source
 Profile Update names. It also notes when contact details were supplemented or

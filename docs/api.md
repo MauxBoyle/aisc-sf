@@ -347,13 +347,19 @@ Contact ID is only a fallback for a partial proposal without an email. Different
 emails stay separate even when submitted for the same role, unless identity
 review resolves them to the same Salesforce Contact. Reviewer-facing Contact
 comparisons use labeled field lines, while the JSON audit retains structured
-dictionaries. Parent Account preflight refetches only direct children, filters
-them to exact `Certified` and `Initials` statuses, and emits renderer-neutral
-conflict or no-active-child events before any batch write. Safe Account and
-role-link proposals target each active child; Contact work remains shared and a
-new Contact stays owned by the submitted Parent Account. Acknowledged unsafe
-batches use the `DEFERRED_MANUAL` action status, a blocked queue state, and leave
-the source records and Case open for manual follow-up and retry. The
+dictionaries. Parent Account preflight refetches only direct children and uses
+the submitted Account's status with exact `Certified` and `Initials` child
+statuses to choose a route. A qualifying target with no qualifying children is
+updated normally; a non-qualifying target routes safe Account and role-link work
+to qualifying children. A non-qualifying target with no qualifying direct
+children, including no direct children, is deferred for manual follow-up. A
+qualifying target with qualifying children emits a
+renderer-neutral hierarchy-conflict event and is blocked before any batch write;
+a non-qualifying target with no qualifying children retains the no-active-child
+event. Contact work remains shared and a new Contact stays owned by the
+submitted Parent Account. Acknowledged unsafe batches use the `DEFERRED_MANUAL`
+action status, a blocked queue state, and leave the source records and Case open
+for manual follow-up and retry. The
 processor writes `review_audit.jsonl` after every result and
 `response_emails.txt` for successful Account changes and completed submitted
 roles. Profile Update closure and the Case's final status happen only after the

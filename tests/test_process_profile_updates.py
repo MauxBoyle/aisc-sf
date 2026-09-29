@@ -152,6 +152,7 @@ def account_record(**changes):
         "Cert_Accounting_Contact__c": "",
         "Cert_Marketing_Contact__c": "",
         "Cert_Safety_Contact__c": "",
+        "Cert_Certification_Status__c": "Certified",
     }
     record.update(changes)
     return record
@@ -566,6 +567,7 @@ def test_resumed_ambiguous_contact_reviews_all_qualifying_parent_children(tmp_pa
             Cert_Email__c="info@example.com",
             Cert_Phone__c="312.555.0100",
         ),
+        account=account_record(Cert_Certification_Status__c="Dropped"),
         children=children,
         contacts=[contact],
     )
@@ -1561,6 +1563,7 @@ def test_parent_routes_account_updates_to_active_direct_children_only(tmp_path):
     ]
     client = FakeClient(
         source=source_record(Revised_Company_Name__c="New Shared Name"),
+        account=account_record(Cert_Certification_Status__c="Dropped"),
         children=children,
     )
     processor = InteractiveProfileUpdateProcessor(
@@ -1618,6 +1621,110 @@ def test_parent_routes_account_updates_to_active_direct_children_only(tmp_path):
     assert {change["outcome"] for change in name_changes} == {"applied"}
 
 
+def test_qualifying_target_with_only_inactive_children_updates_target_account(tmp_path):
+    children = [
+        account_record(
+            Id="child-dropped",
+            ParentId="account-1",
+            Cert_Certification_Status__c="Dropped",
+        ),
+        account_record(
+            Id="child-suspended",
+            ParentId="account-1",
+            Cert_Certification_Status__c="Suspended",
+        ),
+        account_record(
+            Id="child-blank",
+            ParentId="account-1",
+            Cert_Certification_Status__c="",
+        ),
+        account_record(
+            Id="child-other",
+            ParentId="account-1",
+            Cert_Certification_Status__c="On Hold",
+        ),
+    ]
+    client = FakeClient(
+        source=source_record(Revised_Company_Name__c="New Target Name"),
+        account=account_record(Cert_Certification_Status__c="Certified"),
+        children=children,
+    )
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["a", "yes"], row_answers=[""]),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    result = processor.review(
+        [staged_row(revised_company_name="New Target Name")], tmp_path
+    )
+
+    assert ("Account", "account-1", {"Name": "New Target Name"}) in client.updated
+    assert not any(
+        object_name == "Account" and record_id.startswith("child-")
+        for object_name, record_id, _ in client.updated
+    )
+    queue = json.loads(result.queue_path.read_text(encoding="utf-8"))
+    name_change = next(
+        change
+        for queued_batch in queue["batches"]
+        for queued_row in queued_batch["rows"]
+        for change in queued_row["changes"]
+        if change["field"] == "Name"
+    )
+    assert name_change["salesforce"]["record_id"] == "account-1"
+
+
+def test_qualifying_target_with_qualifying_children_blocks_whole_case(tmp_path):
+    children = [
+        account_record(
+            Id="child-certified",
+            Name="Certified Child",
+            ParentId="account-1",
+            Cert_Certification_Status__c="Certified",
+        ),
+        account_record(
+            Id="child-initials",
+            Name="Initials Child",
+            ParentId="account-1",
+            Cert_Certification_Status__c="Initials",
+        ),
+    ]
+    client = FakeClient(
+        source=source_record(Revised_Company_Name__c="Unsafe Target Name"),
+        account=account_record(Cert_Certification_Status__c="Certified"),
+        children=children,
+    )
+    output = []
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder([""]),
+        output_fn=output.append,
+        now=NOW,
+    )
+
+    result = processor.review(
+        [staged_row(revised_company_name="Unsafe Target Name")], tmp_path
+    )
+
+    assert "hierarchy is unsafe to route automatically" in "\n".join(output)
+    assert client.updated == []
+    assert client.created == []
+    assert (
+        client.records[("Company_Profile_Change__c", "submission-1")]["Status__c"]
+        == "New"
+    )
+    assert client.records[("Case", "case-1")]["Status"] == "Pending"
+    audit = [
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(entry["result"] == "deferred manual follow-up" for entry in audit)
+    queue = json.loads(result.queue_path.read_text(encoding="utf-8"))
+    assert queue["batches"][0]["status"] == "blocked"
+
+
 def test_parent_conflict_is_acknowledged_and_blocks_whole_case_without_writes(
     tmp_path,
 ):
@@ -1643,6 +1750,7 @@ def test_parent_conflict_is_acknowledged_and_blocks_whole_case_without_writes(
     ]
     client = FakeClient(
         source=source_record(Revised_Company_Name__c="Requested Name"),
+        account=account_record(Cert_Certification_Status__c="Dropped"),
         children=children,
     )
     output = []
@@ -1703,11 +1811,50 @@ def test_parent_conflict_is_acknowledged_and_blocks_whole_case_without_writes(
     )
 
 
+def test_non_qualifying_target_without_children_is_deferred_without_salesforce_writes(
+    tmp_path,
+):
+    client = FakeClient(
+        source=source_record(Revised_Company_Name__c="Requested Name"),
+        account=account_record(Cert_Certification_Status__c="Dropped"),
+    )
+    output = []
+    feeder = Feeder([""])
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=feeder,
+        output_fn=output.append,
+        now=NOW,
+    )
+
+    result = processor.review(
+        [staged_row(revised_company_name="Requested Name")], tmp_path
+    )
+
+    assert "no direct child with status Certified or Initials" in "\n".join(output)
+    assert any("manual follow-up" in prompt.casefold() for prompt in feeder.prompts)
+    assert client.updated == []
+    assert client.created == []
+    assert (
+        client.records[("Company_Profile_Change__c", "submission-1")]["Status__c"]
+        == "New"
+    )
+    assert client.records[("Case", "case-1")]["Status"] == "Pending"
+    audit = [
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(entry["result"] == "deferred manual follow-up" for entry in audit)
+    queue = json.loads(result.queue_path.read_text(encoding="utf-8"))
+    assert queue["batches"][0]["status"] == "blocked"
+
+
 def test_parent_with_no_active_children_is_acknowledged_without_salesforce_writes(
     tmp_path,
 ):
     client = FakeClient(
         source=source_record(Revised_Company_Name__c="Requested Name"),
+        account=account_record(Cert_Certification_Status__c="Dropped"),
         children=[
             account_record(
                 Id="child-dropped",
@@ -1790,7 +1937,11 @@ def test_parent_preflight_compares_only_submitted_fields_and_normalizes_display_
         certification_resolution_action="create_contact",
     )
     processor = InteractiveProfileUpdateProcessor(
-        FakeClient(source=source, children=children),
+        FakeClient(
+            source=source,
+            account=account_record(Cert_Certification_Status__c="Dropped"),
+            children=children,
+        ),
         input_fn=Feeder([]),
         output_fn=lambda message: None,
         now=NOW,
@@ -1825,6 +1976,7 @@ def test_parent_role_lookup_conflict_blocks_before_contact_or_case_writes(tmp_pa
     ]
     client = FakeClient(
         source=source_record(Cert_Email__c="cert@example.com"),
+        account=account_record(Cert_Certification_Status__c="Dropped"),
         children=children,
     )
     output = []
@@ -1885,6 +2037,7 @@ def test_blocked_parent_batch_advances_to_the_next_case(tmp_path):
     ]
     client = FakeClient(
         source=source_record(Revised_Company_Name__c="Parent Requested Name"),
+        account=account_record(Cert_Certification_Status__c="Certified"),
         children=children,
     )
     client.records.update(
@@ -1972,6 +2125,7 @@ def test_parent_acknowledgement_interruption_writes_nothing_and_retry_refetches(
     ]
     client = FakeClient(
         source=source_record(Revised_Company_Name__c="Requested Name"),
+        account=account_record(Cert_Certification_Status__c="Dropped"),
         children=children,
     )
     row = staged_row(
@@ -4459,6 +4613,7 @@ def test_parent_role_response_uses_target_accounts_original_contact(tmp_path):
             Cert_Email__c="mary@example.com",
             Cert_Phone__c="312.555.0100",
         ),
+        account=account_record(Cert_Certification_Status__c="Dropped"),
         children=[child],
         contacts=[child_mike, mary],
     )
