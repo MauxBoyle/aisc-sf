@@ -35,6 +35,9 @@ Set these values in `.env`:
   Salesforce org.
 - `EXTERNAL_USER_ROLE_ID` (optional): the external User role required by that
   license, when applicable.
+- `EMAIL_USERNAME` and `EMAIL_APP_PASSWORD`: the Gmail account and Gmail App
+  Password used only by `monthly-snapshot-reminder`. Do not use a normal Gmail
+  sign-in password.
 
 If a required `process-profile-updates` provisioning value is missing or blank,
 the review records the configuration error in its audit and keeps the Case and
@@ -82,6 +85,26 @@ Create a read-only snapshot:
 ```bash
 uv run aisc_salesforce snapshot
 ```
+
+Preview the monthly snapshot checklist without reading email credentials or
+sending mail:
+
+```bash
+uv run aisc_salesforce monthly-snapshot-reminder
+uv run aisc_salesforce monthly-snapshot-reminder --run-date 2026-09-30
+```
+
+Send it after configuring Gmail credentials in `.env`:
+
+```bash
+uv run aisc_salesforce monthly-snapshot-reminder --send --test
+uv run aisc_salesforce monthly-snapshot-reminder --send
+```
+
+The test command sends only to `EMAIL_USERNAME`. A normal send addresses the
+version-controlled recipients in `config/monthly_snapshot_recipients.txt` and
+privately copies the sender. See [the monthly reminder instructions](docs/usage.md#monthly-snapshot-reminder-command)
+for the Windows Task Scheduler setup.
 
 Audit recently stored Salesforce picklist values against the Python enum
 catalog:
