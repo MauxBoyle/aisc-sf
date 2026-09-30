@@ -262,6 +262,65 @@ uv run aisc_salesforce snapshot
 uv run aisc_salesforce snapshot --output-dir /secure/snapshot-location
 ```
 
+## Monthly snapshot reminder command
+
+`monthly-snapshot-reminder` provides the monthly checklist for 15 manually run
+Salesforce, iMIS, and Tableau reports. It does not download reports, connect to
+their source systems, upload to Google Drive, or create report files. Every
+report starts as `Not Run` in this release.
+
+Preview the plain-text email first. Preview mode does not read `.env` or send
+email:
+
+```bash
+uv run aisc_salesforce monthly-snapshot-reminder
+uv run aisc_salesforce monthly-snapshot-reminder --run-date 2026-09-30
+```
+
+The default date is today in the `America/Chicago` time zone. `--run-date`
+accepts an ISO calendar date (`YYYY-MM-DD`) for a rerun and substitutes its
+`YYMMDD` value into every expected filename. In particular,
+`Applications_allStatus_YYMMDD` intentionally has no file extension.
+
+To send, add a Gmail address and a Gmail App Password to the private `.env`
+file:
+
+```text
+EMAIL_USERNAME=sender@example.org
+EMAIL_APP_PASSWORD=your-gmail-app-password
+```
+
+Use a Gmail App Password, not the account's usual sign-in password. First test
+delivery only to the sender, then send the live reminder:
+
+```bash
+uv run --env-file .env aisc_salesforce monthly-snapshot-reminder --send --test
+uv run --env-file .env aisc_salesforce monthly-snapshot-reminder --send
+```
+
+`--test` requires `--send` and delivers only to `EMAIL_USERNAME`. A normal
+send uses `config/monthly_snapshot_recipients.txt`. The file accepts one valid
+email address per line; blank lines and lines beginning with `#` are ignored,
+and duplicate addresses are sent only once. The sender receives a private BCC
+copy on normal sends. Gmail is contacted with encrypted SMTP on port 465 and a
+30-second timeout. A delivery failure reports only a generic message, which
+keeps credentials and provider responses out of scheduler logs.
+
+### Windows Task Scheduler
+
+Create a task that runs monthly at the desired time. Set **Program/script** to
+the path for `uv` (for example, `C:\\Users\\you\\.local\\bin\\uv.exe`), set
+**Add arguments** to:
+
+```text
+run --env-file .env aisc_salesforce monthly-snapshot-reminder --send
+```
+
+Set **Start in** to this repository's folder. This matters because the command
+reads `.env` and `config/monthly_snapshot_recipients.txt` relative to that
+folder. Run the preview and `--test` command manually before enabling the live
+task.
+
 ## Application snapshot command
 
 Generate an on-demand, read-only cross-tab of qualifying Application Cases:

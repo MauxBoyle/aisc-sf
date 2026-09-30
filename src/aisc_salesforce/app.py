@@ -7,7 +7,9 @@ import inspect
 import os
 import sys
 from collections.abc import Callable
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .application_snapshot import (
     ApplicationSnapshotError,
@@ -22,6 +24,14 @@ from .cli_participant_drop import CLIParticipantDropInteraction
 from .cli_review_ui import CLIReviewUI, ColorMode, print_profile_error
 from .dictionary import DictionaryError, load_export_plan
 from .imis_contacts import ContactConsolidationError, consolidate_contactbasic
+from .monthly_snapshot_reminder import (
+    DEFAULT_RECIPIENTS_PATH,
+    GmailReminderSender,
+    MonthlySnapshotReminderError,
+    email_configuration,
+    load_recipients,
+    render_reminder,
+)
 from .participant_drop import ParticipantDropAction, ParticipantDropService
 from .participant_user_provisioning import ParticipantUserProvisioningService
 from .picklist_audit import (
@@ -197,6 +207,22 @@ def main(
         "participant-drop",
         help="Interactively record that a participant withdrawal is in progress.",
     )
+    reminder_parser = subparsers.add_parser(
+        "monthly-snapshot-reminder",
+        help="Preview or email the monthly snapshot checklist.",
+    )
+    reminder_parser.add_argument(
+        "--run-date",
+        help="Calendar date to use for a rerun (YYYY-MM-DD; default: today in Central time).",
+    )
+    reminder_parser.add_argument(
+        "--send", action="store_true", help="Email the checklist through Gmail."
+    )
+    reminder_parser.add_argument(
+        "--test",
+        action="store_true",
+        help="With --send, deliver only to EMAIL_USERNAME.",
+    )
     args = parser.parse_args(argv)
     if args.command == "snapshot":
         try:
@@ -335,6 +361,20 @@ def main(
         except (SalesforceError, ValueError) as error:
             print(f"Participant drop failed: {error}", file=sys.stderr)
             return 1
+    if args.command == "monthly-snapshot-reminder":
+        if args.test and not args.send:
+            print("Monthly snapshot reminder --test requires --send.", file=sys.stderr)
+            return 1
+        try:
+            return _run_monthly_snapshot_reminder(
+                run_date=_parse_reminder_date(args.run_date),
+                send=args.send,
+                test=args.test,
+                output_fn=output_fn,
+            )
+        except MonthlySnapshotReminderError as error:
+            print(f"Monthly snapshot reminder failed: {error}", file=sys.stderr)
+            return 1
     return 1
 
 
@@ -461,6 +501,45 @@ def _run_participant_drop(
     credentials = get_credentials(environment)
     auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
     ParticipantDropService(SalesforceClient(auth)).run(interaction)
+    return 0
+
+
+def _parse_reminder_date(value: str | None) -> date:
+    """Use a supplied ISO date or today's date in the Central time zone."""
+    if value is None:
+        return datetime.now(ZoneInfo("America/Chicago")).date()
+    try:
+        return date.fromisoformat(value)
+    except ValueError as error:
+        raise MonthlySnapshotReminderError("--run-date must use YYYY-MM-DD.") from error
+
+
+def _run_monthly_snapshot_reminder(
+    *,
+    run_date: date,
+    send: bool,
+    test: bool,
+    output_fn: Callable[[str], None] = print,
+) -> int:
+    """Preview the checklist, or load private email settings and deliver it."""
+    if not send:
+        output_fn(render_reminder(run_date))
+        output_fn("Preview only; no email was sent.")
+        return 0
+
+    _load_dotenv(Path(".env"))
+    username, app_password = email_configuration(dict(os.environ))
+    recipients = load_recipients(DEFAULT_RECIPIENTS_PATH)
+    try:
+        GmailReminderSender(username, app_password).send(
+            run_date=run_date, recipients=recipients, test=test
+        )
+    except Exception as error:
+        raise MonthlySnapshotReminderError("Email delivery was not completed.") from error
+    if test:
+        output_fn("Monthly snapshot reminder test email sent to the configured sender.")
+    else:
+        output_fn("Monthly snapshot reminder email sent to configured recipients.")
     return 0
 
 
