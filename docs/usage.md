@@ -639,6 +639,45 @@ subjects, while a successfully corrected subject begins with `AISC Profile
 Update`; it will not be changed again. Legacy Cases outside the seven-date
 window remain unchanged.
 
+## Contact email audit command
+
+Create a read-only CSV for reviewing every Salesforce Contact, including
+Contacts with a blank Email field:
+
+```bash
+uv run aisc_salesforce audit-contact-emails
+uv run aisc_salesforce audit-contact-emails --output /secure/contact-email-audit.csv
+```
+
+The default output is `reports/contact_email_audit.csv`. The command queries
+only `Id`, `FirstName`, `MiddleName`, `LastName`, `Suffix`, and `Email`; it does
+not create, update, or delete Salesforce records. Rows are sorted by Contact
+ID and include the original Contact values plus `email_local_part`,
+`email_domain`, `local_part_pattern`, `name_match_status`, `account_kind`,
+`domain_kind`, `review_reason`, `duplicate_email_count`, and
+`duplicate_email_contact_ids`. Multiple review reasons are separated with `|`.
+
+`config/email_name_variants.csv` has the exact headers
+`canonical_name,variant`. Add one nickname relationship per row; names are
+compared case-insensitively after accents, whitespace, dots, hyphens,
+underscores, and apostrophes are normalized. `config/consumer_email_domains.txt`
+has one domain per line. Add an address provider there when it should be
+classified as a consumer domain; any otherwise valid domain not in that file is
+classified as an organization domain.
+
+Only these local parts are recognized as role addresses: `ap`, `ar`,
+`accounting`, `accounts_payable`, `billing`, `info`, `invoices`, `qa`, and
+`qc`. `postmaster` and a local part beginning `verify-` are system addresses.
+Those lists are deliberately narrow so ordinary personal addresses are not
+silently relabeled.
+
+The findings are review signals, not proof that a person owns an email address
+or that it can receive mail. In particular, cultural name ordering, legal-name
+changes, and nicknames absent from the configuration require a human decision.
+Profile-update staging also writes these signals in its `email_assessments` JSON
+column and adds warnings, but it does not change contact matching, approvals,
+or automated Salesforce writes.
+
 ## Stage Profile Updates command
 
 Create a read-only CSV of every New profile-change submission:

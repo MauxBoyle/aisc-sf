@@ -236,6 +236,16 @@ classification flag or is sent to manual review; empty CRG text has no flags.
 See the [project plan](docs/project-plan.md) for the matching rules and later
 guided review work.
 
+Create a read-only Contact email consistency report:
+
+```bash
+uv run aisc_salesforce audit-contact-emails
+```
+
+It writes `reports/contact_email_audit.csv` by default. The report is a manual
+review aid only: it does not change Salesforce and cannot prove ownership or
+deliverability of an email address. See [the audit details](docs/usage.md#contact-email-audit-command).
+
 Process recent audit notes and New company profile submissions:
 
 ```bash
