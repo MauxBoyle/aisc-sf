@@ -583,6 +583,41 @@ Apply mode sends a PATCH containing only `Subject`; omitted Case fields are not
 changed. See Salesforce's
 [record-update guidance](https://developer.salesforce.com/docs/marketing/marketing-cloud-growth/guide/mc-manage-objects-update-rest.html).
 
+## Fill SA-NYC Audit contacts command
+
+Preview missing contact lookups on qualifying SA-NYC Audits (the default):
+
+```bash
+uv run aisc_salesforce fill-sa-nyc-audit-contacts
+```
+
+The command selects `SA-NYC` Audits created on or after the exact UTC instant
+thirteen calendar months before the command starts, and only when the related
+Account has `NY_Program_Participant__c = true`. If the earlier month lacks the
+same day number, its final day is used. It first describes both `Cert_Audit__c`
+and `Account`; if one of the required fields is missing or is not a Salesforce
+reference field, it stops before querying or writing.
+
+These lookups are filled only when the Audit value is blank:
+
+- Principal: `Principal_Contact__c` from Account `Cert_Principal_Contact__c`
+- AP: `AP_Contact__c` from Account `Cert_Accounting_Contact__c`
+- QC: `QC_Contact__c` from Account `Cert_Marketing_Contact__c`
+- New York: `New_York_Contact__c` from Account `Cert_Safety_Contact__c`
+
+After reviewing the preview, pass `--apply` to allow writes:
+
+```bash
+uv run aisc_salesforce fill-sa-nyc-audit-contacts --apply
+```
+
+Apply mode sends at most one PATCH per eligible Audit. Its payload contains
+only blank Audit roles with available Account contact IDs; populated and
+unavailable roles are left untouched. A failed PATCH does not stop later
+Audits. Each role result is printed, followed by qualifying, updated (or would
+update), unavailable, and failed totals. The command returns nonzero only when
+a PATCH fails, and it never creates or deletes Salesforce records.
+
 ### Correction window and parsing rules
 
 The query covers seven `America/Chicago` calendar dates: today plus the six

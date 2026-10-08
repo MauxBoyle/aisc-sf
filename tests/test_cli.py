@@ -10,6 +10,7 @@ from aisc_salesforce.application_snapshot import (
     ApplicationSnapshotResult,
 )
 from aisc_salesforce.dictionary import ExportField
+from aisc_salesforce.fill_sa_nyc_audit_contacts import AuditContactFillCounts
 from aisc_salesforce.imis_contacts import ContactConsolidationError
 from aisc_salesforce.picklist_audit import (
     PicklistAuditFinding,
@@ -987,6 +988,53 @@ def test_rename_cli_previews_by_default_and_apply_is_explicit(monkeypatch):
     assert app.main(["rename-profile-update-cases"]) == 0
     assert app.main(["rename-profile-update-cases", "--apply"]) == 0
     assert [apply for apply, _ in calls] == [False, True]
+
+
+def test_sa_nyc_audit_contact_cli_previews_by_default_and_apply_is_explicit(
+    monkeypatch,
+):
+    calls = []
+
+    def run(*, apply, output_fn):
+        calls.append((apply, output_fn))
+        return 0
+
+    monkeypatch.setattr(app, "_run_fill_sa_nyc_audit_contacts", run)
+
+    assert app.main(["fill-sa-nyc-audit-contacts"]) == 0
+    assert app.main(["fill-sa-nyc-audit-contacts", "--apply"]) == 0
+    assert [apply for apply, _ in calls] == [False, True]
+
+
+def test_sa_nyc_audit_contact_cli_prints_totals_and_fails_for_patch_failures(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(app, "_load_dotenv", lambda path: None)
+    monkeypatch.setattr(app, "get_credentials", lambda environment: {"ok": "yes"})
+    monkeypatch.setattr(app, "get_oauth_url", lambda environment: "token-url")
+    monkeypatch.setattr(
+        app, "request_access_token", lambda credentials, oauth_url: "auth"
+    )
+    monkeypatch.setattr(app, "SalesforceClient", lambda auth: "client")
+
+    class Service:
+        def __init__(self, client, *, output_fn):
+            assert client == "client"
+
+        def run(self, *, apply):
+            assert apply is True
+            return AuditContactFillCounts(
+                qualifying=3, updated=1, unavailable=2, failed=1
+            )
+
+    monkeypatch.setattr(app, "SANYCAuditContactFillService", Service)
+
+    assert app._run_fill_sa_nyc_audit_contacts(apply=True) == 1
+    output = capsys.readouterr().out
+    assert "qualifying: 3" in output
+    assert "updated: 1" in output
+    assert "unavailable: 2" in output
+    assert "failed: 1" in output
 
 
 def test_rename_cli_prints_totals_and_fails_only_for_update_failures(
