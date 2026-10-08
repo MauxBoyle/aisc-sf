@@ -24,6 +24,10 @@ from .cli_participant_drop import CLIParticipantDropInteraction
 from .cli_review_ui import CLIReviewUI, ColorMode, print_profile_error
 from .dictionary import DictionaryError, load_export_plan
 from .email_audit import ContactEmailAuditService, write_contact_email_audit
+from .fill_sa_nyc_audit_contacts import (
+    AuditContactMetadataError,
+    SANYCAuditContactFillService,
+)
 from .imis_contacts import ContactConsolidationError, consolidate_contactbasic
 from .monthly_snapshot_reminder import (
     DEFAULT_RECIPIENTS_PATH,
@@ -182,6 +186,15 @@ def main(
         action="store_true",
         help="Apply the previewed Subject-only Case updates.",
     )
+    fill_audit_contacts_parser = subparsers.add_parser(
+        "fill-sa-nyc-audit-contacts",
+        help="Preview filling missing SA-NYC Audit contacts from participant Accounts.",
+    )
+    fill_audit_contacts_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply the previewed missing Audit contact lookup updates.",
+    )
     contacts_parser = subparsers.add_parser(
         "consolidate-imis-contacts",
         help="Merge the newest dated iMIS CSContactBasic export.",
@@ -326,6 +339,15 @@ def main(
             )
         except (SalesforceError, OSError) as error:
             print(f"Rename profile update Cases failed: {error}", file=sys.stderr)
+            return 1
+    if args.command == "fill-sa-nyc-audit-contacts":
+        try:
+            return _run_fill_sa_nyc_audit_contacts(
+                apply=args.apply,
+                output_fn=output_fn,
+            )
+        except (AuditContactMetadataError, SalesforceError, OSError) as error:
+            print(f"SA-NYC Audit contact fill failed: {error}", file=sys.stderr)
             return 1
     if args.command == "consolidate-imis-contacts":
         try:
@@ -884,6 +906,29 @@ def _run_rename_profile_update_cases(
     value = counts.updated if apply else counts.would_update
     output_fn(f"{label}: {value}")
     output_fn(f"skipped: {counts.skipped}")
+    output_fn(f"failed: {counts.failed}")
+    return 1 if counts.failed else 0
+
+
+def _run_fill_sa_nyc_audit_contacts(
+    *,
+    apply: bool,
+    output_fn: Callable[[str], None] = print,
+) -> int:
+    """Connect to Salesforce and preview or fill missing SA-NYC Audit contacts."""
+    _load_dotenv(Path(".env"))
+    environment = dict(os.environ)
+    credentials = get_credentials(environment)
+    auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
+    counts = SANYCAuditContactFillService(
+        SalesforceClient(auth), output_fn=output_fn
+    ).run(apply=apply)
+    output_fn("SA-NYC Audit contact fill complete:")
+    output_fn(f"qualifying: {counts.qualifying}")
+    label = "updated" if apply else "would update"
+    value = counts.updated if apply else counts.would_update
+    output_fn(f"{label}: {value}")
+    output_fn(f"unavailable: {counts.unavailable}")
     output_fn(f"failed: {counts.failed}")
     return 1 if counts.failed else 0
 

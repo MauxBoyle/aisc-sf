@@ -29,6 +29,22 @@ APPLICATION_AUDIT_FIELDS = (
     "Cert_Audit_Type__c",
 )
 
+SA_NYC_AUDIT_CONTACT_FIELDS = (
+    "Id",
+    "CreatedDate",
+    "Cert_Audit_Type__c",
+    "Cert_Account__c",
+    "Principal_Contact__c",
+    "AP_Contact__c",
+    "QC_Contact__c",
+    "New_York_Contact__c",
+    "Cert_Account__r.NY_Program_Participant__c",
+    "Cert_Account__r.Cert_Principal_Contact__c",
+    "Cert_Account__r.Cert_Accounting_Contact__c",
+    "Cert_Account__r.Cert_Marketing_Contact__c",
+    "Cert_Account__r.Cert_Safety_Contact__c",
+)
+
 # Profile Update automation and staging
 PROFILE_AUDIT_FIELDS = (
     "Id",
@@ -167,7 +183,11 @@ CODE_QUERIED_FIELDS: dict[str, tuple[str, ...]] = {
         *STAGING_CASE_FIELDS,
         *RENAME_CASE_FIELDS,
     ),
-    "Cert_Audit__c": (*APPLICATION_AUDIT_FIELDS, *PROFILE_AUDIT_FIELDS),
+    "Cert_Audit__c": (
+        *APPLICATION_AUDIT_FIELDS,
+        *PROFILE_AUDIT_FIELDS,
+        *SA_NYC_AUDIT_CONTACT_FIELDS,
+    ),
     "Company_Profile_Change__c": SUBMISSION_FIELDS,
     "Contact": (*CONTACT_FIELDS, *CONTACT_REVIEW_FIELDS, *CONTACT_MATCH_FIELDS),
 }

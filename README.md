@@ -464,6 +464,43 @@ Both modes print per-Case results and totals for `matched`, `updated` or
 `would update`, `skipped`, and `failed`. A safe rerun ignores already-corrected
 AISC subjects.
 
+### Fill SA-NYC Audit contacts
+
+`fill-sa-nyc-audit-contacts` previews missing SA-NYC Audit contact lookups by
+default:
+
+```bash
+uv run aisc_salesforce fill-sa-nyc-audit-contacts
+```
+
+It considers only `SA-NYC` Audits created in the rolling thirteen calendar
+months ending at the command's UTC start time, where the related Account has
+`NY_Program_Participant__c = true`. The lower time boundary is the same UTC
+instant thirteen calendar months earlier; if that month lacks the matching day,
+its final day is used.
+Before querying, it describes `Cert_Audit__c` and `Account` and stops safely if
+any mapped contact field is missing or is not a Salesforce lookup/reference.
+
+The mappings are Principal: `Principal_Contact__c` from
+`Cert_Principal_Contact__c`; AP: `AP_Contact__c` from
+`Cert_Accounting_Contact__c`; QC: `QC_Contact__c` from
+`Cert_Marketing_Contact__c`; and New York: `New_York_Contact__c` from
+`Cert_Safety_Contact__c`.
+
+After reviewing the per-role preview, explicitly enable PATCH-only writes:
+
+```bash
+uv run aisc_salesforce fill-sa-nyc-audit-contacts --apply
+```
+
+Only blank Audit lookups with an available Account contact are included. One
+Audit PATCH can fill several roles, contains only those fields, and never
+overwrites a populated lookup. Unavailable Account roles are reported without
+a write. The command continues after an individual PATCH failure, reports
+qualifying, updated (or would update), unavailable, and failed totals, and
+exits nonzero only if a PATCH fails. It does not create or delete Salesforce
+records.
+
 ### Profile Update staging
 
 `stage-profile-updates` reads every submission whose `Status__c` is `New`. It
