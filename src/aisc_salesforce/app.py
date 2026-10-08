@@ -23,6 +23,7 @@ from .audit_review_outcomes import (
 from .cli_participant_drop import CLIParticipantDropInteraction
 from .cli_review_ui import CLIReviewUI, ColorMode, print_profile_error
 from .dictionary import DictionaryError, load_export_plan
+from .email_audit import ContactEmailAuditService, write_contact_email_audit
 from .imis_contacts import ContactConsolidationError, consolidate_contactbasic
 from .monthly_snapshot_reminder import (
     DEFAULT_RECIPIENTS_PATH,
@@ -109,6 +110,16 @@ def main(
         type=Path,
         default=Path("audit_review_outcomes.csv"),
         help="CSV file to create.",
+    )
+    email_audit_parser = subparsers.add_parser(
+        "audit-contact-emails",
+        help="Create a read-only Contact email consistency report.",
+    )
+    email_audit_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("reports/contact_email_audit.csv"),
+        help="CSV report file to create.",
     )
     subparsers.add_parser(
         "profile-updates",
@@ -244,6 +255,12 @@ def main(
             return _run_audit_review_outcomes(args.output, output_fn=output_fn)
         except (SalesforceError, OSError) as error:
             print(f"Audit Review outcome export failed: {error}", file=sys.stderr)
+            return 1
+    if args.command == "audit-contact-emails":
+        try:
+            return _run_audit_contact_emails(args.output, output_fn=output_fn)
+        except (SalesforceError, OSError, ValueError) as error:
+            print(f"Contact email audit failed: {error}", file=sys.stderr)
             return 1
     if args.command == "profile-updates":
         try:
@@ -611,6 +628,26 @@ def _run_audit_review_outcomes(
     result_path = write_audit_review_outcomes(rows, output_path)
     output_fn(f"Audit Review outcome export complete: {result_path}")
     output_fn(f"Audit Reviews: {len(rows)}")
+    output_fn("No Salesforce records were changed.")
+    return 0
+
+
+def _run_audit_contact_emails(
+    output_path: Path,
+    *,
+    output_fn: Callable[[str], None] = print,
+) -> int:
+    """Connect to Salesforce and create a Contact report without mutations."""
+    _load_dotenv(Path(".env"))
+    environment = dict(os.environ)
+    credentials = get_credentials(environment)
+    auth = request_access_token(credentials, oauth_url=get_oauth_url(environment))
+    rows = ContactEmailAuditService(SalesforceClient(auth)).build()
+    result_path = write_contact_email_audit(rows, output_path)
+    flagged_count = sum(1 for row in rows if row["review_reason"])
+    output_fn(f"Contact email audit complete: {result_path}")
+    output_fn(f"Contacts: {len(rows)}")
+    output_fn(f"flagged: {flagged_count}")
     output_fn("No Salesforce records were changed.")
     return 0
 

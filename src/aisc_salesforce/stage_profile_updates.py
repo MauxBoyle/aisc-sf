@@ -29,6 +29,7 @@ from .contact_resolution import (
 from .contact_resolution import (
     normalize_email as normalize_resolution_email,
 )
+from .email_audit import assess_email
 from .profile_update_subjects import subject_has_profile_update
 from .profile_updates import escape_soql_string
 from .queried_fields import (
@@ -91,6 +92,7 @@ SHARED_COLUMNS = [
     "submitter_name",
     "submitter_email",
     "submitter_phone",
+    "email_assessments",
     "contact_resolutions",
     "comments",
     "personnel_notes",
@@ -447,6 +449,7 @@ class ProfileUpdateStagingService:
             contacts,
             warnings,
         )
+        row["email_assessments"] = _build_email_assessments(row, merged_roles, warnings)
         row["has_contact_derived_values"] = (
             "true" if has_contact_derived_values else "false"
         )
@@ -687,6 +690,42 @@ def _build_contact_resolutions(
         ensure_ascii=False,
         sort_keys=True,
     )
+
+
+def _build_email_assessments(
+    row: dict[str, str], roles: list[MergedRole], warnings: list[str]
+) -> str:
+    """Record non-blocking email review signals for submitted people and roles."""
+    items: list[dict[str, Any]] = []
+    first_name, last_name = _split_person_name(row["submitter_name"])
+    submitted = [("submitter", first_name, "", last_name, row["submitter_email"])]
+    submitted.extend(
+        (
+            role.definition.prefix,
+            role.values.get("first_name", ""),
+            "",
+            role.values.get("last_name", ""),
+            role.values.get("email", ""),
+        )
+        for role in roles
+        if role.values.get("email", "")
+    )
+    for source, first, middle, last, email in submitted:
+        assessment = assess_email(first, middle, last, "", email)
+        item = {
+            "source": source,
+            "first_name": first,
+            "middle_name": middle,
+            "last_name": last,
+            "email": email,
+            **assessment.as_dict(),
+        }
+        items.append(item)
+        if assessment.review_reasons:
+            warnings.append(
+                f"Email review ({source}): {', '.join(assessment.review_reasons)}."
+            )
+    return json.dumps(items, ensure_ascii=False, sort_keys=True)
 
 
 def _group_submissions(

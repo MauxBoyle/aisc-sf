@@ -30,6 +30,47 @@ def test_user_sync_config_cli_runs_the_read_only_check(monkeypatch, capsys):
     assert capsys.readouterr().err == ""
 
 
+def test_contact_email_audit_cli_reports_the_output_and_read_only_status(
+    monkeypatch, tmp_path
+):
+    output = []
+    monkeypatch.setattr(app, "_load_dotenv", lambda path: None)
+    monkeypatch.setattr(
+        app.os, "environ", {"SF_CLIENT_ID": "id", "SF_CLIENT_SECRET": "secret"}
+    )
+    monkeypatch.setattr(app, "get_credentials", lambda values: values)
+    monkeypatch.setattr(app, "get_oauth_url", lambda values: "token-url")
+    monkeypatch.setattr(
+        app, "request_access_token", lambda credentials, oauth_url: "auth"
+    )
+    monkeypatch.setattr(app, "SalesforceClient", lambda auth: "client")
+
+    class Service:
+        def __init__(self, client):
+            assert client == "client"
+
+        def build(self):
+            return [{"review_reason": "name_no_match"}, {"review_reason": ""}]
+
+    monkeypatch.setattr(app, "ContactEmailAuditService", Service)
+    destination = tmp_path / "emails.csv"
+    monkeypatch.setattr(app, "write_contact_email_audit", lambda rows, path: path)
+
+    assert (
+        app.main(
+            ["audit-contact-emails", "--output", str(destination)],
+            output_fn=output.append,
+        )
+        == 0
+    )
+    assert output == [
+        f"Contact email audit complete: {destination}",
+        "Contacts: 2",
+        "flagged: 1",
+        "No Salesforce records were changed.",
+    ]
+
+
 def test_participant_drop_cli_runs_interactive_workflow(monkeypatch):
     output = []
     received = {}

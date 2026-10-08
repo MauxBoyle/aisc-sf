@@ -295,6 +295,25 @@ def test_staging_normalizes_submitter_and_every_submitted_role_consistently():
         assert resolutions[expected["email"]] == expected
 
 
+def test_staging_records_email_assessments_as_non_blocking_warnings():
+    record = submission(
+        Name__c="Jane Submitter",
+        Email__c="jane.submiter@example.com",
+        Cert_First_Name__c="Accounts",
+        Cert_Last_Name__c="Payable",
+        Cert_Email__c="ap@example.com",
+    )
+
+    result, _ = stage([record], accounts=[account(ParentId="")])
+
+    assessments = json.loads(result.rows[0]["email_assessments"])
+    assert [item["source"] for item in assessments] == ["submitter", "certification"]
+    assert assessments[0]["name_match_status"] == "near_match"
+    assert assessments[1]["account_kind"] == "role"
+    assert "Email review (submitter): possible_name_typo." in result.rows[0]["warnings"]
+    assert "Email review (certification): role_address." in result.rows[0]["warnings"]
+
+
 def test_staging_queries_the_parent_account_as_part_of_the_family():
     _, client = stage([submission()], accounts=[account()])
 
