@@ -110,8 +110,8 @@ def load_consumer_domains(path: Path) -> frozenset[str]:
 
 
 def load_email_audit_config(config_dir: Path | None = None) -> EmailAuditConfig:
-    """Load the repository's editable audit configuration files."""
-    directory = config_dir or Path(__file__).resolve().parents[2] / "config"
+    """Load the packaged audit configuration, or files from ``config_dir``."""
+    directory = config_dir or Path(__file__).parent / "data"
     return EmailAuditConfig(
         load_name_variants(directory / "email_name_variants.csv"),
         load_consumer_domains(directory / "consumer_email_domains.txt"),

@@ -5,6 +5,7 @@ from aisc_salesforce.email_audit import (
     REPORT_COLUMNS,
     ContactEmailAuditService,
     assess_email,
+    load_email_audit_config,
     load_consumer_domains,
     load_name_variants,
     write_contact_email_audit,
@@ -50,6 +51,13 @@ def test_configuration_loaders_accept_the_versioned_formats(tmp_path):
 
     assert load_name_variants(variants)["alex"] == frozenset({"alex", "alexander"})
     assert load_consumer_domains(domains) == frozenset({"gmail.com"})
+
+
+def test_default_configuration_loads_from_package_data():
+    config = load_email_audit_config()
+
+    assert "alex" in config.name_variants
+    assert "gmail.com" in config.consumer_domains
 
 
 def test_audit_fetches_all_contacts_and_writes_a_stable_csv(tmp_path):

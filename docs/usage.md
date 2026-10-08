@@ -657,10 +657,10 @@ ID and include the original Contact values plus `email_local_part`,
 `domain_kind`, `review_reason`, `duplicate_email_count`, and
 `duplicate_email_contact_ids`. Multiple review reasons are separated with `|`.
 
-`config/email_name_variants.csv` has the exact headers
+`src/aisc_salesforce/data/email_name_variants.csv` has the exact headers
 `canonical_name,variant`. Add one nickname relationship per row; names are
 compared case-insensitively after accents, whitespace, dots, hyphens,
-underscores, and apostrophes are normalized. `config/consumer_email_domains.txt`
+underscores, and apostrophes are normalized. `src/aisc_salesforce/data/consumer_email_domains.txt`
 has one domain per line. Add an address provider there when it should be
 classified as a consumer domain; any otherwise valid domain not in that file is
 classified as an organization domain.
