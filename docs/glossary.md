@@ -123,6 +123,11 @@ recognizes them when comments explicitly describe a scope change.
 : One ordered group of staged Profile Update rows that are reviewed together
   for the same Account and Profile Update Case.
 
+**Chatter**
+
+: Salesforce's record conversation feed. A post can show coworkers the status
+  of a Profile Update Case and who needs to act next.
+
 **Certification status**
 
 : The Account value that describes its certification state. `Certified` and
@@ -147,6 +152,12 @@ recognizes them when comments explicitly describe a scope change.
 : An email value used only for matching Contacts. It is made by trimming and
   lowercasing the email, then removing dots from the part before `@`. The
   original normalized email is kept for display and Salesforce writes.
+
+**Company Profile Change**
+
+: The Salesforce record created from a participant's Profile Update
+  submission. It can close while the related Profile Update Case stays open
+  for follow-up.
 
 **Contact resolution**
 
@@ -177,6 +188,15 @@ recognizes them when comments explicitly describe a scope change.
   Account that has a parent, a child, or a sibling in the Account hierarchy. A
   standalone root Account is not a multi-account Family. A qualifying role on
   a multi-account Family Account requires the Participant RAS Profile.
+
+## G
+
+**Generic mailbox**
+
+: An email address used as a continuing company contact point, such as `ap@`
+  or `quality@`, rather than as one person's private address. A departing
+  employee can be removed from its Contact name while the Contact and Portal
+  User remain in place.
 
 ## I
 
@@ -228,7 +248,20 @@ recognizes them when comments explicitly describe a scope change.
   session. It records the ordered work, proposed changes, warnings, blockers,
   and progress so a session can safely resume.
 
+**Run-as user**
+
+: The Salesforce user whose identity and permissions an application's API
+  connection uses. With the current client credentials login, Salesforce shows
+  this user as the author of writes, even when another person operates the
+  application.
+
 ## S
+
+**Salesforce Note**
+
+: A Salesforce `Note` object record attached to another Salesforce record,
+  such as a Contact. The portability plan uses Notes for durable summaries of
+  Profile Update work.
 
 **Sibling Account**
 
@@ -246,6 +279,12 @@ recognizes them when comments explicitly describe a scope change.
 : The read-only preparation step that groups new Profile Updates, normalizes
   submitted contact details, and writes a CSV for later review. Staging does
   not create or update Salesforce records.
+
+**Streamlit**
+
+: A Python framework for building browser interfaces. It is being evaluated
+  as the interface Garrett would use to review Profile Updates without running
+  commands.
 
 **Staged row**
 

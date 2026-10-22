@@ -31,12 +31,23 @@ into one reliable, reviewable workflow. This is a high-priority project
 because it is frequent work and errors can affect participant access or
 records.
 
+The [Profile Update modernization issue list](profile-update-modernization-issues.md)
+organizes this project's next work into safe routine processing (Phase 1),
+portability and Garrett's browser handoff (Phase 2), and a later backlog
+(Phase 3). The checklist below remains as the original backlog so its broader
+ideas stay visible.
+
 ### Development sequence
 
 -   [x] Create/update Profile Update cases from Audit comments and
     submitted Profile Update objects.
 -   [x] Build the current `profile-updates` / `process-profile-updates`
     staging and processing workflow.
+-   [ ] Give Garrett a browser workflow for routine Profile Updates,
+    including durable review progress, staff-only access, and a Note and
+    Chatter trail that names the verified reviewer. See the
+    [modernization issue list](profile-update-modernization-issues.md) for the
+    Phase 2 handoff requirements and Streamlit evaluation.
 -   [ ] Review the current workflow end-to-end and document exactly when
     the Contact, Case, source Profile Update, Audit, roles, and User are
     changed.
