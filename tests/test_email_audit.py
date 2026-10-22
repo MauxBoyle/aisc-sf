@@ -5,8 +5,8 @@ from aisc_salesforce.email_audit import (
     REPORT_COLUMNS,
     ContactEmailAuditService,
     assess_email,
-    load_email_audit_config,
     load_consumer_domains,
+    load_email_audit_config,
     load_name_variants,
     write_contact_email_audit,
 )

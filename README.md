@@ -233,7 +233,7 @@ display name and created date, Account name and ID, CRG Outcome, CRG Comments,
 and six mutually exclusive review columns: `standard`, `drop`, `additional`,
 `cautionary_letter`, `scope`, and `needs_manual_review`. A row has one matching
 classification flag or is sent to manual review; empty CRG text has no flags.
-See the [project plan](docs/project-plan.md) for the matching rules and later
+See the [project plan](docs/audit-review-outcomes.md) for the matching rules and later
 guided review work.
 
 Create a read-only Contact email consistency report:
