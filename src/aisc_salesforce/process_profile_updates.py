@@ -4933,18 +4933,7 @@ class InteractiveProfileUpdateProcessor:
                     styled(", ".join(contacts) if contacts else "(no email available)"),
                 )
             )
-            choice = self._saved_blank_response_choice(blank_source_ids)
-            if choice is None:
-                choice = self._ask_choice(
-                    ChoiceQuestion(
-                        styled("Choose the response path: "),
-                        (
-                            ReviewChoice("acknowledge", "Prepare acknowledgment"),
-                            ReviewChoice("clarify", "Request clarification"),
-                        ),
-                        styled("Choose acknowledgment or clarification."),
-                    )
-                )
+            choice = "acknowledge" if evidence_found else "clarify"
             proposal = ChangeProposal(
                 source_submission_ids=tuple(
                     _display(item.get("Id")) for item in blank_submissions
@@ -5013,24 +5002,6 @@ class InteractiveProfileUpdateProcessor:
                 self._handoff_reasons.append(
                     "Blank submission response is pending because no submitter email is available."
                 )
-
-    def _saved_blank_response_choice(self, source_ids: set[str]) -> str | None:
-        """Reuse a previously audited blank-submission response on retry."""
-        if self._audit is None or not self._audit.path.exists():
-            return None
-        saved: str | None = None
-        for line in self._audit.path.read_text(encoding="utf-8").splitlines():
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if (
-                entry.get("action") == "record blank submission response choice"
-                and set(entry.get("source_submission_ids", ())) == source_ids
-                and entry.get("proposed_value") in {"acknowledge", "clarify"}
-            ):
-                saved = entry["proposed_value"]
-        return saved
 
     def _review_account_proposals(
         self,

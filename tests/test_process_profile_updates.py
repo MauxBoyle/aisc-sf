@@ -4571,7 +4571,7 @@ def test_blank_submission_history_uses_six_hour_window_and_records_email_outcome
     output = []
     processor = InteractiveProfileUpdateProcessor(
         client,
-        input_fn=Feeder(["clarify", "no"]),
+        input_fn=Feeder(["no"]),
         output_fn=output.append,
         now=NOW,
     )
@@ -4601,7 +4601,7 @@ def test_blank_submission_history_uses_six_hour_window_and_records_email_outcome
     assert all("2026-07-16T05:30:00Z" in q[2] for q in history_queries)
     assert "Susan Thomas" in "\n".join(output)
     assert "Distinct submitters to contact: sam@example.com" in "\n".join(output)
-    assert audit[0].proposal.proposed_value == "clarify"
+    assert audit[0].proposal.proposed_value == "acknowledge"
     assert audit[1].status is ActionStatus.DEFERRED_MANUAL
     assert processor._blank_pending_source_ids == {"submission-1"}
 
