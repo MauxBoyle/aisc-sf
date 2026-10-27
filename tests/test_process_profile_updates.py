@@ -72,6 +72,25 @@ def test_review_helpers_have_docstrings():
     assert mutation.__doc__
 
 
+def test_response_email_includes_request_result_and_pending_handoff():
+    emails = format_response_emails(
+        [],
+        request_responses=[
+            (
+                "sam@example.com",
+                "Comment from PU-1",
+                "handed off",
+                "Operator will confirm the facility address.",
+            )
+        ],
+    )
+
+    assert "Comment from PU-1: Operator will confirm the facility address." in emails[
+        "sam@example.com"
+    ]
+    assert "Pending follow-up" in emails["sam@example.com"]
+
+
 @pytest.mark.parametrize(
     ("submissions", "expected"),
     [

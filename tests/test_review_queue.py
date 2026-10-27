@@ -444,3 +444,44 @@ def test_refresh_preserves_completed_setup_but_recomputes_resolved_blockers(tmp_
     blocked_store.refresh(build_review_queue([queue_row()], now=NOW))
 
     assert next(iter_changes(blocked_store.manifest)).status is QueueStatus.PENDING
+
+
+def test_request_items_keep_repeated_text_separate_and_stable_across_refresh(tmp_path):
+    row = queue_row(
+        source_submission_ids=json.dumps(["submission-1", "submission-2"]),
+        request_items=json.dumps(
+            [
+                {
+                    "source_submission_id": source_id,
+                    "field": "Comments__c",
+                    "value": "Please update the listing.",
+                }
+                for source_id in ("submission-1", "submission-2")
+            ]
+        ),
+    )
+    original = build_review_queue([row], now=NOW)
+    requests = [
+        change for change in iter_changes(original) if change.context == "request_item"
+    ]
+    assert len(requests) == 2
+    assert requests[0].proposed_value == requests[1].proposed_value
+    assert requests[0].id != requests[1].id
+
+    store = ReviewQueueStore(tmp_path / "review_queue.json", original)
+    store.transition(requests[0].id, QueueStatus.COMPLETED, outcome="addressed: done")
+    store.refresh(build_review_queue([row], now=NOW))
+    refreshed = next(
+        change
+        for change in iter_changes(store.manifest)
+        if change.id == requests[0].id
+    )
+    assert refreshed.outcome == "addressed: done"
+
+
+def test_legacy_staged_row_without_request_items_still_builds():
+    manifest = build_review_queue([queue_row(comments="legacy comment")], now=NOW)
+
+    assert not [
+        change for change in iter_changes(manifest) if change.context == "request_item"
+    ]
