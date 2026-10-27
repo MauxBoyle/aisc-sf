@@ -4720,6 +4720,89 @@ def test_unsent_response_closes_sources_but_keeps_case_pending(tmp_path):
     assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
 
 
+def test_submission_close_failure_retries_after_account_write(tmp_path):
+    client = FakeClient()
+    client.fail_update = ("Company_Profile_Change__c", "submission-1")
+    row = staged_row(revised_company_name="Acme Steel LLC")
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["apply automatically", "yes"]),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    with pytest.raises(ProcessingError, match="write failed"):
+        processor.review([row], tmp_path / "first")
+
+    assert client.records[("Account", "account-1")]["Name"] == "Acme Steel LLC"
+    assert client.records[("Company_Profile_Change__c", "submission-1")][
+        "Status__c"
+    ] == "New"
+    assert client.records[("Case", "case-1")]["Status"] == "Pending"
+    assert any(
+        json.loads(line)["field"] == "Status__c"
+        and json.loads(line)["result"] == "failed"
+        for line in (tmp_path / "first" / "review_audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+
+    client.fail_update = None
+    retry = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["yes"]),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+    retry.review([row], tmp_path / "retry")
+
+    assert [write for write in client.updated if write[0] == "Account"] == [
+        ("Account", "account-1", {"Name": "Acme Steel LLC"})
+    ]
+    assert client.records[("Company_Profile_Change__c", "submission-1")][
+        "Status__c"
+    ] == "Closed"
+    assert client.records[("Case", "case-1")]["Status"] == "Closed"
+
+
+def test_case_close_failure_happens_after_submission_closes(tmp_path):
+    class CloseFailingClient(FakeClient):
+        def update_record(self, object_name, record_id, values):
+            if object_name == "Case" and values == {"Status": "Closed"}:
+                raise SalesforceError("write failed")
+            super().update_record(object_name, record_id, values)
+
+    client = CloseFailingClient()
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["apply automatically", "yes"]),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    with pytest.raises(ProcessingError, match="write failed"):
+        processor.review(
+            [staged_row(revised_company_name="Acme Steel LLC")], tmp_path
+        )
+
+    assert client.records[("Company_Profile_Change__c", "submission-1")][
+        "Status__c"
+    ] == "Closed"
+    assert client.records[("Case", "case-1")]["Status"] == "Pending"
+    audit = [
+        json.loads(line)
+        for line in (tmp_path / "review_audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert any(
+        item["target_object"] == "Case"
+        and item["field"] == "Status"
+        and item["result"] == "failed"
+        for item in audit
+    )
+
+
 class ApplicantProvisioning:
     def __init__(self):
         self.calls = []
