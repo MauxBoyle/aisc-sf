@@ -7,7 +7,8 @@ The [older project plan](project-plan-revised.md#1-profile-updates-contacts-and-
 contains the wider backlog. Phase 1 makes routine decisions safe in the
 existing workflow. Phase 2 makes that workflow portable, adds a visible work
 trail, and completes the Garrett browser handoff. Phase 3 keeps useful work
-visible after that handoff.
+visible after that handoff. Phase 4 is a place to capture new problems and
+ideas while the workflow is in use.
 
 ## Phase 1: safe routine processing
 
@@ -183,6 +184,62 @@ shared Python services.
    workflow where useful. The session CSV can remain as an inspection artifact.
 9. **Revisit the User deactivation schedule.** Monthly deactivation is enough
     for the initial handoff; consider the proposed weekly script later.
+
+## Phase 4: problems and ideas to investigate
+
+Use this section to capture issues noticed while processing Profile Updates,
+including cases where the right automated response is not yet clear. For each
+entry, record the source submission or update, what happened, and what needs
+investigation. Add a proposed issue to an earlier phase or the older-plan
+coverage only after its scope is understood.
+
+1. **Investigate conflicting contact details across submitted roles.** In one
+   processed update, the contact input for two roles had these details:
+   `Brett Venzke, brett.venzke@doralcorp.net` and `Bretty Venzke,
+   bret.venzke@doralcorp.net`. Both the name and email differed by a small
+   amount. Capture how the submissions were identified and linked to Contacts,
+   then determine what evidence could flag this safely for review without
+   automatically merging or changing either Contact. The automated response
+   is not yet defined.
+
+2. **Only change to less formal names in role submissions.** Example: If the 
+   role is currently Deborah, and the name submitted for the role is Deb, 
+   make the change. However, if the submitter enters her name as Deb, that is
+   not an official change, so don't change from Deborah to Deb based on it.
+
+3. **Consolidate email response to multiple submitters** If two different 
+   people submit updates and they can be reconciled and applied, create one 
+   combined email response and alert the user to copy both submitters on one
+   email.
+
+4. **Maintain a list of acceptable capitalization variants** When a submission
+   comes through with non-standard capitalization, we should have the option
+   to correct it but also the option to add it to the list of allowed 
+   exceptions. IRONFAB, LLC, for example, uses all caps in their branding.
+
+5. **Show address changes as one change, not individual changes** Currently, the
+   email response shows the street change, city change, state, zip all as separate
+   updates. It should show a full address replacing a full address, filling in the
+   unchanged parts as needed.
+
+6. **Always include automatically applied changes in response email** When the
+   submission is empty, the script should check Account History for automatically
+   applied changes. It should also check even when there are changes that the 
+   user has to approve. Those should be included in the response email.
+
+7. **Fine tune partial submissions** New example. A full contact was submitted for
+   two of the roles and that First and Last Name were submitted for another role.
+   The script interpreted that to update the non-generic contact in that role, but
+   I take that to mean that the new contact should also be in that role. If the
+   intention is not clear, ask the user which assumption to make.  (In case I need 
+   to refresh my memory, this is Case 361475.)
+
+8. **Check for Sole Contact after update** If the profile submission leads to
+   there being the same person in all filled roles, the response email should
+   include an admonition referencing section 1.1.2 of the Governing Requirements.
+
+Add future entries with the submission/update context, observed problem or
+idea, and the question that needs investigation.
 
 ## Older-plan coverage
 
