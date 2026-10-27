@@ -407,7 +407,21 @@ class ProfileUpdateService:
             case_id = _required_text(received, "Id", "Case ID")
             old_subject = _required_text(received, "Subject", "Case Subject")
             subject = append_profile_update(old_subject, update_name, created_date)
-            self.client.update_record("Case", case_id, {"Subject": subject})
+            newest_submission = self._newest_submission_by_account.get(
+                account_id, submission
+            )
+            contact_id = self._submission_contact(newest_submission, account_id)
+            update_payload: dict[str, Any] = {"Subject": subject}
+            if contact_id is None:
+                submission_id = _clean_text(newest_submission.get("Id")) or "unknown"
+                self._defer_submitter_followup(submission_id)
+            elif contact_id != _clean_text(received.get("ContactId")):
+                update_payload["ContactId"] = contact_id
+                self._record_contact_assignment(
+                    newest_submission, received, account_id, contact_id
+                )
+                received["ContactId"] = contact_id
+            self.client.update_record("Case", case_id, update_payload)
             received["Subject"] = subject
             self._post_if_missing(case_id, summary)
             return "reused"
