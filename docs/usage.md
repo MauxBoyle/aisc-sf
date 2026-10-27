@@ -955,8 +955,8 @@ Populated Key Data fields remain visible in their normal CSV columns and in
 For a Key Data submission marked as having no update content, review shows
 Account History entries within six hours of the submission timestamp, including
 the creator. It highlights whether Susan Thomas made a change in that window.
-A matching change selects an acknowledgment; no match selects a clarification
-request.
+A matching change selects an acknowledgment for that submission; no match
+selects a clarification request for it.
 Clarification text comes from the submission comments or personnel notes, and
 recipient addresses are listed once per distinct submitter. Send the prepared
 email yourself and confirm whether it was sent. A declined or missing email

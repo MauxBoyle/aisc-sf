@@ -4865,11 +4865,12 @@ class InteractiveProfileUpdateProcessor:
                     )
                 )
         if blank_submissions:
-            blank_source_ids = {_display(item.get("Id")) for item in blank_submissions}
-            # Query each blank submission's exact six-hour window for the
-            # evidence decision; the wider display query above may be merged.
-            matching_entries: list[dict[str, Any]] = []
+            # Keep each history result attached to its own submission. A Case
+            # batch can contain submissions with different evidence outcomes.
+            response_groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+            distinct_contacts: list[str] = []
             for submission in blank_submissions:
+                source_id = _display(submission.get("Id"))
                 submitted_at = _required_datetime(
                     _display(submission.get("CreatedDate"))
                 )
@@ -4891,88 +4892,103 @@ class InteractiveProfileUpdateProcessor:
                     ),
                     order_by="CreatedDate ASC, Id ASC",
                 )
-                matching_entries.extend(
-                    entry
-                    for entry in entries
-                    if _display((entry.get("CreatedBy") or {}).get("Name")).casefold()
+                evidence_found = any(
+                    _display((entry.get("CreatedBy") or {}).get("Name")).casefold()
                     == "susan thomas"
+                    for entry in entries
                 )
-            evidence_found = bool(matching_entries)
-            self._display_event(
-                Notice(
-                    styled(
-                        "Evidence found: Account History contains a change by Susan Thomas within six hours of submission."
-                        if evidence_found
-                        else "No matching Account History change by Susan Thomas was found within six hours of submission."
+                choice = "acknowledge" if evidence_found else "clarify"
+                self._display_event(
+                    Notice(
+                        styled(
+                            f"Profile Update {source_id}: "
+                            + (
+                                "Account History contains a change by Susan Thomas within six hours; prepare an acknowledgment."
+                                if evidence_found
+                                else "no matching Account History change by Susan Thomas was found within six hours; request clarification."
+                            )
+                        )
                     )
                 )
-            )
-            details = list(
-                dict.fromkeys(
-                    _display(item.get("Comments__c"))
-                    or _display(item.get("Other_Personnel_Notes__c"))
-                    for item in blank_submissions
-                    if _display(item.get("Comments__c"))
-                    or _display(item.get("Other_Personnel_Notes__c"))
+                detail = _display(submission.get("Comments__c")) or _display(
+                    submission.get("Other_Personnel_Notes__c")
                 )
-            )
-            for detail in details:
-                self._display_event(
-                    ContextLine("Clarification text from submission", styled(detail))
-                )
-            contacts = list(
-                dict.fromkeys(
-                    _display(item.get("Email__c")).strip()
-                    for item in blank_submissions
-                    if _display(item.get("Email__c")).strip()
-                )
-            )
+                if detail:
+                    self._display_event(
+                        ContextLine(
+                            f"Clarification text from Profile Update {source_id}",
+                            styled(detail),
+                        )
+                    )
+                email = _display(submission.get("Email__c")).strip()
+                if email and email not in distinct_contacts:
+                    distinct_contacts.append(email)
+                response_groups.setdefault((email, choice), []).append(submission)
             self._display_event(
                 ContextLine(
                     "Distinct submitters to contact",
-                    styled(", ".join(contacts) if contacts else "(no email available)"),
+                    styled(
+                        ", ".join(distinct_contacts)
+                        if distinct_contacts
+                        else "(no email available)"
+                    ),
                 )
             )
-            choice = "acknowledge" if evidence_found else "clarify"
-            proposal = ChangeProposal(
-                source_submission_ids=tuple(
-                    _display(item.get("Id")) for item in blank_submissions
-                ),
-                case_id=batch.case_id,
-                account_id=account_id,
-                account_name=batch.rows[0].get("account_name", ""),
-                submitter_email=", ".join(contacts),
-                target_object="Case",
-                target_record_id=batch.case_id,
-                field_name="blank_submission_response",
-                label="Blank submission response",
-                original_value="",
-                proposed_value=choice,
-                context=(
-                    "Susan Thomas history match"
-                    if evidence_found
-                    else "No history match"
-                ),
-            )
-            self._append_audit(
-                ActionResult(
-                    proposal,
-                    None,
-                    ActionStatus.NOOP,
-                    action="record blank submission response choice",
+            for (email, choice), grouped_submissions in response_groups.items():
+                group_source_ids = {
+                    _display(item.get("Id")) for item in grouped_submissions
+                }
+                proposal = ChangeProposal(
+                    source_submission_ids=tuple(sorted(group_source_ids)),
+                    case_id=batch.case_id,
+                    account_id=account_id,
+                    account_name=batch.rows[0].get("account_name", ""),
+                    submitter_email=email,
+                    target_object="Case",
+                    target_record_id=batch.case_id,
+                    field_name="blank_submission_response",
+                    label="Blank submission response",
+                    original_value="",
+                    proposed_value=choice,
+                    context=(
+                        "Susan Thomas history match"
+                        if choice == "acknowledge"
+                        else "No history match"
+                    ),
                 )
-            )
-            body = (
-                "Thank you for your submission. We have reviewed the information provided."
-                if choice == "acknowledge"
-                else "Thank you for your submission. Could you please clarify the information noted below?\n\n"
-                + (
-                    "\n".join(details)
-                    if details
-                    else "Please provide the missing update details."
+                self._append_audit(
+                    ActionResult(
+                        proposal,
+                        None,
+                        ActionStatus.NOOP,
+                        action="record blank submission response choice",
+                    )
                 )
-            )
-            for email in contacts:
+                details = list(
+                    dict.fromkeys(
+                        _display(item.get("Comments__c"))
+                        or _display(item.get("Other_Personnel_Notes__c"))
+                        for item in grouped_submissions
+                        if _display(item.get("Comments__c"))
+                        or _display(item.get("Other_Personnel_Notes__c"))
+                    )
+                )
+                body = (
+                    "Thank you for your submission. We have reviewed the information provided."
+                    if choice == "acknowledge"
+                    else "Thank you for your submission. Could you please clarify the information noted below?\n\n"
+                    + (
+                        "\n".join(details)
+                        if details
+                        else "Please provide the missing update details."
+                    )
+                )
+                if not email:
+                    self._blank_pending_source_ids.update(group_source_ids)
+                    self._handoff_reasons.append(
+                        "Blank submission response is pending because no submitter email is available."
+                    )
+                    continue
                 self._display_event(
                     ResponseEmail(ValueFragment(email, ValueOrigin.SUBMITTED), body)
                 )
@@ -4996,12 +5012,7 @@ class InteractiveProfileUpdateProcessor:
                     self._handoff_reasons.append(
                         f"Blank submission response email to {email} is still pending."
                     )
-                    self._blank_pending_source_ids.update(blank_source_ids)
-            if not contacts:
-                self._blank_pending_source_ids.update(blank_source_ids)
-                self._handoff_reasons.append(
-                    "Blank submission response is pending because no submitter email is available."
-                )
+                    self._blank_pending_source_ids.update(group_source_ids)
 
     def _review_account_proposals(
         self,
