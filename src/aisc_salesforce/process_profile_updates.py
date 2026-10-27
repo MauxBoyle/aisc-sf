@@ -1891,14 +1891,15 @@ class InteractiveProfileUpdateProcessor:
             )
             self._checkpoint_row(row)
 
-        self._update_status_with_audit(
-            batch,
-            batch.case_id,
-            "Case",
-            "Status",
-            CaseStatus.PENDING,
-            action="prepare batch",
-        )
+        if self._batch_outcomes(batch).get("case") != "closed":
+            self._update_status_with_audit(
+                batch,
+                batch.case_id,
+                "Case",
+                "Status",
+                CaseStatus.PENDING,
+                action="prepare batch",
+            )
 
         self._display_event(Heading(styled("Contact Updates"), STAGE_SEPARATOR))
         contact_items, source_mapping = self._collect_contact_work(batch, fresh_by_id)
@@ -3762,13 +3763,16 @@ class InteractiveProfileUpdateProcessor:
                 ResponseEmail(ValueFragment(email, ValueOrigin.SUBMITTED), text)
             )
             saved = self._batch_outcomes(batch).get(f"email:{email}")
-            sent = saved == "sent" if saved in {"sent", "not_sent"} else self._prompt_yes_no(
-                styled(
-                    "Was the response email to ",
-                    ValueFragment(email, ValueOrigin.SUBMITTED),
-                    " sent? [yes/no]: ",
+            if saved == "sent":
+                sent = True
+            else:
+                sent = self._prompt_yes_no(
+                    styled(
+                        "Was the response email to ",
+                        ValueFragment(email, ValueOrigin.SUBMITTED),
+                        " sent? [yes/no]: ",
+                    )
                 )
-            )
             self._record_batch_outcome(
                 batch, f"email:{email}", "sent" if sent else "not_sent"
             )
