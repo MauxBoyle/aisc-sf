@@ -631,6 +631,12 @@ change and the expected Portal User result before the final Salesforce check.
 See [Profile Update processing](docs/usage.md#process-profile-updates-command)
 for operator steps.
 
+Blank Key Data submissions receive a separate review path. The operator sees
+recent Account History and whether Susan Thomas made a change within six hours,
+chooses an acknowledgment or clarification request, sends the prepared email,
+and confirms the send. Pending email work keeps its Profile Update open for a
+safe retry.
+
 Before changing the name on a recognized shared mailbox Contact, processing
 checks every Account role that points to that Contact. If the lookup fails or
 any linked Account is outside the current company's family, it leaves the

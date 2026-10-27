@@ -389,6 +389,16 @@ class FakeClient:
             return [dict(contact) for contact in self.contacts]
         if object_name == "AccountHistory":
             return [dict(item) for item in self.history]
+        if object_name == "Note":
+            parent_id = where.split("ParentId = '", 1)[1].split("'", 1)[0]
+            title = where.split("Title = '", 1)[1].split("'", 1)[0]
+            return [
+                dict(record)
+                for (kind, _), record in self.records.items()
+                if kind == "Note"
+                and record.get("ParentId") == parent_id
+                and record.get("Title") == title
+            ]
         if object_name == "Account":
             return [
                 dict(item)
@@ -416,6 +426,10 @@ class FakeClient:
         if object_name == "Contact":
             self.contacts.append(self.records[(object_name, record_id)])
         return record_id
+
+    @property
+    def non_note_creates(self):
+        return [item for item in self.created if item[0] != "Note"]
 
     def update_record(self, object_name, record_id, values):
         if self.fail_update == (object_name, record_id):
@@ -811,7 +825,7 @@ def test_resumed_hard_blocker_is_visible_and_performs_no_salesforce_work(tmp_pat
     assert feeder.prompts == []
     assert client.gets == []
     assert client.queries == []
-    assert client.created == []
+    assert client.non_note_creates == []
     assert client.updated == []
     assert result.completed_batches == 0
     assert result.pending_batches == 1
@@ -846,7 +860,7 @@ def test_resumed_contact_ambiguity_does_not_bypass_another_blocker(tmp_path):
     assert feeder.prompts == []
     assert client.gets == []
     assert client.queries == []
-    assert client.created == []
+    assert client.non_note_creates == []
     assert client.updated == []
     assert result.pending_batches == 1
 
@@ -1855,7 +1869,7 @@ def test_qualifying_target_with_qualifying_children_hands_off_account_work(tmp_p
     assert not any(item[0] == "Account" for item in client.updated)
     assert ("Company_Profile_Change__c", "submission-1", {"Status__c": "Closed"}) in client.updated
     assert any(item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated)
-    assert client.created == []
+    assert client.non_note_creates == []
     assert (
         client.records[("Company_Profile_Change__c", "submission-1")]["Status__c"]
         == "Closed"
@@ -1938,7 +1952,7 @@ def test_parent_conflict_is_acknowledged_and_hands_off_account_work(
     assert not any(item[0] == "Account" for item in client.updated)
     assert ("Company_Profile_Change__c", "submission-1", {"Status__c": "Closed"}) in client.updated
     assert any(item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated)
-    assert client.created == []
+    assert client.non_note_creates == []
     assert (
         client.records[("Company_Profile_Change__c", "submission-1")]["Status__c"]
         == "Closed"
@@ -1983,7 +1997,7 @@ def test_non_qualifying_target_without_children_is_handed_off_and_keeps_case_ope
     assert not any(item[0] == "Account" for item in client.updated)
     assert ("Company_Profile_Change__c", "submission-1", {"Status__c": "Closed"}) in client.updated
     assert any(item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated)
-    assert client.created == []
+    assert client.non_note_creates == []
     assert (
         client.records[("Company_Profile_Change__c", "submission-1")]["Status__c"]
         == "Closed"
@@ -2045,7 +2059,7 @@ def test_parent_with_no_active_children_is_acknowledged_and_handed_off(
     assert not any(item[0] == "Account" for item in client.updated)
     assert ("Company_Profile_Change__c", "submission-1", {"Status__c": "Closed"}) in client.updated
     assert any(item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated)
-    assert client.created == []
+    assert client.non_note_creates == []
     assert result.pending_batches == 1
 
 
@@ -2174,7 +2188,7 @@ def test_parent_role_lookup_conflict_holds_role_and_keeps_case_pending(tmp_path)
     assert not any(item[0] in {"Contact", "Account"} for item in client.updated)
     assert ("Company_Profile_Change__c", "submission-1", {"Status__c": "Closed"}) in client.updated
     assert any(item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated)
-    assert client.created == []
+    assert client.non_note_creates == []
 
 
 def test_blocked_parent_batch_advances_to_the_next_case(tmp_path):
@@ -2301,7 +2315,7 @@ def test_parent_acknowledgement_interruption_writes_nothing_and_retry_refetches(
         interrupted.review([dict(row)], tmp_path / "interrupted")
 
     assert client.updated == []
-    assert client.created == []
+    assert client.non_note_creates == []
     interrupted_audit = (tmp_path / "interrupted" / "review_audit.jsonl").read_text(
         encoding="utf-8"
     )
@@ -2520,7 +2534,7 @@ def test_incomplete_contact_is_not_automatically_created(tmp_path):
         tmp_path,
     )
 
-    assert client.created == []
+    assert client.non_note_creates == []
     assert "required Last Name" in "\n".join(output)
 
 
@@ -2568,7 +2582,7 @@ def test_incomplete_new_contact_can_use_manual_creation_path(tmp_path):
         tmp_path,
     )
 
-    assert client.created == []
+    assert client.non_note_creates == []
     assert (
         "Account",
         "account-1",
@@ -2623,7 +2637,7 @@ def test_valid_contact_creation_precedes_field_and_role_decisions(tmp_path):
     contact_query = next(query for query in client.queries if query[0] == "Contact")
     assert contact_query[2] == "Email = 'new.person@example.com'"
     assert sum(prompt.startswith("Decision [") for prompt in feeder.prompts) == 4
-    assert client.created == [
+    assert client.non_note_creates == [
         (
             "Contact",
             {
@@ -2691,7 +2705,7 @@ def test_new_contract_reuses_submitter_role_contact_and_assigns_case(tmp_path):
 
     result = processor.review([row], tmp_path)
 
-    assert client.created == [
+    assert client.non_note_creates == [
         (
             "Contact",
             {
@@ -3217,7 +3231,7 @@ def test_submitted_email_selects_its_contact_instead_of_current_role_contact(
 
     processor.review([row], tmp_path)
 
-    assert client.created == []
+    assert client.non_note_creates == []
     assert [item for item in client.updated if item[0] == "Contact"] == [
         ("Contact", "contact-2", {"Title": "President"})
     ]
@@ -3394,7 +3408,7 @@ def test_shared_new_contact_is_created_once_and_reused_for_both_roles(tmp_path):
         tmp_path,
     )
 
-    assert client.created == [
+    assert client.non_note_creates == [
         (
             "Contact",
             {
@@ -3476,7 +3490,7 @@ def test_distinct_emails_in_one_role_stay_separate_until_role_assignment(
         tmp_path,
     )
 
-    assert client.created == [
+    assert client.non_note_creates == [
         (
             "Contact",
             {
@@ -3563,7 +3577,7 @@ def test_conflicting_submitted_names_on_one_email_are_handed_off(tmp_path):
 
     result = processor.review([row], tmp_path)
 
-    assert client.created == []
+    assert client.non_note_creates == []
     audit = [json.loads(line) for line in result.audit_path.read_text().splitlines()]
     assert any(
         entry["result"] == "handed off to operator"
@@ -3771,7 +3785,7 @@ def test_new_contact_omits_rejected_fields_from_grouped_create(tmp_path):
         tmp_path,
     )
 
-    assert client.created == [
+    assert client.non_note_creates == [
         (
             "Contact",
             {
@@ -4033,7 +4047,7 @@ def test_all_rejected_new_contact_is_not_created_or_assigned(tmp_path):
         tmp_path,
     )
 
-    assert client.created == []
+    assert client.non_note_creates == []
     assert not any(
         object_name == "Account" and "Cert_Certification_Contact__c" in values
         for object_name, _, values in client.updated
@@ -4224,7 +4238,7 @@ def test_compatibility_review_normalizes_fresh_role_values(tmp_path):
         tmp_path,
     )
 
-    assert client.created == [
+    assert client.non_note_creates == [
         (
             "Contact",
             {
@@ -4537,6 +4551,59 @@ def test_case_context_and_history_are_loaded_once_for_reused_submission(tmp_path
         == 1
     )
     assert sum(query[0] == "AccountHistory" for query in client.queries) == 1
+
+
+def test_blank_submission_history_uses_six_hour_window_and_records_email_outcome(
+    tmp_path,
+):
+    history = [
+        {
+            "Id": "history-1",
+            "AccountId": "account-1",
+            "Field": "Name",
+            "OldValue": "Old",
+            "NewValue": "New",
+            "CreatedDate": "2026-07-16T02:00:00.000+0000",
+            "CreatedBy": {"Name": "Susan Thomas"},
+        }
+    ]
+    client = FakeClient(history=history)
+    output = []
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["clarify", "no"]),
+        output_fn=output.append,
+        now=NOW,
+    )
+    audit = []
+    processor._append_audit = audit.append
+    processor._handoff_reasons = []
+    batch = build_case_batches(
+        [
+            staged_row(
+                has_no_update_content="true",
+                source_submission_ids=json.dumps(["submission-1"]),
+            )
+        ],
+        now=NOW,
+    )[0]
+    submission = source_record(
+        Type__c="Key Data",
+        CreatedDate="2026-07-15T23:30:00.000+0000",
+        Comments__c="Please clarify this submission.",
+    )
+
+    processor._show_account_history(batch, [submission])
+
+    history_queries = [q for q in client.queries if q[0] == "AccountHistory"]
+    assert len(history_queries) == 2
+    assert all("2026-07-15T17:30:00Z" in q[2] for q in history_queries)
+    assert all("2026-07-16T05:30:00Z" in q[2] for q in history_queries)
+    assert "Susan Thomas" in "\n".join(output)
+    assert "Distinct submitters to contact: sam@example.com" in "\n".join(output)
+    assert audit[0].proposal.proposed_value == "clarify"
+    assert audit[1].status is ActionStatus.DEFERRED_MANUAL
+    assert processor._blank_pending_source_ids == {"submission-1"}
 
 
 def test_role_response_is_consolidated_and_marks_unchanged_roles(tmp_path):

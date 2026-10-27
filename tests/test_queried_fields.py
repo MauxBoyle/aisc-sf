@@ -38,6 +38,7 @@ def test_relationship_fields_are_assigned_to_the_owning_object():
     assert "BillingCountry" in inventory["Account"]
     assert "Account.Cert_Certification_Status__c" not in inventory["Case"]
     assert "Name" in inventory["Account"]
+    assert "Name" in inventory["User"]
 
 
 def test_unknown_relationship_owner_is_rejected_instead_of_silently_ignored():
