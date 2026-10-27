@@ -1831,6 +1831,7 @@ class InteractiveProfileUpdateProcessor:
         self._refresh_request_items_from_fresh(batch, fresh_by_id)
         self._handoff_reasons = []
         self._blank_pending_source_ids = set()
+        self._record_batch_outcome(batch, "profile_change", "pending")
         identity_reasons = _operator_handoff_reasons(list(fresh_by_id.values()))
         for reason in identity_reasons:
             source_id = reason.split(":", 1)[0]
@@ -1851,6 +1852,33 @@ class InteractiveProfileUpdateProcessor:
             if routing.blocked
             else self._capture_role_contact_snapshots(routing.target_accounts)
         )
+        persisted_context = self._batch_response_context(batch)
+        if persisted_context:
+            try:
+                stored = json.loads(persisted_context)
+                role_contact_snapshots = {
+                    tuple(key.split("|", 1)): _RoleContactSnapshot(
+                        value["contact_id"], value["contact"]
+                    )
+                    for key, value in stored.items()
+                }
+            except (TypeError, ValueError, KeyError) as error:
+                raise ProcessingError("Saved response context is invalid.") from error
+        elif role_contact_snapshots:
+            self._record_batch_context(
+                batch,
+                json.dumps(
+                    {
+                        f"{account_id}|{role}": {
+                            "contact_id": snapshot.contact_id,
+                            "contact": snapshot.contact,
+                        }
+                        for (account_id, role), snapshot in role_contact_snapshots.items()
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
 
         # Every row overview and checkpoint happens before the first Salesforce write.
         for row in batch.rows:
@@ -3733,12 +3761,16 @@ class InteractiveProfileUpdateProcessor:
             self._display_event(
                 ResponseEmail(ValueFragment(email, ValueOrigin.SUBMITTED), text)
             )
-            sent = self._prompt_yes_no(
+            saved = self._batch_outcomes(batch).get(f"email:{email}")
+            sent = saved == "sent" if saved in {"sent", "not_sent"} else self._prompt_yes_no(
                 styled(
                     "Was the response email to ",
                     ValueFragment(email, ValueOrigin.SUBMITTED),
                     " sent? [yes/no]: ",
                 )
+            )
+            self._record_batch_outcome(
+                batch, f"email:{email}", "sent" if sent else "not_sent"
             )
             all_sent = all_sent and sent
 
@@ -3751,11 +3783,7 @@ class InteractiveProfileUpdateProcessor:
             not response.submitter_email.strip() for response in role_responses
         )
         all_sent = all_sent and not successful_without_email and not missing_role_email
-        if (
-            all_sent
-            and not self._blank_pending_source_ids
-            and self.participant_user_provisioning is not None
-        ):
+        if not self._blank_pending_source_ids and self.participant_user_provisioning is not None:
             self._provision_missing_participant_users(batch, contact_ids)
         for source_id in batch.source_submission_ids:
             if source_id in self._blank_pending_source_ids:
@@ -3782,26 +3810,69 @@ class InteractiveProfileUpdateProcessor:
                     )
                 )
                 continue
-            self._update_status_with_audit(
-                batch,
-                source_id,
-                "Company_Profile_Change__c",
-                "Status__c",
-                ProfileChangeStatus.CLOSED,
-            )
+            source_outcome = f"profile_change:{source_id}"
+            if self._batch_outcomes(batch).get(source_outcome) != "closed":
+                self._update_status_with_audit(
+                    batch,
+                    source_id,
+                    "Company_Profile_Change__c",
+                    "Status__c",
+                    ProfileChangeStatus.CLOSED,
+                )
+                self._record_batch_outcome(batch, source_outcome, "closed")
+            self._record_batch_outcome(batch, "profile_change", "closed")
         case_status = (
             CaseStatus.PENDING
             if self._handoff_reasons or not all_sent
             else CaseStatus.CLOSED
         )
-        self._update_status_with_audit(
-            batch,
-            batch.case_id,
-            "Case",
-            "Status",
-            case_status,
-        )
+        case_outcome = "closed" if case_status is CaseStatus.CLOSED else "pending"
+        if self._batch_outcomes(batch).get("case") != case_outcome:
+            self._update_status_with_audit(
+                batch,
+                batch.case_id,
+                "Case",
+                "Status",
+                case_status,
+            )
+            self._record_batch_outcome(batch, "case", case_outcome)
         return bool(self._handoff_reasons) or not all_sent
+
+    def _batch_outcomes(self, batch: CaseBatch) -> dict[str, str]:
+        if self._queue_store is None:
+            return {}
+        return next(
+            (dict(item.outcomes) for item in self._queue_store.manifest.batches if item.case.record_id == batch.case_id),
+            {},
+        )
+
+    def _batch_response_context(self, batch: CaseBatch) -> str:
+        if self._queue_store is None:
+            return ""
+        return next(
+            (item.response_context for item in self._queue_store.manifest.batches if item.case.record_id == batch.case_id),
+            "",
+        )
+
+    def _record_batch_context(self, batch: CaseBatch, context: str) -> None:
+        if self._queue_store is None:
+            return
+        queued = next(
+            (item for item in self._queue_store.manifest.batches if item.case.record_id == batch.case_id),
+            None,
+        )
+        if queued is not None:
+            self._queue_store.record_batch_state(queued.id, response_context=context)
+
+    def _record_batch_outcome(self, batch: CaseBatch, key: str, value: str) -> None:
+        if self._queue_store is not None:
+            queue_batch = next(
+                (item for item in self._queue_store.manifest.batches if item.case.record_id == batch.case_id),
+                None,
+            )
+            if queue_batch is not None:
+                self._queue_store.record_batch_state(queue_batch.id, outcome=(key, value))
+            self._display_event(ReviewQueueSnapshot(self._queue_store.manifest))
 
     def _queued_request_items(self, batch: CaseBatch):
         if self._queue_store is None:
@@ -3956,6 +4027,7 @@ class InteractiveProfileUpdateProcessor:
         as pending, while the source Profile Updates remain New for a retry.
         """
         if self.provisioning_environment is None:
+            self._record_batch_outcome(batch, "portal_user", "deferred")
             self._record_handoff(
                 batch,
                 "Portal User provisioning configuration is unavailable.",
@@ -3979,6 +4051,7 @@ class InteractiveProfileUpdateProcessor:
                 )
             )
             self._append_provisioning_audit(batch, error.outcome, ActionStatus.FAILED)
+            self._record_batch_outcome(batch, "portal_user", "failed")
             self._record_handoff(
                 batch,
                 f"Portal User provisioning failed: {error.outcome.message}",
@@ -3989,6 +4062,7 @@ class InteractiveProfileUpdateProcessor:
             return
         except ParticipantUserProvisioningError as error:
             self._append_provisioning_audit(batch, error.outcome, ActionStatus.FAILED)
+            self._record_batch_outcome(batch, "portal_user", "failed")
             self._record_handoff(
                 batch,
                 f"Portal User provisioning failed: {error.outcome.message}",
@@ -4027,6 +4101,11 @@ class InteractiveProfileUpdateProcessor:
             if outcome.action == "created":
                 self._display_event(Notice(styled(outcome.message)))
             self._append_provisioning_audit(batch, outcome, status)
+            self._record_batch_outcome(
+                batch,
+                "portal_user",
+                "deferred" if outcome.code == "applicant_portal_access_deferred" else "completed",
+            )
 
     def _append_provisioning_audit(
         self, batch: CaseBatch, outcome: ProvisioningOutcome, status: ActionStatus

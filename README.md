@@ -784,7 +784,7 @@ the actions that are actually available. This boundary is the extension point
 for a future TUI; Salesforce writes, validation, auditing, and status changes
 remain in `InteractiveProfileUpdateProcessor`.
 
-`review_queue.json` starts at schema version `1`. It contains ordered Case
+`review_queue.json` starts at schema version `2`. It contains ordered Case
 batches, staged rows, and field changes; UUID5-based item IDs; readable labels;
 explicit Salesforce object, record, and field references; current and proposed
 values; warnings and blockers; statuses; prior Case activity; and
@@ -984,12 +984,11 @@ Account-information changes keep the `ITEM: NEW INFORMATION` and
 `Replaces OLD INFORMATION` format. Each submitted Contact role is consolidated
 into one contact-information line. An unchanged role ends with `- no change`;
 `Replaces ...` appears only when existing role information was actually
-replaced. The previous name, title, email, and phone come from an in-memory
-snapshot taken at the beginning of the Case batch, before any Contact or role
-write. This keeps replacement details accurate when an earlier update in the
-same batch changes the previous role holder. The snapshot lasts only for the
-current processing attempt and is not added to CSV, queue, audit, or Salesforce
-schemas. The command prints the text but does not send email itself; after
+replaced. The previous name, title, email, and phone come from a snapshot saved
+in the versioned review queue before any Contact or role write. This keeps
+replacement details accurate after a restart. Email confirmations are saved
+independently from Portal User and record closure outcomes. The command prints
+the text but does not send email itself; after
 sending it through the normal email system, the reviewer confirms `yes` or
 `no`.
 

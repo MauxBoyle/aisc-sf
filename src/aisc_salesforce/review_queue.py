@@ -20,7 +20,7 @@ from uuid import UUID, uuid5
 from .account_roles import ACCOUNT_ROLE_DEFINITIONS
 from .filesystem import sync_directory
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REVIEW_QUEUE_FILENAME = "review_queue.json"
 QUEUE_NAMESPACE = UUID("d44ea56d-33c8-5be8-a6a1-495c32dd70b7")
 
@@ -128,6 +128,8 @@ class CaseBatch:
     earliest_key_update: str | None
     rows: tuple[StagedRow, ...]
     references: tuple[SalesforceReference, ...] = ()
+    response_context: str = ""
+    outcomes: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -320,6 +322,8 @@ def build_review_queue(
                 earliest_key_update=earliest_key,
                 rows=ordered_rows,
                 references=references,
+                response_context="",
+                outcomes=(),
             )
         )
 
@@ -446,6 +450,8 @@ def _case_batch(raw: Any, context: str) -> CaseBatch:
             "earliest_key_update",
             "rows",
             "references",
+            "response_context",
+            "outcomes",
         },
         context,
     )
@@ -468,6 +474,8 @@ def _case_batch(raw: Any, context: str) -> CaseBatch:
             for index, item in enumerate(_list(value["rows"], f"{context} rows"))
         ),
         references=_references(value["references"], f"{context} references"),
+        response_context=_string(value["response_context"], f"{context} response_context"),
+        outcomes=_string_pairs(value["outcomes"], f"{context} outcomes"),
     )
 
 
@@ -670,6 +678,21 @@ def _string_tuple(raw: Any, context: str) -> tuple[str, ...]:
     )
 
 
+def _string_pairs(raw: Any, context: str) -> tuple[tuple[str, str], ...]:
+    pairs = []
+    for index, item in enumerate(_list(raw, context)):
+        values = _list(item, f"{context}[{index}]")
+        if len(values) != 2:
+            raise ValueError(f"{context}[{index}] must contain two strings.")
+        pairs.append((
+            _nonblank_string(values[0], f"{context}[{index}][0]"),
+            _string(values[1], f"{context}[{index}][1]"),
+        ))
+    if len({key for key, _ in pairs}) != len(pairs):
+        raise ValueError(f"{context} keys must be unique.")
+    return tuple(pairs)
+
+
 def write_review_queue(manifest: ReviewQueueManifest, path: Path) -> Path:
     """Atomically replace ``path`` with a fully flushed queue snapshot."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -711,6 +734,29 @@ class ReviewQueueStore:
         self.publish()
         return self.manifest
 
+    def record_batch_state(
+        self, batch_id: str, *, response_context: str | None = None,
+        outcome: tuple[str, str] | None = None,
+    ) -> ReviewQueueManifest:
+        """Persist response context or one independent batch outcome."""
+        self.publish()
+        batches = []
+        for batch in self.manifest.batches:
+            if batch.id != batch_id:
+                batches.append(batch)
+                continue
+            outcomes = dict(batch.outcomes)
+            if outcome is not None:
+                outcomes[outcome[0]] = outcome[1]
+            batches.append(replace(
+                batch,
+                response_context=(batch.response_context if response_context is None else response_context),
+                outcomes=tuple(sorted(outcomes.items())),
+            ))
+        self.manifest = replace(self.manifest, batches=tuple(batches))
+        self.publish()
+        return self.manifest
+
     def refresh(self, manifest: ReviewQueueManifest) -> ReviewQueueManifest:
         """Replace discovered work while preserving statuses of stable IDs."""
         previous = {
@@ -748,6 +794,18 @@ class ReviewQueueStore:
                 refreshed = transition_item(
                     refreshed, change.id, status, outcome=outcome
                 )
+        prior_batches = {batch.id: batch for batch in self.manifest.batches}
+        refreshed = replace(
+            refreshed,
+            batches=tuple(
+                replace(
+                    batch,
+                    response_context=prior_batches[batch.id].response_context,
+                    outcomes=prior_batches[batch.id].outcomes,
+                ) if batch.id in prior_batches else batch
+                for batch in refreshed.batches
+            ),
+        )
         self.manifest = recompute_manifest(refreshed)
         self.publish()
         return self.manifest

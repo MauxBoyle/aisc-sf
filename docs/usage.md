@@ -1155,7 +1155,7 @@ interruption handling.
 
 ### Stable review queue contract
 
-The JSON contract starts with `schema_version: 1` and has this hierarchy:
+The JSON contract starts with `schema_version: 2` and has this hierarchy:
 
 ```text
 manifest
@@ -1454,13 +1454,11 @@ in response text using `ITEM: NEW INFORMATION` followed by
 as one line containing its name, title, email, and phone. A role that required
 no change ends with `- no change`. A following `Replaces OLD INFORMATION` line
 is included only when prior role information was actually replaced. The prior
-role Contact's name, title, email, and phone are copied into memory at the
-beginning of the Case batch, after routing and row checkpoints but before the
-first Salesforce write. Response-email replacement details therefore remain
-the values from the beginning of the batch even if that Contact is updated
-earlier in the same batch. Parent-routed Accounts each use their own role
-Contact snapshot. These temporary snapshots do not survive a process restart
-and are not written to staging CSVs, review queues, audit events, or Salesforce.
+role Contact's name, title, email, and phone are copied into the versioned
+review queue at the beginning of the Case batch, after routing and row
+checkpoints but before the first Salesforce write. A retry therefore keeps the
+original replacement details even if Salesforce already has the new values.
+Parent-routed Accounts each keep their own role Contact snapshot.
 The Account paragraph begins:
 
 > Thank you for updating your information with AISC. The changes are summarized
@@ -1472,7 +1470,9 @@ The command generates and prints email text; it does not send email. The
 reviewer sends it through the approved email system and confirms whether it was
 sent.
 
-After a resolved batch, source Profile Updates are set to `Closed`. Answering
+The queue also stores participant email confirmations independently from
+Portal User provisioning and record closure outcomes. After a resolved batch,
+source Profile Updates are set to `Closed`. Answering
 `yes` to every generated response-email confirmation means the email was sent,
 so the Case is also set to `Closed`. If a response is not sent, the source
 records are closed and the Case stays `Pending`.
@@ -1487,7 +1487,7 @@ For ordinary applied, rejected, and no-op results this remains backward
 compatible with the proposal or original value; for an accepted manual
 override, `final_value` preserves the fresh Salesforce value separately from
 the submission. Contact queue entries transition independently while queue
-schema version `1` and its stable field IDs remain unchanged. Operator identity
+schema version `2` and its stable field IDs remain unchanged. Operator identity
 selections, duplicate recovery, ignored entries, Case Contact assignment, and
 later Account-role assignments are separate, immediately flushed events.
 
