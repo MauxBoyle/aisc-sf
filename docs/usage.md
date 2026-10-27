@@ -950,6 +950,31 @@ Populated Key Data fields remain visible in their normal CSV columns and in
 
 ## Process Profile Updates command
 
+### Reviewer write and Flow check
+
+Before retrying a failed batch, use the
+[Profile Update write and Flow map](profile-update-write-flow-map.md) to check
+which Salesforce writes already succeeded. Review `review_queue.json` and
+`review_audit.jsonl` in that staging session, then refresh the Account, role
+Contacts, Case, and source Profile Updates in Salesforce. A retry does not undo
+earlier writes; already-current Account and role fields are skipped. If the
+source Profile Update is still New, retry the same session after resolving the
+recorded failure.
+
+If the source is Closed but the Case is still Pending, inspect the Case and
+response/provisioning results manually before closing it. The ordinary staging
+query selects New submissions, so it will not automatically recover a Case
+close failure after source closure. Do not reopen or reprocess a source solely
+to force that Case transition.
+
+The map lists the active Account-triggered Audit Flows and an anonymized
+production example. The example's Audit contact fields have no available
+field-history entries, so Flow execution is still an
+[open verification step](profile-update-write-flow-map.md#anonymized-production-example-and-limits).
+Ask a Salesforce administrator for read-only field history or a Flow/debug
+trace before assigning Python responsibility for any Audit field. Confirm
+whether historical Audits are intended to follow Account contact changes.
+
 Run staging, Case preparation, and interactive review as one convenience
 command:
 

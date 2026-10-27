@@ -613,6 +613,17 @@ succeeds, so a failed run cannot leave a partial snapshot.
 
 ### Interactive Profile Update processing
 
+Review the [Profile Update write and Flow map](docs/profile-update-write-flow-map.md)
+before retrying a failed batch. It shows the Account, Contact, role, Case,
+source Profile Update, Portal User, and Audit write points, plus the active
+Salesforce Flow configuration checked on 2026-10-27. A failed final Case close
+can leave the source Profile Update Closed and the Case Pending; ordinary
+New-only staging will not select that source again. The reviewer should inspect
+the Case and local decision log before resolving it. Audit field-history or a
+Flow transaction trace is still needed to attribute the production example's
+Audit contact changes to a specific Flow; see the map's
+[verification step](docs/profile-update-write-flow-map.md#anonymized-production-example-and-limits).
+
 `process-profile-updates` keeps the complete convenience workflow and now
 composes three independently callable session phases in this order:
 
