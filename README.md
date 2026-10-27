@@ -629,6 +629,13 @@ change and the expected Portal User result before the final Salesforce check.
 See [Profile Update processing](docs/usage.md#process-profile-updates-command)
 for operator steps.
 
+Case preparation uses the submitter on the newest source submission for the
+Case Contact, sorting by `CreatedDate` and then Salesforce ID. During review,
+the Case context lists distinct submitter email addresses with their names and
+reminds the reviewer to include all parties in the participant email. The
+command prepares the email text; the reviewer sends it through the normal
+email system.
+
 Review the [Profile Update write and Flow map](docs/profile-update-write-flow-map.md)
 before retrying a failed batch. It shows the Account, Contact, role, Case,
 source Profile Update, Portal User, and Audit write points, plus the active

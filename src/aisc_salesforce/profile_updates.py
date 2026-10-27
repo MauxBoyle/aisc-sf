@@ -154,6 +154,7 @@ class ProfileUpdateService:
         self.errors: list[str] = []
         self._case_cache: dict[str, list[dict[str, Any]]] = {}
         self._feed_cache: dict[str, list[str]] = {}
+        self._newest_submission_by_account: dict[str, dict[str, Any]] = {}
 
     def run(self, submission_ids: Collection[str] | None = None) -> AutomationCounts:
         """Process normal work, or only the captured submissions when IDs are given."""
@@ -202,6 +203,13 @@ class ProfileUpdateService:
                 if _clean_text(record.get("Id")) in allowed
                 and _clean_text(record.get("Account__c"))
             ]
+
+        self._newest_submission_by_account = {}
+        for record in submissions:
+            account_id = _clean_text(record.get("Account__c"))
+            current = self._newest_submission_by_account.get(account_id)
+            if current is None or _submission_sort_key(record) > _submission_sort_key(current):
+                self._newest_submission_by_account[account_id] = record
 
         counts = AutomationCounts()
         for record in audits:
@@ -339,6 +347,27 @@ class ProfileUpdateService:
             and subject_has_profile_update(case.get("Subject"), update_name)
             for case in cases
         ):
+            newest_submission = self._newest_submission_by_account.get(
+                account_id, submission
+            )
+            if _clean_text(newest_submission.get("Id")) == _clean_text(
+                submission.get("Id")
+            ):
+                newest_contact = self._submission_contact(newest_submission, account_id)
+                if newest_contact:
+                    target_case = self._newest(
+                        case
+                        for case in cases
+                        if parse_aisc_profile_update_subject(case.get("Subject"))
+                        is not None
+                        and subject_has_profile_update(case.get("Subject"), update_name)
+                    )
+                    if target_case is not None and target_case.get("ContactId") != newest_contact:
+                        self.client.update_record(
+                            "Case", _required_text(target_case, "Id", "Case ID"),
+                            {"ContactId": newest_contact},
+                        )
+                        target_case["ContactId"] = newest_contact
             return "skipped"
 
         same_name_cases = [
@@ -371,7 +400,8 @@ class ProfileUpdateService:
             self._post_if_missing(case_id, summary)
             return "reused"
 
-        contact_id = self._submission_contact(submission, account_id)
+        newest_submission = self._newest_submission_by_account.get(account_id, submission)
+        contact_id = self._submission_contact(newest_submission, account_id)
         subject = build_aisc_profile_update_subject(
             account_name,
             [ProfileUpdateReference(update_name, created_date)],
@@ -390,8 +420,11 @@ class ProfileUpdateService:
         )
         if expected is not None:
             case_id = _required_text(expected, "Id", "Case ID")
-            self.client.update_record("Case", case_id, payload)
-            expected.update(payload)
+            update_payload = dict(payload)
+            if contact_id is None:
+                update_payload.pop("ContactId")
+            self.client.update_record("Case", case_id, update_payload)
+            expected.update(update_payload)
             self._post_if_missing(case_id, summary)
             return "reused"
 
@@ -514,4 +547,9 @@ def _record_date(value: Any) -> date:
 
 
 def _case_sort_key(record: dict[str, Any]) -> tuple[str, str]:
+    return (_clean_text(record.get("CreatedDate")), _clean_text(record.get("Id")))
+
+
+def _submission_sort_key(record: dict[str, Any]) -> tuple[str, str]:
+    """Sort submissions by creation time, then Salesforce ID for stable ties."""
     return (_clean_text(record.get("CreatedDate")), _clean_text(record.get("Id")))

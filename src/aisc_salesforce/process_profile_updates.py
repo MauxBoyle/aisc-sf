@@ -4197,25 +4197,30 @@ class InteractiveProfileUpdateProcessor:
             batch.account_id,
         )
         self._display_event(ContextLine("Account", (ValueFragment(account_name),)))
-        submitters = dict.fromkeys(
-            (
-                row.get("submitter_name", "").strip(),
-                row.get("submitter_email", "").strip(),
-            )
-            for row in batch.rows
-        )
-        for name, email in submitters:
+        submitters: dict[str, tuple[list[str], str]] = {}
+        for row in batch.rows:
+            name = row.get("submitter_name", "").strip() or "(name unavailable)"
+            email = row.get("submitter_email", "").strip() or "(email unavailable)"
+            normalized = email.casefold() if email != "(email unavailable)" else ""
+            key = normalized or f"missing:{name.casefold()}:{email}"
+            names, shown_email = submitters.setdefault(key, ([], email))
+            if name not in names:
+                names.append(name)
+        for names, email in submitters.values():
             self._display_event(
                 ContextLine(
                     "Submitter",
                     styled(
-                        ValueFragment(name, ValueOrigin.SUBMITTED),
+                        ValueFragment(" / ".join(names), ValueOrigin.SUBMITTED),
                         " <",
                         ValueFragment(email, ValueOrigin.SUBMITTED),
                         ">",
                     ),
                 )
             )
+        self._display_event(
+            Notice(styled("Include all submitters when preparing the participant email."))
+        )
 
         for submission in submissions_by_id.values():
             self._display_event(
