@@ -29,6 +29,7 @@ from .contact_resolution import (
     ContactSource,
     contact_snapshot,
     family_account_ids,
+    is_generic_mailbox,
     normalize_email,
     resolve_contact,
 )
@@ -1893,7 +1894,8 @@ class InteractiveProfileUpdateProcessor:
         }
         for item in contact_items:
             item.handoff_reasons = tuple(
-                reason for reason in identity_reasons
+                reason
+                for reason in identity_reasons
                 if reason.split(":", 1)[0] in item.source_submission_ids
             )
             self._reconcile_contact_fields(batch, item)
@@ -2340,6 +2342,35 @@ class InteractiveProfileUpdateProcessor:
             item.current_contact = {}
             item.original_contact = {}
 
+        if (
+            item.contact_id
+            and is_generic_mailbox(_display((item.current_contact or {}).get("Email")))
+            and any(
+                len(item.proposals.get(field, {})) > 1
+                for field in ("first_name", "last_name")
+            )
+        ):
+            reason = (
+                "Different replacement names were submitted for the same shared "
+                f"mailbox Contact {item.contact_id}; clarify the intended name."
+            )
+            self._record_handoff(
+                batch,
+                reason,
+                target_object="Contact",
+                target_record_id=item.contact_id,
+                field_name="Name",
+                proposed_value={
+                    field: list(item.proposals.get(field, {}))
+                    for field in ("first_name", "last_name")
+                    if item.proposals.get(field)
+                },
+            )
+            item.ignored = True
+            item.reconciled = {}
+            item.write_values = {}
+            return
+
         reconciled: dict[str, str] = {}
         for suffix, contact_field, field_label in CONTACT_SUFFIX_FIELDS:
             values = item.proposals.get(suffix, {})
@@ -2473,6 +2504,109 @@ class InteractiveProfileUpdateProcessor:
             and reconciled[suffix]
             and not _values_equal(current.get(contact_field), reconciled[suffix])
         }
+        # Shared mailboxes remain attached to the company. When a submission
+        # changes only the role email and supplies no replacement name, give
+        # the retained Contact a predictable company/purpose name for review.
+        # Explicit submitted names always take precedence; conflicting names
+        # have already been routed to the operator by the identity preflight.
+        if (
+            item.contact_id
+            and is_generic_mailbox(_display((item.current_contact or {}).get("Email")))
+            and not item.proposals.get("first_name")
+            and not item.proposals.get("last_name")
+            and item.proposals.get("email")
+        ):
+            mailbox = _display((item.current_contact or {}).get("Email"))
+            purpose = _mailbox_purpose(mailbox)
+            account = self.client.get_record(
+                "Account", batch.account_id, ["Id", "Name"]
+            )
+            company = _display(account.get("Name"))
+            if company and purpose:
+                reconciled["first_name"] = company
+                reconciled["last_name"] = purpose
+                item.reconciled = reconciled
+                current = item.current_contact or {}
+                item.write_values = {
+                    field: value
+                    for field, value in {
+                        "FirstName": company,
+                        "LastName": purpose,
+                    }.items()
+                    if not _values_equal(current.get(field), value)
+                }
+        # A shared address can still be attached to roles outside this Case.
+        # Before changing its displayed name, verify every Account role that
+        # points at it. An incomplete lookup must never authorize the write.
+        if (
+            item.contact_id
+            and is_generic_mailbox(_display(current.get("Email")))
+            and any(field in item.write_values for field in ("FirstName", "LastName"))
+        ):
+            contact_id = item.contact_id
+            lookups = [role.account_lookup for role in ACCOUNT_ROLE_DEFINITIONS]
+            where = " OR ".join(
+                f"{field} = '{escape_soql_string(contact_id)}'" for field in lookups
+            )
+            try:
+                linked_accounts = self.client.query_records(
+                    "Account", ["Id", "ParentId", "Name", *lookups], where=where
+                )
+                target = self.client.get_record(
+                    "Account", batch.account_id, ["Id", "ParentId"]
+                )
+                family_accounts = [target]
+                parent_id = _display(target.get("ParentId"))
+                if parent_id:
+                    family_accounts.extend(
+                        self.client.query_records(
+                            "Account",
+                            ["Id", "ParentId"],
+                            where=(
+                                f"Id = '{escape_soql_string(parent_id)}' OR "
+                                f"ParentId = '{escape_soql_string(parent_id)}'"
+                            ),
+                        )
+                    )
+                allowed_family = family_account_ids(target, family_accounts)
+                outside = [
+                    account
+                    for account in linked_accounts
+                    if _display(account.get("Id")) not in allowed_family
+                ]
+            except SalesforceError as error:
+                item.ignored = True
+                item.write_values = {}
+                self._record_handoff(
+                    batch,
+                    f"Could not verify every Account role for shared mailbox Contact {contact_id}: {error}",
+                    target_object="Contact",
+                    target_record_id=contact_id,
+                    field_name="Name",
+                    proposed_value={
+                        "FirstName": reconciled.get("first_name"),
+                        "LastName": reconciled.get("last_name"),
+                    },
+                )
+                return
+            if outside:
+                item.ignored = True
+                item.write_values = {}
+                names = ", ".join(
+                    _display(account.get("Name")) or _display(account.get("Id"))
+                    for account in outside
+                )
+                self._record_handoff(
+                    batch,
+                    f"Shared mailbox Contact {contact_id} is linked to Accounts outside this company family ({names}); review the departure before changing its name.",
+                    target_object="Contact",
+                    target_record_id=contact_id,
+                    field_name="Name",
+                    proposed_value={
+                        "FirstName": reconciled.get("first_name"),
+                        "LastName": reconciled.get("last_name"),
+                    },
+                )
 
     @staticmethod
     def _format_contact_sources(sources: list[ContactSource]) -> str:
@@ -2654,7 +2788,10 @@ class InteractiveProfileUpdateProcessor:
                         "the proposed update was not applied."
                     )
                     self._fail_contact_fields(
-                        batch, item, approved, error,
+                        batch,
+                        item,
+                        approved,
+                        error,
                         action="final Salesforce check",
                     )
                     raise ProcessingError(error)
@@ -3398,6 +3535,54 @@ class InteractiveProfileUpdateProcessor:
             if item.handoff_reasons:
                 continue
 
+            # A role change is a departure from the old Contact. Do not
+            # silently remove someone who still owns any other Account role.
+            if original.contact_id and original.contact_id != item.contact_id:
+                lookups = [
+                    definition.account_lookup for definition in ACCOUNT_ROLE_DEFINITIONS
+                ]
+                where = " OR ".join(
+                    f"{field} = '{escape_soql_string(original.contact_id)}'"
+                    for field in lookups
+                )
+                try:
+                    linked_accounts = self.client.query_records(
+                        "Account", ["Id", *lookups], where=where
+                    )
+                except SalesforceError as error:
+                    self._record_handoff(
+                        batch,
+                        f"Could not verify every Account role for departing Contact {original.contact_id}: {error}",
+                        target_object="Contact",
+                        target_record_id=original.contact_id,
+                        field_name="Account roles",
+                    )
+                    continue
+                remaining = [
+                    account
+                    for account in linked_accounts
+                    if any(
+                        _display(account.get(field)) == original.contact_id
+                        for field in lookups
+                        if not (
+                            _display(account.get("Id")) == target_account_id
+                            and field == role.account_lookup
+                        )
+                    )
+                ]
+                if remaining:
+                    self._record_handoff(
+                        batch,
+                        f"Departing Contact {original.contact_id} still holds an Account role; review before removing the role.",
+                        target_object="Contact",
+                        target_record_id=original.contact_id,
+                        field_name="Account roles",
+                        proposed_value=[
+                            _display(account.get("Id")) for account in remaining
+                        ],
+                    )
+                    continue
+
             final_contact = item.current_contact
             if final_contact is None:
                 final_contact = self.client.get_record(
@@ -3423,6 +3608,20 @@ class InteractiveProfileUpdateProcessor:
                 proposed_display=_contact_name_email(final_contact),
             )
             results.append(result)
+            if (
+                original.contact_id
+                and original.contact_id != item.contact_id
+                and result.status
+                in {ActionStatus.APPLIED, ActionStatus.VERIFIED_MANUAL}
+            ):
+                self._ensure_departure_note(
+                    batch,
+                    original.contact_id,
+                    role.label,
+                    original_contact,
+                    final_contact,
+                    target_account_name,
+                )
             previous_contact = original_contact
             contact_changed = any(
                 result.status in {ActionStatus.APPLIED, ActionStatus.VERIFIED_MANUAL}
@@ -3446,6 +3645,50 @@ class InteractiveProfileUpdateProcessor:
                 )
             )
         return results, responses
+
+    def _ensure_departure_note(
+        self,
+        batch: CaseBatch,
+        contact_id: str,
+        role_label: str,
+        former_contact: dict[str, Any] | None,
+        replacement: dict[str, Any] | None,
+        account_name: str,
+    ) -> None:
+        """Create one retry-safe Salesforce Note for a confirmed departure."""
+        source_ids = ", ".join(sorted(batch.source_submission_ids))
+        title = f"Profile Update departure: {role_label} ({source_ids})"
+        former_name = _contact_summary(former_contact) or contact_id
+        replacement_name = (
+            _contact_summary(replacement) or "(replacement not identified)"
+        )
+        body = (
+            f"{former_name} was removed as {role_label} for {account_name}. "
+            f"Replacement: {replacement_name}. Profile Update source(s): {source_ids}."
+        )
+        where = (
+            f"ParentId = '{escape_soql_string(contact_id)}' AND "
+            f"Title = '{escape_soql_string(title)}'"
+        )
+        try:
+            existing = self.client.query_records(
+                "Note", ["Id", "Title", "Body", "ParentId"], where=where
+            )
+            if any(_display(note.get("Body")) == body for note in existing):
+                return
+            self._create_record(
+                "Note",
+                {"ParentId": contact_id, "Title": title, "Body": body},
+            )
+        except SalesforceError as error:
+            self._record_handoff(
+                batch,
+                f"The role change was completed, but the Contact Note could not be verified or created: {error}",
+                target_object="Contact",
+                target_record_id=contact_id,
+                field_name="Notes",
+                proposed_value=body,
+            )
 
     @staticmethod
     def _contact_review_identity(item: _ContactWorkItem) -> str:
@@ -3512,8 +3755,7 @@ class InteractiveProfileUpdateProcessor:
             unresolved_requests = [
                 change
                 for change in self._queued_request_items(batch)
-                if source_id in change.source_submission_ids
-                and change.outcome is None
+                if source_id in change.source_submission_ids and change.outcome is None
             ]
             if unresolved_requests:
                 self._display_event(
@@ -3609,7 +3851,9 @@ class InteractiveProfileUpdateProcessor:
                 ChoiceQuestion(
                     styled(
                         "Request: ",
-                        ValueFragment(str(change.proposed_value), ValueOrigin.SUBMITTED),
+                        ValueFragment(
+                            str(change.proposed_value), ValueOrigin.SUBMITTED
+                        ),
                         "\nWas this request addressed or handed off? ",
                     ),
                     (
@@ -3658,12 +3902,19 @@ class InteractiveProfileUpdateProcessor:
             )
             stored = f"{wording}: {result}"
             if self._queue_store is not None:
-                self._queue_store.transition(change.id, QueueStatus.COMPLETED, outcome=stored)
+                self._queue_store.transition(
+                    change.id, QueueStatus.COMPLETED, outcome=stored
+                )
                 self._display_event(ReviewQueueSnapshot(self._queue_store.manifest))
             if decision == "handed_off":
                 self._handoff_reasons.append(f"{change.label} was handed off: {result}")
             responses.append(
-                (self._request_submitter_email(batch, change), change.label, wording, result)
+                (
+                    self._request_submitter_email(batch, change),
+                    change.label,
+                    wording,
+                    result,
+                )
             )
         return responses
 
@@ -3672,7 +3923,11 @@ class InteractiveProfileUpdateProcessor:
             return ""
         source_id = change.source_submission_ids[0]
         row = next(
-            (row for row in batch.rows if source_id in _json_string_list(row["source_submission_ids"])),
+            (
+                row
+                for row in batch.rows
+                if source_id in _json_string_list(row["source_submission_ids"])
+            ),
             None,
         )
         return row.get("submitter_email", "").strip() if row else ""
@@ -3712,7 +3967,8 @@ class InteractiveProfileUpdateProcessor:
             self._record_handoff(
                 batch,
                 f"Portal User provisioning failed: {error.outcome.message}",
-                target_object="User", target_record_id=error.outcome.contact_id,
+                target_object="User",
+                target_record_id=error.outcome.contact_id,
                 field_name="Provisioning",
             )
             return
@@ -3721,7 +3977,8 @@ class InteractiveProfileUpdateProcessor:
             self._record_handoff(
                 batch,
                 f"Portal User provisioning failed: {error.outcome.message}",
-                target_object="User", target_record_id=error.outcome.contact_id,
+                target_object="User",
+                target_record_id=error.outcome.contact_id,
                 field_name="Provisioning",
             )
             return
@@ -4395,7 +4652,9 @@ class InteractiveProfileUpdateProcessor:
                 )
             )
         self._display_event(
-            Notice(styled("Include all submitters when preparing the participant email."))
+            Notice(
+                styled("Include all submitters when preparing the participant email.")
+            )
         )
 
         for submission in submissions_by_id.values():
@@ -4536,9 +4795,12 @@ class InteractiveProfileUpdateProcessor:
                 except SalesforceError as error:
                     failed = ActionResult(
                         self._proposal(
-                            batch, row, target_object="Account",
+                            batch,
+                            row,
+                            target_object="Account",
                             target_record_id=target_account_id,
-                            field_name=account_field, label=label,
+                            field_name=account_field,
+                            label=label,
                             proposed_value=proposed,
                         ),
                         None,
@@ -4550,10 +4812,14 @@ class InteractiveProfileUpdateProcessor:
                     raise ProcessingError(str(error)) from error
                 if _values_equal(current, proposed):
                     proposal = self._proposal(
-                        batch, row, target_object="Account",
+                        batch,
+                        row,
+                        target_object="Account",
                         target_record_id=target_account_id,
-                        field_name=account_field, label=label,
-                        proposed_value=proposed, original_value=current,
+                        field_name=account_field,
+                        label=label,
+                        proposed_value=proposed,
+                        original_value=current,
                     )
                     result = ActionResult(
                         proposal, None, ActionStatus.NOOP, action="already current"
@@ -5149,7 +5415,9 @@ class InteractiveProfileUpdateProcessor:
         )
         portal_preview = self._portal_user_preview(proposal)
         if portal_preview:
-            self._display_event(ContextLine("Portal User access", styled(portal_preview)))
+            self._display_event(
+                ContextLine("Portal User access", styled(portal_preview))
+            )
 
     def _portal_user_preview(self, proposal: ChangeProposal) -> str:
         """Describe the expected Portal User outcome alongside a write preview."""
@@ -5187,7 +5455,8 @@ class InteractiveProfileUpdateProcessor:
         if proposal.target_object == "Account":
             try:
                 account = self.client.get_record(
-                    "Account", proposal.target_record_id,
+                    "Account",
+                    proposal.target_record_id,
                     ["Id", "Cert_Certification_Status__c"],
                 )
             except SalesforceError:
@@ -5679,7 +5948,27 @@ def format_response_emails(
             suffix = "" if response.changed else " - no change"
             lines.extend(["", f"{response.label}: {response.contact_details}{suffix}"])
             if response.previous_details:
-                lines.append(f"Replaces {response.previous_details}")
+                previous_email = _summary_email(response.previous_details)
+                current_email = _summary_email(response.contact_details)
+                if (
+                    previous_email
+                    and previous_email == current_email
+                    and is_generic_mailbox(previous_email)
+                ):
+                    if response.contact_details.startswith(response.account_name):
+                        lines.append(
+                            f"{response.previous_details} was removed from shared "
+                            f"address {previous_email}; the mailbox remains as "
+                            f"{response.contact_details}."
+                        )
+                    else:
+                        lines.append(
+                            f"At shared address {previous_email}, "
+                            f"{response.contact_details} replaces "
+                            f"{response.previous_details}."
+                        )
+                else:
+                    lines.append(f"Replaces {response.previous_details}")
         for label, outcome, result in requests:
             lines.extend(["", f"{label}: {result}"])
             if outcome == "handed off":
@@ -5699,6 +5988,19 @@ def _proposal_context(row: dict[str, str]) -> str:
     if row.get("personnel_notes"):
         parts.append(f"Other Personnel notes: {row['personnel_notes']}")
     return "\n".join(parts)
+
+
+def _mailbox_purpose(email: str) -> str:
+    """Turn a shared mailbox local part into a readable Contact last name."""
+    local_part = email.partition("@")[0]
+    words = re.sub(r"[._+-]+", " ", local_part).split()
+    return " ".join(word.capitalize() for word in words)
+
+
+def _summary_email(summary: str) -> str:
+    """Extract the email shown in a Contact summary, when present."""
+    match = re.search(r"<([^<>]+@[^<>]+)>", summary)
+    return match.group(1).strip() if match else ""
 
 
 def _latest_nonblank(records: list[dict[str, Any]], field_name: str) -> str:
@@ -5830,9 +6132,7 @@ def _operator_handoff_reasons(
     for email_key, group in by_email.items():
         if len({name for _, name, _, _ in group if name}) > 1:
             for source_id, _, _, _ in group:
-                reasons.add(
-                    f"{source_id}: conflicting submitted names for {email_key}"
-                )
+                reasons.add(f"{source_id}: conflicting submitted names for {email_key}")
     for local, group in by_local.items():
         domains = {email_key.split("@", 1)[1] for _, _, _, email_key in group}
         if len(domains) > 1:
@@ -5844,8 +6144,13 @@ def _operator_handoff_reasons(
 def _operator_only_account_field(field_name: str) -> bool:
     """Return whether an Account field always needs operator handling."""
     return field_name in {
-        "Name", "Company_Owner__c", "BillingStreet", "BillingCity",
-        "BillingState", "BillingPostalCode", "BillingCountry",
+        "Name",
+        "Company_Owner__c",
+        "BillingStreet",
+        "BillingCity",
+        "BillingState",
+        "BillingPostalCode",
+        "BillingCountry",
     }
 
 

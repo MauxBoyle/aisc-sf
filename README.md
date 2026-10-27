@@ -631,6 +631,12 @@ change and the expected Portal User result before the final Salesforce check.
 See [Profile Update processing](docs/usage.md#process-profile-updates-command)
 for operator steps.
 
+Before changing the name on a recognized shared mailbox Contact, processing
+checks every Account role that points to that Contact. If the lookup fails or
+any linked Account is outside the current company's family, it leaves the
+Contact unchanged and records an operator handoff. Review those linked roles
+before retrying the Case.
+
 Case preparation uses the submitter on the newest source submission for the
 Case Contact, sorting by `CreatedDate` and then Salesforce ID. During review,
 the Case context lists distinct submitter email addresses with their names and
