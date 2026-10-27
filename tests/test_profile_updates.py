@@ -406,7 +406,7 @@ def test_submission_reuses_received_case_and_appends_name_once():
     counts = service(client).run()
 
     assert counts.reused == 1
-    assert not any(query[0] == "Contact" for query in client.queries)
+    assert any(query[0] == "Contact" for query in client.queries)
     assert client.updated == [
         (
             "Case",
