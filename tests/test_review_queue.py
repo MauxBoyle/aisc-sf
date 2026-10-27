@@ -52,11 +52,27 @@ def queue_row(**changes):
 def test_manifest_is_frozen_versioned_and_empty_queue_has_no_default():
     manifest = build_review_queue([], now=NOW)
 
-    assert manifest.schema_version == 1
+    assert manifest.schema_version == 2
     assert manifest.default_next_item_id is None
     assert manifest.batches == ()
     with pytest.raises(FrozenInstanceError):
         manifest.schema_version = 2
+
+
+def test_batch_retry_outcomes_round_trip_independently(tmp_path):
+    manifest = build_review_queue([queue_row(revised_company_name="New Name")], now=NOW)
+    store = ReviewQueueStore(tmp_path / "review_queue.json", manifest)
+    batch = store.manifest.batches[0]
+    store.record_batch_state(batch.id, response_context='{"roles": []}')
+    store.record_batch_state(batch.id, outcome=("email:owner@example.com", "not_sent"))
+    store.record_batch_state(batch.id, outcome=("portal_user", "created"))
+
+    loaded = read_review_queue(store.path).batches[0]
+    assert loaded.response_context == '{"roles": []}'
+    assert dict(loaded.outcomes) == {
+        "email:owner@example.com": "not_sent",
+        "portal_user": "created",
+    }
 
 
 def test_ids_json_and_order_are_stable_when_input_is_shuffled():
@@ -351,7 +367,7 @@ def test_json_publish_replaces_atomically_and_store_preserves_queue_path(
     monkeypatch.setattr("aisc_salesforce.review_queue.os.replace", recording_replace)
 
     assert write_review_queue(manifest, path) == path
-    assert json.loads(path.read_text())["schema_version"] == 1
+    assert json.loads(path.read_text())["schema_version"] == 2
     assert replacements[-1][1] == path
     assert replacements[-1][0] != path
 
