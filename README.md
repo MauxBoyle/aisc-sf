@@ -619,6 +619,16 @@ succeeds, so a failed run cannot leave a partial snapshot.
 
 ### Interactive Profile Update processing
 
+The review lets Garrett decide routine Contact and Account-role changes. It
+routes company-name, facility-address, ownership, incomplete submitter identity,
+conflicting names on one email, email-domain changes, and Portal User
+provisioning failures to the operator. Safe independent Contact and role work
+can still finish on the same Case; the handoff reason is written to the audit
+and the Case remains Pending. Each Contact or role preview shows the proposed
+change and the expected Portal User result before the final Salesforce check.
+See [Profile Update processing](docs/usage.md#process-profile-updates-command)
+for operator steps.
+
 Review the [Profile Update write and Flow map](docs/profile-update-write-flow-map.md)
 before retrying a failed batch. It shows the Account, Contact, role, Case,
 source Profile Update, Portal User, and Audit write points, plus the active

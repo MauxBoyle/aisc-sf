@@ -212,6 +212,7 @@ class ActionStatus(StrEnum):
     INTERRUPTED = "interrupted"
     STOPPED_EARLY = "stopped early"
     DEFERRED_MANUAL = "deferred manual follow-up"
+    HANDED_OFF = "handed off to operator"
 
 
 _FINAL_VALUE_UNSET = object()
@@ -378,6 +379,7 @@ class _ContactWorkItem:
     current_contact: dict[str, Any] | None = None
     reconciled: dict[str, str] | None = None
     write_values: dict[str, str] | None = None
+    handoff_reasons: tuple[str, ...] = ()
     decisions: dict[str, ReviewDecision] | None = None
     results: dict[str, ActionResult] | None = None
     submitter_assigned: bool = False
@@ -1291,6 +1293,7 @@ class InteractiveProfileUpdateProcessor:
         self._active_change_id: str | None = None
         self._review_rows: list[dict[str, str]] | None = None
         self._resuming_session = False
+        self._handoff_reasons: list[str] = []
         self.participant_user_provisioning = participant_user_provisioning
         self.provisioning_environment = provisioning_environment
 
@@ -1798,14 +1801,26 @@ class InteractiveProfileUpdateProcessor:
             )
         )
         fresh_by_id = self._fresh_case_submissions(batch)
+        self._handoff_reasons = []
+        identity_reasons = _operator_handoff_reasons(list(fresh_by_id.values()))
+        for reason in identity_reasons:
+            source_id = reason.split(":", 1)[0]
+            self._record_handoff(
+                batch,
+                reason,
+                target_object="Company_Profile_Change__c",
+                target_record_id=source_id,
+            )
         self._show_case_context(batch, fresh_by_id)
         routing = self._preflight_parent_routing(batch, fresh_by_id)
         if routing.blocked:
-            return self._defer_parent_batch(batch, routing)
+            self._defer_parent_batch(batch, routing)
         self._show_account_history(batch, list(fresh_by_id.values()))
 
-        role_contact_snapshots = self._capture_role_contact_snapshots(
-            routing.target_accounts
+        role_contact_snapshots = (
+            {}
+            if routing.blocked
+            else self._capture_role_contact_snapshots(routing.target_accounts)
         )
 
         # Every row overview and checkpoint happens before the first Salesforce write.
@@ -1851,18 +1866,26 @@ class InteractiveProfileUpdateProcessor:
             for source_key, item_key in source_mapping.items()
         }
         for item in contact_items:
+            item.handoff_reasons = tuple(
+                reason for reason in identity_reasons
+                if reason.split(":", 1)[0] in item.source_submission_ids
+            )
             self._reconcile_contact_fields(batch, item)
         for item in contact_items:
             self._prepare_contact_decisions(batch, item)
 
         results: list[ActionResult] = []
         for item in contact_items:
+            if item.handoff_reasons:
+                continue
             results.extend(self._execute_automatic_contact_work(batch, item))
 
         self._display_event(
             Heading(styled("Manual Contact Follow-up"), STAGE_SEPARATOR)
         )
         for item in contact_items:
+            if item.handoff_reasons:
+                continue
             results.extend(self._execute_manual_contact_work(batch, item))
         self._refresh_completed_contacts(contact_items)
         for item in contact_items:
@@ -1870,7 +1893,9 @@ class InteractiveProfileUpdateProcessor:
 
         self._display_event(Heading(styled("Account Updates"), STAGE_SEPARATOR))
         account_results: list[ActionResult] = []
-        for target_index, target_account in enumerate(routing.target_accounts):
+        for target_index, target_account in enumerate(
+            () if routing.blocked else routing.target_accounts
+        ):
             target_account_id = _required_record_text(
                 target_account, "Id", "Affected Account ID"
             )
@@ -1894,7 +1919,9 @@ class InteractiveProfileUpdateProcessor:
 
         self._display_event(Heading(styled("Role Links"), STAGE_SEPARATOR))
         role_responses: list[_RoleResponse] = []
-        for target_index, target_account in enumerate(routing.target_accounts):
+        for target_index, target_account in enumerate(
+            () if routing.blocked else routing.target_accounts
+        ):
             target_account_id = _required_record_text(
                 target_account, "Id", "Affected Account ID"
             )
@@ -1925,7 +1952,11 @@ class InteractiveProfileUpdateProcessor:
             results,
             account_results,
             role_responses,
-            {item.contact_id for item in contact_items if item.contact_id},
+            (
+                {item.contact_id for item in contact_items if item.contact_id}
+                if not routing.blocked
+                else set()
+            ),
         )
 
     def _collect_contact_work(
@@ -2575,6 +2606,35 @@ class InteractiveProfileUpdateProcessor:
         original_target = item.contact_id
         if item.contact_id:
             try:
+                fresh_contact = self.client.get_record(
+                    "Contact", item.contact_id, ["Id", *approved]
+                )
+                changed_since_preview = {
+                    field_name: fresh_contact.get(field_name)
+                    for field_name, value in approved.items()
+                    if not _values_equal(
+                        fresh_contact.get(field_name),
+                        (item.original_contact or {}).get(field_name),
+                    )
+                    and not _values_equal(fresh_contact.get(field_name), value)
+                }
+                if changed_since_preview:
+                    error = (
+                        "Contact fields changed in Salesforce after the preview; "
+                        "the proposed update was not applied."
+                    )
+                    self._fail_contact_fields(
+                        batch, item, approved, error,
+                        action="final Salesforce check",
+                    )
+                    raise ProcessingError(error)
+                approved = {
+                    field_name: value
+                    for field_name, value in approved.items()
+                    if not _values_equal(fresh_contact.get(field_name), value)
+                }
+                if not approved:
+                    return []
                 self._update_record("Contact", item.contact_id, approved)
             except SalesforceError as error:
                 self._fail_contact_fields(
@@ -3305,6 +3365,8 @@ class InteractiveProfileUpdateProcessor:
                     )
                 )
                 continue
+            if item.handoff_reasons:
+                continue
 
             final_contact = item.current_contact
             if final_contact is None:
@@ -3421,7 +3483,11 @@ class InteractiveProfileUpdateProcessor:
                 "Status__c",
                 ProfileChangeStatus.CLOSED,
             )
-        case_status = CaseStatus.CLOSED if all_sent else CaseStatus.PENDING
+        case_status = (
+            CaseStatus.PENDING
+            if self._handoff_reasons or not all_sent
+            else CaseStatus.CLOSED
+        )
         self._update_status_with_audit(
             batch,
             batch.case_id,
@@ -3429,7 +3495,7 @@ class InteractiveProfileUpdateProcessor:
             "Status",
             case_status,
         )
-        return not all_sent
+        return bool(self._handoff_reasons) or not all_sent
 
     def _provision_missing_participant_users(
         self, batch: CaseBatch, contact_ids: set[str]
@@ -3440,9 +3506,14 @@ class InteractiveProfileUpdateProcessor:
         as pending, while the source Profile Updates remain New for a retry.
         """
         if self.provisioning_environment is None:
-            raise ProcessingError(
-                "External User provisioning configuration was not provided."
+            self._record_handoff(
+                batch,
+                "Portal User provisioning configuration is unavailable.",
+                target_object="User",
+                target_record_id="",
+                field_name="Provisioning",
             )
+            return
         try:
             outcomes = self.participant_user_provisioning.provision(
                 contact_ids,
@@ -3458,19 +3529,22 @@ class InteractiveProfileUpdateProcessor:
                 )
             )
             self._append_provisioning_audit(batch, error.outcome, ActionStatus.FAILED)
-            raise ProcessingError(
-                f"External User provisioning failed: {error.outcome.message}"
-            ) from error
+            self._record_handoff(
+                batch,
+                f"Portal User provisioning failed: {error.outcome.message}",
+                target_object="User", target_record_id=error.outcome.contact_id,
+                field_name="Provisioning",
+            )
+            return
         except ParticipantUserProvisioningError as error:
             self._append_provisioning_audit(batch, error.outcome, ActionStatus.FAILED)
-            subject = (
-                f" for Contact {error.outcome.contact_id}"
-                if error.outcome.contact_id
-                else ""
+            self._record_handoff(
+                batch,
+                f"Portal User provisioning failed: {error.outcome.message}",
+                target_object="User", target_record_id=error.outcome.contact_id,
+                field_name="Provisioning",
             )
-            raise ProcessingError(
-                f"External User provisioning failed{subject}: {error.outcome.message}"
-            ) from error
+            return
         for outcome in outcomes:
             if outcome.code == "applicant_portal_access_deferred":
                 try:
@@ -4102,6 +4176,7 @@ class InteractiveProfileUpdateProcessor:
             action="defer parent Account batch for manual follow-up",
             error=reason,
         )
+        self._handoff_reasons.append(reason)
         return True
 
     def _show_case_context(
@@ -4267,6 +4342,48 @@ class InteractiveProfileUpdateProcessor:
                 # Parent routing intentionally leaves unsubmitted child fields alone.
                 continue
             if not proposed:
+                continue
+            if _operator_only_account_field(account_field):
+                try:
+                    current = self.client.get_record(
+                        "Account", target_account_id, ["Id", account_field]
+                    ).get(account_field)
+                except SalesforceError as error:
+                    failed = ActionResult(
+                        self._proposal(
+                            batch, row, target_object="Account",
+                            target_record_id=target_account_id,
+                            field_name=account_field, label=label,
+                            proposed_value=proposed,
+                        ),
+                        None,
+                        ActionStatus.FAILED,
+                        action="refresh before operator handoff",
+                        error=str(error),
+                    )
+                    self._append_audit(failed)
+                    raise ProcessingError(str(error)) from error
+                if _values_equal(current, proposed):
+                    proposal = self._proposal(
+                        batch, row, target_object="Account",
+                        target_record_id=target_account_id,
+                        field_name=account_field, label=label,
+                        proposed_value=proposed, original_value=current,
+                    )
+                    result = ActionResult(
+                        proposal, None, ActionStatus.NOOP, action="already current"
+                    )
+                    self._append_audit(result)
+                    results.append(result)
+                    continue
+                self._record_handoff(
+                    batch,
+                    f"{label} change requires operator review.",
+                    target_object="Account",
+                    target_record_id=target_account_id,
+                    field_name=account_field,
+                    proposed_value=proposed,
+                )
                 continue
             proposal = self._proposal(
                 batch,
@@ -4763,6 +4880,27 @@ class InteractiveProfileUpdateProcessor:
             return result
 
         try:
+            fresh = self.client.get_record(
+                proposal.target_object,
+                proposal.target_record_id,
+                ["Id", proposal.field_name],
+            )
+            fresh_value = fresh.get(proposal.field_name)
+            if not _values_equal(fresh_value, proposal.original_value):
+                error = (
+                    f"{proposal.label} changed in Salesforce after the preview; "
+                    "the proposed update was not applied."
+                )
+                failed = ActionResult(
+                    proposal,
+                    decision,
+                    ActionStatus.FAILED,
+                    action="final Salesforce check",
+                    error=error,
+                    final_value=fresh_value,
+                )
+                self._append_audit(failed)
+                raise ProcessingError(error)
             self._update_record(
                 proposal.target_object,
                 proposal.target_record_id,
@@ -4811,6 +4949,11 @@ class InteractiveProfileUpdateProcessor:
             and isinstance(proposal.proposed_value, dict)
         ):
             self._show_mapping_proposal(proposal)
+            portal_preview = self._portal_user_preview(proposal)
+            if portal_preview:
+                self._display_event(
+                    ContextLine("Portal User access", styled(portal_preview))
+                )
             return
         self._display_event(
             ScalarComparison(
@@ -4819,6 +4962,56 @@ class InteractiveProfileUpdateProcessor:
                 ValueFragment(proposed, ValueOrigin.SUBMITTED),
             )
         )
+        portal_preview = self._portal_user_preview(proposal)
+        if portal_preview:
+            self._display_event(ContextLine("Portal User access", styled(portal_preview)))
+
+    def _portal_user_preview(self, proposal: ChangeProposal) -> str:
+        """Describe the expected Portal User outcome alongside a write preview."""
+        if proposal.target_object == "Contact":
+            contact_id = proposal.target_record_id
+        elif proposal.target_object == "Account" and proposal.field_name in {
+            role.account_lookup for role in ACCOUNT_ROLE_DEFINITIONS
+        }:
+            contact_id = _display(proposal.proposed_value)
+        else:
+            return ""
+        if not contact_id or contact_id == "(new)":
+            return "Deferred until the Contact is created and linked to a role."
+        if self.participant_user_provisioning is None:
+            return "No Portal User provisioning service is configured in this run."
+        if not isinstance(
+            self.participant_user_provisioning, ParticipantUserProvisioningService
+        ):
+            return "Portal access is checked after approved role links finish."
+        try:
+            users = self.client.query_records(
+                "User",
+                ["Id", "IsActive", "ContactId"],
+                where=(
+                    f"ContactId = '{escape_soql_string(contact_id)}' "
+                    "AND IsActive = TRUE"
+                ),
+            )
+        except SalesforceError:
+            return "Outcome requires operator follow-up if provisioning fails."
+        if users:
+            return "Reuse the existing active Portal User."
+        if proposal.target_object == "Contact":
+            return "Defer until the approved role links are complete."
+        if proposal.target_object == "Account":
+            try:
+                account = self.client.get_record(
+                    "Account", proposal.target_record_id,
+                    ["Id", "Cert_Certification_Status__c"],
+                )
+            except SalesforceError:
+                return "Outcome will be checked after the role link is refreshed."
+            if account.get("Cert_Certification_Status__c") == "Initials":
+                return "Defer Portal access until the Account is certified."
+            if account.get("Cert_Certification_Status__c") == "Certified":
+                return "Create a Portal User after the approved role link."
+        return "Defer until the role is eligible on a Certified Account."
 
     def _show_mapping_proposal(self, proposal: ChangeProposal) -> None:
         """Show dictionary-backed changes as readable field comparisons."""
@@ -5033,6 +5226,43 @@ class InteractiveProfileUpdateProcessor:
             )
         )
 
+    def _record_handoff(
+        self,
+        batch: CaseBatch,
+        reason: str,
+        *,
+        target_object: str,
+        target_record_id: str,
+        field_name: str = "",
+        proposed_value: Any = "",
+    ) -> None:
+        """Record an operator handoff without stopping unrelated Case work."""
+        self._handoff_reasons.append(reason)
+        proposal = ChangeProposal(
+            source_submission_ids=batch.source_submission_ids,
+            case_id=batch.case_id,
+            case_number=batch.case_number,
+            account_id=batch.account_id,
+            account_name=batch.rows[0].get("account_name", ""),
+            submitter_email="",
+            target_object=target_object,
+            target_record_id=target_record_id,
+            field_name=field_name or "operator_handoff",
+            label="Operator handoff",
+            original_value="",
+            proposed_value=proposed_value,
+            reason=reason,
+        )
+        self._append_audit(
+            ActionResult(
+                proposal,
+                None,
+                ActionStatus.HANDED_OFF,
+                action="route decision to operator",
+                error=reason,
+            )
+        )
+
     def _append_audit(self, result: ActionResult) -> None:
         if self._audit is None:
             raise RuntimeError("Audit writer is unavailable.")
@@ -5049,6 +5279,8 @@ class InteractiveProfileUpdateProcessor:
         elif result.status in {ActionStatus.FAILED, ActionStatus.INTERRUPTED}:
             status = QueueStatus.FAILED
         elif result.status is ActionStatus.DEFERRED_MANUAL:
+            status = QueueStatus.BLOCKED
+        elif result.status is ActionStatus.HANDED_OFF:
             status = QueueStatus.BLOCKED
         else:
             return
@@ -5068,6 +5300,7 @@ class InteractiveProfileUpdateProcessor:
             ActionStatus.FAILED,
             ActionStatus.INTERRUPTED,
             ActionStatus.DEFERRED_MANUAL,
+            ActionStatus.HANDED_OFF,
         }:
             self._transition_default(status, outcome=result.status.value)
 
@@ -5368,6 +5601,54 @@ def _is_duplicate_contact_error(error: SalesforceError) -> bool:
 
 def _section_heading(title: str, separator: str = STAGE_SEPARATOR) -> str:
     return f"\n{separator}\n{title}\n{separator}"
+
+
+def _operator_handoff_reasons(
+    submissions: list[dict[str, Any]],
+) -> tuple[str, ...]:
+    """Return source-specific reasons an operator must resolve identity risk."""
+    reasons: set[str] = set()
+    identities: list[tuple[str, str, str, str]] = []
+    for submission in submissions:
+        source_id = _display(submission.get("Id") or submission.get("Name"))
+        name = normalize_contact_value("name", submission.get("Name__c"))
+        email = normalize_contact_value("email", submission.get("Email__c"))
+        _, last_name = _split_person_name(name)
+        if not last_name:
+            reasons.add(f"{source_id}: missing last name")
+        if not email:
+            reasons.add(f"{source_id}: missing email")
+        normalized, email_key, _ = normalize_email(email)
+        identities.append((source_id, name.casefold(), normalized, email_key))
+
+    by_email: dict[str, list[tuple[str, str, str, str]]] = {}
+    by_local: dict[str, list[tuple[str, str, str, str]]] = {}
+    for identity in identities:
+        source_id, name, email, email_key = identity
+        if not email_key:
+            continue
+        by_email.setdefault(email_key, []).append(identity)
+        by_local.setdefault(email_key.split("@", 1)[0], []).append(identity)
+    for email_key, group in by_email.items():
+        if len({name for _, name, _, _ in group if name}) > 1:
+            for source_id, _, _, _ in group:
+                reasons.add(
+                    f"{source_id}: conflicting submitted names for {email_key}"
+                )
+    for local, group in by_local.items():
+        domains = {email_key.split("@", 1)[1] for _, _, _, email_key in group}
+        if len(domains) > 1:
+            for source_id, _, _, _ in group:
+                reasons.add(f"{source_id}: email domain changed for {local}")
+    return tuple(sorted(reasons))
+
+
+def _operator_only_account_field(field_name: str) -> bool:
+    """Return whether an Account field always needs operator handling."""
+    return field_name in {
+        "Name", "Company_Owner__c", "BillingStreet", "BillingCity",
+        "BillingState", "BillingPostalCode", "BillingCountry",
+    }
 
 
 def _account_choice_label(account: dict[str, Any]) -> str:
