@@ -203,7 +203,11 @@ def build_review_queue(
 
     completed_rows: list[StagedRow] = []
     for raw, shell in zip(rows, row_models, strict=True):
-        changes = [*_setup_changes(raw, shell), *_account_changes(raw, shell)]
+        changes = [
+            *_setup_changes(raw, shell),
+            *_account_changes(raw, shell),
+            *_request_changes(raw, shell),
+        ]
         changes.extend(contact_changes.get(shell.id, ()))
         changes.extend(_role_link_changes(raw, shell))
         ordered = tuple(sorted(changes, key=_change_sort_key))
@@ -988,6 +992,47 @@ def _account_changes(raw: dict[str, str], row: StagedRow) -> list[ProposedChange
         if (proposed := raw.get(csv_name, "").strip())
         and (submitted_parent_fields is None or field in submitted_parent_fields)
     ]
+
+
+def _request_changes(raw: dict[str, str], row: StagedRow) -> list[ProposedChange]:
+    """Add one queue item for every submitted comment or personnel note."""
+    try:
+        requests = json.loads(raw.get("request_items", "[]") or "[]")
+    except (TypeError, ValueError):
+        requests = []
+    if not isinstance(requests, list):
+        return []
+    labels = {
+        "Comments__c": "Comment",
+        "Other_Personnel_Notes__c": "Other Personnel note",
+    }
+    changes = []
+    for item in requests:
+        if not isinstance(item, dict):
+            continue
+        source_id = str(item.get("source_submission_id", "")).strip()
+        field = str(item.get("field", "")).strip()
+        value = item.get("value")
+        if source_id not in row.source_submission_ids or field not in labels:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            continue
+        request_row = replace(row, source_submission_ids=(source_id,))
+        changes.append(
+            _change(
+                request_row,
+                phase=QueuePhase.ACCOUNT,
+                object_name="Company_Profile_Change__c",
+                record_id=source_id,
+                target_context=source_id,
+                field=field,
+                label=f"{labels[field]} from {source_id}",
+                current_value=None,
+                proposed_value=value,
+                context="request_item",
+            )
+        )
+    return changes
 
 
 def _submitted_parent_account_fields(raw: dict[str, str]) -> set[str] | None:

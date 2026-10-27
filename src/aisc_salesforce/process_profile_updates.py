@@ -1826,6 +1826,7 @@ class InteractiveProfileUpdateProcessor:
             )
         )
         fresh_by_id = self._fresh_case_submissions(batch)
+        self._refresh_request_items_from_fresh(batch, fresh_by_id)
         self._handoff_reasons = []
         identity_reasons = _operator_handoff_reasons(list(fresh_by_id.values()))
         for reason in identity_reasons:
@@ -3477,7 +3478,10 @@ class InteractiveProfileUpdateProcessor:
         role_responses: list[_RoleResponse],
         contact_ids: set[str],
     ) -> bool:
-        emails = format_response_emails(account_results, role_responses)
+        request_responses = self._review_request_items(batch)
+        emails = format_response_emails(
+            account_results, role_responses, request_responses
+        )
         all_sent = True
         for email, text in emails.items():
             response_writer.append(batch.case_id, email, text)
@@ -3505,6 +3509,22 @@ class InteractiveProfileUpdateProcessor:
         if all_sent and self.participant_user_provisioning is not None:
             self._provision_missing_participant_users(batch, contact_ids)
         for source_id in batch.source_submission_ids:
+            unresolved_requests = [
+                change
+                for change in self._queued_request_items(batch)
+                if source_id in change.source_submission_ids
+                and change.outcome is None
+            ]
+            if unresolved_requests:
+                self._display_event(
+                    WarningNotice(
+                        styled(
+                            f"Profile Update {source_id} remains open because "
+                            "a submitted request has no recorded result."
+                        )
+                    )
+                )
+                continue
             self._update_status_with_audit(
                 batch,
                 source_id,
@@ -3525,6 +3545,137 @@ class InteractiveProfileUpdateProcessor:
             case_status,
         )
         return bool(self._handoff_reasons) or not all_sent
+
+    def _queued_request_items(self, batch: CaseBatch):
+        if self._queue_store is None:
+            return ()
+        source_ids = set(batch.source_submission_ids)
+        return tuple(
+            change
+            for queued_batch in self._queue_store.manifest.batches
+            if queued_batch.case.record_id == batch.case_id
+            for row in queued_batch.rows
+            for change in row.changes
+            if change.context == "request_item"
+            and source_ids.intersection(change.source_submission_ids)
+        )
+
+    def _refresh_request_items_from_fresh(
+        self, batch: CaseBatch, submissions: dict[str, dict[str, Any]]
+    ) -> None:
+        """Backfill request queue items from fresh records, including older CSVs."""
+        if self._review_rows is None:
+            return
+        source_ids = set(batch.source_submission_ids)
+        changed = False
+        for row in self._review_rows:
+            row_sources = set(_json_string_list(row.get("source_submission_ids", "[]")))
+            if not source_ids.intersection(row_sources):
+                continue
+            # New staging snapshots carry this field, even when it is empty.
+            # Only older CSVs that predate the field need a live-record backfill.
+            if "request_items" in row:
+                continue
+            requests = [
+                {
+                    "source_submission_id": source_id,
+                    "field": field_name,
+                    "value": _display(submissions[source_id].get(field_name)),
+                }
+                for source_id in sorted(source_ids.intersection(row_sources))
+                for field_name in ("Comments__c", "Other_Personnel_Notes__c")
+                if _display(submissions[source_id].get(field_name))
+            ]
+            serialized = json.dumps(requests, ensure_ascii=False, sort_keys=True)
+            if row.get("request_items") != serialized:
+                row["request_items"] = serialized
+                changed = True
+        if changed:
+            self.refresh_review_queue(self._review_rows)
+
+    def _review_request_items(self, batch: CaseBatch):
+        """Record an addressed or handed-off result for every open request."""
+        from .review_ui import FreeTextQuestion
+
+        responses = []
+        for change in self._queued_request_items(batch):
+            if change.outcome is not None:
+                # Queue outcomes are stored as "addressed: ..." or "handed off: ...".
+                outcome, _, result = change.outcome.partition(": ")
+                email = self._request_submitter_email(batch, change)
+                responses.append((email, change.label, outcome, result))
+                continue
+            decision = self._ask_choice(
+                ChoiceQuestion(
+                    styled(
+                        "Request: ",
+                        ValueFragment(str(change.proposed_value), ValueOrigin.SUBMITTED),
+                        "\nWas this request addressed or handed off? ",
+                    ),
+                    (
+                        ReviewChoice("addressed", "addressed"),
+                        ReviewChoice("handed_off", "handed off"),
+                    ),
+                    styled("Choose addressed or handed off."),
+                )
+            )
+            while True:
+                answer = self.ui.ask(
+                    FreeTextQuestion(styled("Briefly record the result: "))
+                )
+                if not isinstance(answer, FreeTextAnswer):
+                    raise UnsupportedReviewInteractionError(
+                        "Request result requires a free-text answer."
+                    )
+                result = answer.text.strip()
+                if result:
+                    break
+                self._display_event(ValidationFeedback(styled("Enter a brief result.")))
+            wording = "handed off" if decision == "handed_off" else "addressed"
+            proposal = ChangeProposal(
+                source_submission_ids=change.source_submission_ids,
+                case_id=batch.case_id,
+                account_id=batch.account_id,
+                account_name=batch.rows[0].get("account_name", ""),
+                submitter_email="",
+                target_object="Company_Profile_Change__c",
+                target_record_id=change.salesforce.record_id,
+                field_name=change.field,
+                label=change.label,
+                original_value="",
+                proposed_value=change.proposed_value,
+            )
+            self._append_audit(
+                ActionResult(
+                    proposal,
+                    None,
+                    ActionStatus.HANDED_OFF
+                    if decision == "handed_off"
+                    else ActionStatus.VERIFIED_MANUAL,
+                    action=f"request {wording}",
+                    error=result,
+                )
+            )
+            stored = f"{wording}: {result}"
+            if self._queue_store is not None:
+                self._queue_store.transition(change.id, QueueStatus.COMPLETED, outcome=stored)
+                self._display_event(ReviewQueueSnapshot(self._queue_store.manifest))
+            if decision == "handed_off":
+                self._handoff_reasons.append(f"{change.label} was handed off: {result}")
+            responses.append(
+                (self._request_submitter_email(batch, change), change.label, wording, result)
+            )
+        return responses
+
+    def _request_submitter_email(self, batch: CaseBatch, change) -> str:
+        if self._review_rows is None:
+            return ""
+        source_id = change.source_submission_ids[0]
+        row = next(
+            (row for row in batch.rows if source_id in _json_string_list(row["source_submission_ids"])),
+            None,
+        )
+        return row.get("submitter_email", "").strip() if row else ""
 
     def _provision_missing_participant_users(
         self, batch: CaseBatch, contact_ids: set[str]
@@ -5439,6 +5590,7 @@ class InteractiveProfileUpdateProcessor:
 def format_response_emails(
     results: list[ActionResult],
     role_responses: list[_RoleResponse] | None = None,
+    request_responses: list[tuple[str, str, str, str]] | None = None,
 ) -> dict[str, str]:
     """Return one response paragraph per submitter email."""
     grouped: dict[str, list[ChangeProposal]] = {}
@@ -5461,11 +5613,19 @@ def format_response_emails(
             continue
         roles_by_email.setdefault(email, []).append(response)
 
+    requests_by_email: dict[str, list[tuple[str, str, str]]] = {}
+    for email, label, outcome, result in request_responses or []:
+        if email.strip():
+            requests_by_email.setdefault(email.strip(), []).append(
+                (label, outcome, result)
+            )
+
     emails: dict[str, str] = {}
-    ordered_emails = dict.fromkeys([*grouped, *roles_by_email])
+    ordered_emails = dict.fromkeys([*grouped, *roles_by_email, *requests_by_email])
     for email in ordered_emails:
         proposals = grouped.get(email, [])
         roles = roles_by_email.get(email, [])
+        requests = requests_by_email.get(email, [])
         account_name = next(
             (
                 proposal.account_name.strip()
@@ -5520,6 +5680,10 @@ def format_response_emails(
             lines.extend(["", f"{response.label}: {response.contact_details}{suffix}"])
             if response.previous_details:
                 lines.append(f"Replaces {response.previous_details}")
+        for label, outcome, result in requests:
+            lines.extend(["", f"{label}: {result}"])
+            if outcome == "handed off":
+                lines.append("Pending follow-up")
         emails[email] = "\n".join(lines)
     return emails
 

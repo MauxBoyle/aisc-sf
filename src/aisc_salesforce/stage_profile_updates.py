@@ -96,6 +96,7 @@ SHARED_COLUMNS = [
     "contact_resolutions",
     "comments",
     "personnel_notes",
+    "request_items",
     "has_contact_derived_values",
     "has_no_update_content",
     "has_warnings",
@@ -389,6 +390,20 @@ class ProfileUpdateStagingService:
                 "comments": _collect_submitted_values(records, "Comments__c"),
                 "personnel_notes": _collect_submitted_values(
                     records, "Other_Personnel_Notes__c"
+                ),
+                "request_items": json.dumps(
+                    [
+                        {
+                            "source_submission_id": _clean_text(record.get("Id")),
+                            "field": field_name,
+                            "value": _display_value(record.get(field_name)),
+                        }
+                        for record in records
+                        for field_name in ("Comments__c", "Other_Personnel_Notes__c")
+                        if _has_value(record.get(field_name))
+                    ],
+                    ensure_ascii=False,
+                    sort_keys=True,
                 ),
                 "has_contact_derived_values": "false",
                 "has_no_update_content": (

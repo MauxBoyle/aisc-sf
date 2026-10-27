@@ -526,7 +526,9 @@ except that every nonblank Comments and Other Personnel Notes value is
 preserved in submission order and joined with a newline. Different emails stay
 separate, and every blank-email submission stays separate and receives a
 warning. Each CSV row preserves all source submission IDs and names as JSON
-arrays.
+arrays. The `request_items` JSON column also retains each nonblank Comment and
+Other Personnel note with its source submission ID, so identical text from two
+submissions remains separately reviewable.
 
 Submitted contact values are canonicalized before role matching and
 `contact_resolutions` creation. Submitter and role emails are trimmed and
@@ -947,7 +949,14 @@ Statuses are `pending`, `in_progress`, `blocked`, `completed`, `failed`, and
 `stopped_early`; a completed change also keeps its audit outcome, such as
 `applied`, `verified manually`, `rejected`, or `no-op`. Parent work deferred to
 manual processing keeps the `deferred manual follow-up` outcome on blocked queue
-work. The default-next pointer
+work. Each nonblank Comment and Other Personnel note is also a separate queue
+item tied to its source submission, even when two submissions contain identical
+text. For each request, the reviewer records whether it was addressed or handed
+off and enters a brief result. The queue keeps that result across refreshes and
+resumes, and the audit log records the decision as it is made. The source Profile
+Update stays open until every request has a recorded result. A handed-off request
+is named as pending follow-up in the participant response and keeps the Case
+Pending. The default-next pointer
 is the first unblocked pending change and becomes `null` when none remains.
 
 The JSON Lines audit is flushed after every decision and Salesforce result.
@@ -973,8 +982,9 @@ sending it through the normal email system, the reviewer confirms `yes` or
 `no`.
 
 When all rows in a Case batch are resolved, source Profile Updates are set to
-`Closed`. Answering `yes` after every generated response confirms the email was
-sent and closes the Case too; otherwise the Case remains `Pending`.
+`Closed` after every submitted request has a recorded result. Answering `yes`
+after every generated response confirms the email was sent and closes the Case
+too; otherwise the Case remains `Pending`.
 
 A deliberate `Q` or `Quit` is audited and returns exit code `0`. The current
 Case stays `Pending`, its Profile Updates stay open, no response text is
