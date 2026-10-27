@@ -229,7 +229,8 @@ def test_audit_preserves_open_received_status_and_skips_newer_other_case():
     }
     client = FakeClient(audits=[audit()], cases={"account-1": [open_received]})
 
-    service(client).run()
+    profile_service = service(client)
+    profile_service.run()
 
     assert not client.updated
 
@@ -341,6 +342,55 @@ def test_new_submission_creates_received_case_with_exact_payload():
         )
     ]
     assert client.posted == [("case-created-1", build_submission_summary(submission()))]
+
+
+def test_newest_submission_selects_case_contact_by_created_date_then_id():
+    older = submission(Id="submission-old", CreatedDate="2026-07-14T00:00:00.000+0000")
+    newest = submission(Id="submission-z", CreatedDate="2026-07-15T00:00:00.000+0000")
+    tied = submission(Id="submission-a", CreatedDate="2026-07-15T00:00:00.000+0000")
+    client = FakeClient(
+        submissions=[older, tied, newest],
+        contacts=[
+            {"Id": "contact-newest", "AccountId": "account-1", "Email": "submitter@example.com"},
+            {"Id": "contact-tied", "AccountId": "account-1", "Email": "tied@example.com"},
+        ],
+    )
+    newest["Email__c"] = "submitter@example.com"
+    tied["Email__c"] = "tied@example.com"
+
+    profile_service = service(client)
+    profile_service.run()
+
+    assert client.created[0][1]["ContactId"] == "contact-newest"
+    assert profile_service.contact_assignments == [
+        {
+            "source_submission_id": "submission-z",
+            "case_id": "case-created-1",
+            "account_id": "account-1",
+            "original_contact_id": "",
+            "contact_id": "contact-newest",
+        }
+    ]
+
+
+def test_unresolved_newest_submitter_is_counted_for_manual_follow_up():
+    older = submission(Id="submission-old", CreatedDate="2026-07-14T00:00:00.000+0000")
+    newest = submission(
+        Id="submission-newest",
+        CreatedDate="2026-07-15T00:00:00.000+0000",
+        Email__c="unmatched@example.com",
+    )
+    client = FakeClient(submissions=[older, newest], contacts=[])
+
+    profile_service = service(client)
+    counts = profile_service.run()
+
+    assert counts.deferred_manual == 1
+    assert any(
+        "submission-newest" in error and "manual follow-up" in error
+        for error in profile_service.errors
+    )
+    assert client.created[0][1]["ContactId"] is None
 
 
 def test_submission_reuses_received_case_and_appends_name_once():
