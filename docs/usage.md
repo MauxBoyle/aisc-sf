@@ -950,6 +950,20 @@ Populated Key Data fields remain visible in their normal CSV columns and in
 
 ## Process Profile Updates command
 
+### Blank submissions
+
+For a Key Data submission marked as having no update content, review shows
+Account History entries within six hours of the submission timestamp, including
+the creator. It highlights whether Susan Thomas made a change in that window.
+A matching change selects an acknowledgment for that submission; no match
+selects a clarification request for it.
+Clarification text comes from the submission comments or personnel notes, and
+recipient addresses are listed once per distinct submitter. Send the prepared
+email yourself and confirm whether it was sent. A declined or missing email
+confirmation leaves the source Profile Update open and the Case Pending. The
+selected response path and email confirmation are recorded in
+`review_audit.jsonl`.
+
 ### Shared mailbox and departure checks
 
 Before a recognized shared mailbox Contact's name is changed, processing looks

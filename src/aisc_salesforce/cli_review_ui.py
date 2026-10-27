@@ -265,6 +265,9 @@ class CLIReviewUI:
             line.append_text(_value(event.new_value))
             line.append(" at ")
             line.append_text(_raw_value(event.created_at))
+            if event.created_by.value:
+                line.append(" by ")
+                line.append_text(_raw_value(event.created_by))
             self._emit(line)
         elif isinstance(event, ResponseEmail):
             title = Text("Response email for ")

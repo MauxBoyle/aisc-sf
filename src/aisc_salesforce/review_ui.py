@@ -233,6 +233,7 @@ class AccountHistory:
     old_value: ValueFragment
     new_value: ValueFragment
     created_at: ValueFragment
+    created_by: ValueFragment = ValueFragment("")
 
 
 @dataclass(frozen=True)

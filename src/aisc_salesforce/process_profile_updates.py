@@ -1320,6 +1320,7 @@ class InteractiveProfileUpdateProcessor:
         self._review_rows: list[dict[str, str]] | None = None
         self._resuming_session = False
         self._handoff_reasons: list[str] = []
+        self._blank_pending_source_ids: set[str] = set()
         self.participant_user_provisioning = participant_user_provisioning
         self.provisioning_environment = provisioning_environment
 
@@ -1829,6 +1830,7 @@ class InteractiveProfileUpdateProcessor:
         fresh_by_id = self._fresh_case_submissions(batch)
         self._refresh_request_items_from_fresh(batch, fresh_by_id)
         self._handoff_reasons = []
+        self._blank_pending_source_ids = set()
         identity_reasons = _operator_handoff_reasons(list(fresh_by_id.values()))
         for reason in identity_reasons:
             source_id = reason.split(":", 1)[0]
@@ -3749,9 +3751,22 @@ class InteractiveProfileUpdateProcessor:
             not response.submitter_email.strip() for response in role_responses
         )
         all_sent = all_sent and not successful_without_email and not missing_role_email
-        if all_sent and self.participant_user_provisioning is not None:
+        if (
+            all_sent
+            and not self._blank_pending_source_ids
+            and self.participant_user_provisioning is not None
+        ):
             self._provision_missing_participant_users(batch, contact_ids)
         for source_id in batch.source_submission_ids:
+            if source_id in self._blank_pending_source_ids:
+                self._display_event(
+                    WarningNotice(
+                        styled(
+                            f"Profile Update {source_id} remains open because its blank-submission response is pending."
+                        )
+                    )
+                )
+                continue
             unresolved_requests = [
                 change
                 for change in self._queued_request_items(batch)
@@ -4735,18 +4750,99 @@ class InteractiveProfileUpdateProcessor:
         submissions: list[dict[str, Any]],
     ) -> None:
         account_id = batch.account_id
-        days = {
-            _required_datetime(_display(submission.get("CreatedDate")))
-            .astimezone(CHICAGO)
-            .date()
+        blank_submissions = [
+            submission
             for submission in submissions
             if _display(submission.get("CreatedDate"))
-        }
-        for day in sorted(days):
-            local_start = datetime.combine(day, time.min, tzinfo=CHICAGO)
-            local_end = local_start + timedelta(days=1)
-            start = local_start.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-            end = local_end.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            and _display(submission.get("Type__c")) == "Key Data"
+            and any(
+                row.get("has_no_update_content") == "true"
+                and _display(submission.get("Id"))
+                in _json_string_list(row.get("source_submission_ids", "[]"))
+                for row in batch.rows
+            )
+        ]
+        timestamps = blank_submissions or submissions
+        if blank_submissions:
+            windows = {
+                (
+                    (
+                        _required_datetime(_display(item.get("CreatedDate")))
+                        - timedelta(hours=6)
+                    )
+                    .astimezone(UTC)
+                    .strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    (
+                        _required_datetime(_display(item.get("CreatedDate")))
+                        + timedelta(hours=6)
+                    )
+                    .astimezone(UTC)
+                    .strftime("%Y-%m-%dT%H:%M:%SZ"),
+                )
+                for item in timestamps
+            }
+            regular_dates = {
+                _required_datetime(_display(item.get("CreatedDate")))
+                .astimezone(CHICAGO)
+                .date()
+                for item in submissions
+                if item not in blank_submissions and _display(item.get("CreatedDate"))
+            }
+            windows.update(
+                (
+                    datetime.combine(day, time.min, tzinfo=CHICAGO)
+                    .astimezone(UTC)
+                    .strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    (
+                        datetime.combine(day, time.min, tzinfo=CHICAGO)
+                        + timedelta(days=1)
+                    )
+                    .astimezone(UTC)
+                    .strftime("%Y-%m-%dT%H:%M:%SZ"),
+                )
+                for day in regular_dates
+            )
+        else:
+            days = {
+                _required_datetime(_display(item.get("CreatedDate")))
+                .astimezone(CHICAGO)
+                .date()
+                for item in timestamps
+            }
+            windows = {
+                (
+                    datetime.combine(day, time.min, tzinfo=CHICAGO)
+                    .astimezone(UTC)
+                    .strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    (
+                        datetime.combine(day, time.min, tzinfo=CHICAGO)
+                        + timedelta(days=1)
+                    )
+                    .astimezone(UTC)
+                    .strftime("%Y-%m-%dT%H:%M:%SZ"),
+                )
+                for day in days
+            }
+        if not windows:
+            return
+        # Merge overlapping windows so a submission near midnight is covered
+        # by timestamps, not by its local calendar date.
+        parsed = sorted(
+            (
+                datetime.strptime(a, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC),
+                datetime.strptime(b, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC),
+            )
+            for a, b in windows
+        )
+        merged: list[tuple[datetime, datetime]] = []
+        for start_dt, end_dt in parsed:
+            if merged and start_dt <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end_dt))
+            else:
+                merged.append((start_dt, end_dt))
+        for start_dt, end_dt in merged:
+            start = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            end = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
             history = self.client.query_records(
                 "AccountHistory",
                 ACCOUNT_HISTORY_FIELDS,
@@ -4763,8 +4859,160 @@ class InteractiveProfileUpdateProcessor:
                         ValueFragment(_display(item.get("OldValue"))),
                         ValueFragment(_display(item.get("NewValue"))),
                         ValueFragment(_display(item.get("CreatedDate"))),
+                        ValueFragment(
+                            _display((item.get("CreatedBy") or {}).get("Name"))
+                        ),
                     )
                 )
+        if blank_submissions:
+            # Keep each history result attached to its own submission. A Case
+            # batch can contain submissions with different evidence outcomes.
+            response_groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+            distinct_contacts: list[str] = []
+            for submission in blank_submissions:
+                source_id = _display(submission.get("Id"))
+                submitted_at = _required_datetime(
+                    _display(submission.get("CreatedDate"))
+                )
+                start = (
+                    (submitted_at - timedelta(hours=6))
+                    .astimezone(UTC)
+                    .strftime("%Y-%m-%dT%H:%M:%SZ")
+                )
+                end = (
+                    (submitted_at + timedelta(hours=6))
+                    .astimezone(UTC)
+                    .strftime("%Y-%m-%dT%H:%M:%SZ")
+                )
+                entries = self.client.query_records(
+                    "AccountHistory",
+                    ACCOUNT_HISTORY_FIELDS,
+                    where=(
+                        f"AccountId = '{escape_soql_string(account_id)}' AND CreatedDate >= {start} AND CreatedDate < {end}"
+                    ),
+                    order_by="CreatedDate ASC, Id ASC",
+                )
+                evidence_found = any(
+                    _display((entry.get("CreatedBy") or {}).get("Name")).casefold()
+                    == "susan thomas"
+                    for entry in entries
+                )
+                choice = "acknowledge" if evidence_found else "clarify"
+                self._display_event(
+                    Notice(
+                        styled(
+                            f"Profile Update {source_id}: "
+                            + (
+                                "Account History contains a change by Susan Thomas within six hours; prepare an acknowledgment."
+                                if evidence_found
+                                else "no matching Account History change by Susan Thomas was found within six hours; request clarification."
+                            )
+                        )
+                    )
+                )
+                detail = _display(submission.get("Comments__c")) or _display(
+                    submission.get("Other_Personnel_Notes__c")
+                )
+                if detail:
+                    self._display_event(
+                        ContextLine(
+                            f"Clarification text from Profile Update {source_id}",
+                            styled(detail),
+                        )
+                    )
+                email = _display(submission.get("Email__c")).strip()
+                if email and email not in distinct_contacts:
+                    distinct_contacts.append(email)
+                response_groups.setdefault((email, choice), []).append(submission)
+            self._display_event(
+                ContextLine(
+                    "Distinct submitters to contact",
+                    styled(
+                        ", ".join(distinct_contacts)
+                        if distinct_contacts
+                        else "(no email available)"
+                    ),
+                )
+            )
+            for (email, choice), grouped_submissions in response_groups.items():
+                group_source_ids = {
+                    _display(item.get("Id")) for item in grouped_submissions
+                }
+                proposal = ChangeProposal(
+                    source_submission_ids=tuple(sorted(group_source_ids)),
+                    case_id=batch.case_id,
+                    account_id=account_id,
+                    account_name=batch.rows[0].get("account_name", ""),
+                    submitter_email=email,
+                    target_object="Case",
+                    target_record_id=batch.case_id,
+                    field_name="blank_submission_response",
+                    label="Blank submission response",
+                    original_value="",
+                    proposed_value=choice,
+                    context=(
+                        "Susan Thomas history match"
+                        if choice == "acknowledge"
+                        else "No history match"
+                    ),
+                )
+                self._append_audit(
+                    ActionResult(
+                        proposal,
+                        None,
+                        ActionStatus.NOOP,
+                        action="record blank submission response choice",
+                    )
+                )
+                details = list(
+                    dict.fromkeys(
+                        _display(item.get("Comments__c"))
+                        or _display(item.get("Other_Personnel_Notes__c"))
+                        for item in grouped_submissions
+                        if _display(item.get("Comments__c"))
+                        or _display(item.get("Other_Personnel_Notes__c"))
+                    )
+                )
+                body = (
+                    "Thank you for your submission. We have reviewed the information provided."
+                    if choice == "acknowledge"
+                    else "Thank you for your submission. Could you please clarify the information noted below?\n\n"
+                    + (
+                        "\n".join(details)
+                        if details
+                        else "Please provide the missing update details."
+                    )
+                )
+                if not email:
+                    self._blank_pending_source_ids.update(group_source_ids)
+                    self._handoff_reasons.append(
+                        "Blank submission response is pending because no submitter email is available."
+                    )
+                    continue
+                self._display_event(
+                    ResponseEmail(ValueFragment(email, ValueOrigin.SUBMITTED), body)
+                )
+                sent = self._prompt_yes_no(
+                    styled(
+                        "Was the response email to ",
+                        ValueFragment(email),
+                        " sent? [yes/no]: ",
+                    )
+                )
+                result = ActionResult(
+                    replace(proposal, submitter_email=email),
+                    None,
+                    ActionStatus.VERIFIED_MANUAL
+                    if sent
+                    else ActionStatus.DEFERRED_MANUAL,
+                    action="confirm blank submission response email",
+                )
+                self._append_audit(result)
+                if not sent:
+                    self._handoff_reasons.append(
+                        f"Blank submission response email to {email} is still pending."
+                    )
+                    self._blank_pending_source_ids.update(group_source_ids)
 
     def _review_account_proposals(
         self,

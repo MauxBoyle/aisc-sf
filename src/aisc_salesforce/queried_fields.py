@@ -62,6 +62,7 @@ SUBMISSION_FIELDS = (
     "Name",
     "CreatedDate",
     "Status__c",
+    "Type__c",
     "Account__c",
     "Account__r.Name",
     "Email__c",
@@ -167,6 +168,7 @@ ACCOUNT_HISTORY_FIELDS = (
     "OldValue",
     "NewValue",
     "CreatedDate",
+    "CreatedBy.Name",
 )
 
 RENAME_CASE_FIELDS = ("Id", "CaseNumber", "Subject", "CreatedDate")
@@ -195,6 +197,7 @@ CODE_QUERIED_FIELDS: dict[str, tuple[str, ...]] = {
 # Relationship fields are inventoried on the object that owns the field.
 RELATIONSHIP_OWNERS: dict[tuple[str, str], str] = {
     ("Case", "Account"): "Account",
+    ("AccountHistory", "CreatedBy"): "User",
     ("Cert_Audit__c", "Cert_Account__r"): "Account",
     ("Company_Profile_Change__c", "Account__r"): "Account",
 }
