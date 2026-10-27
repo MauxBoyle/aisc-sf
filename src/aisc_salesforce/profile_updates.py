@@ -78,6 +78,7 @@ class AutomationCounts:
     created: int = 0
     reused: int = 0
     skipped: int = 0
+    deferred_manual: int = 0
     failed: int = 0
 
 
@@ -154,6 +155,9 @@ class ProfileUpdateService:
         self.errors: list[str] = []
         self._case_cache: dict[str, list[dict[str, Any]]] = {}
         self._feed_cache: dict[str, list[str]] = {}
+        self._newest_submission_by_account: dict[str, dict[str, Any]] = {}
+        self.contact_assignments: list[dict[str, str]] = []
+        self.deferred_followups: list[str] = []
 
     def run(self, submission_ids: Collection[str] | None = None) -> AutomationCounts:
         """Process normal work, or only the captured submissions when IDs are given."""
@@ -203,6 +207,15 @@ class ProfileUpdateService:
                 and _clean_text(record.get("Account__c"))
             ]
 
+        self._newest_submission_by_account = {}
+        self.contact_assignments.clear()
+        self.deferred_followups.clear()
+        for record in submissions:
+            account_id = _clean_text(record.get("Account__c"))
+            current = self._newest_submission_by_account.get(account_id)
+            if current is None or _submission_sort_key(record) > _submission_sort_key(current):
+                self._newest_submission_by_account[account_id] = record
+
         counts = AutomationCounts()
         for record in audits:
             if not is_eligible_audit(record, self.today):
@@ -211,6 +224,7 @@ class ProfileUpdateService:
             self._count_record(counts, self._process_audit, record)
         for record in submissions:
             self._count_record(counts, self._process_submission, record)
+        counts.deferred_manual = len(set(self.deferred_followups))
         return counts
 
     def _count_record(
@@ -339,6 +353,33 @@ class ProfileUpdateService:
             and subject_has_profile_update(case.get("Subject"), update_name)
             for case in cases
         ):
+            newest_submission = self._newest_submission_by_account.get(
+                account_id, submission
+            )
+            if _clean_text(newest_submission.get("Id")) == _clean_text(
+                submission.get("Id")
+            ):
+                newest_contact = self._submission_contact(newest_submission, account_id)
+                if newest_contact is None:
+                    submission_id = _clean_text(newest_submission.get("Id")) or "unknown"
+                    self._defer_submitter_followup(submission_id)
+                else:
+                    target_case = self._newest(
+                        case
+                        for case in cases
+                        if parse_aisc_profile_update_subject(case.get("Subject"))
+                        is not None
+                        and subject_has_profile_update(case.get("Subject"), update_name)
+                    )
+                    if target_case is not None and target_case.get("ContactId") != newest_contact:
+                        self.client.update_record(
+                            "Case", _required_text(target_case, "Id", "Case ID"),
+                            {"ContactId": newest_contact},
+                        )
+                        self._record_contact_assignment(
+                            newest_submission, target_case, account_id, newest_contact
+                        )
+                        target_case["ContactId"] = newest_contact
             return "skipped"
 
         same_name_cases = [
@@ -366,12 +407,30 @@ class ProfileUpdateService:
             case_id = _required_text(received, "Id", "Case ID")
             old_subject = _required_text(received, "Subject", "Case Subject")
             subject = append_profile_update(old_subject, update_name, created_date)
-            self.client.update_record("Case", case_id, {"Subject": subject})
+            newest_submission = self._newest_submission_by_account.get(
+                account_id, submission
+            )
+            contact_id = self._submission_contact(newest_submission, account_id)
+            update_payload: dict[str, Any] = {"Subject": subject}
+            if contact_id is None:
+                submission_id = _clean_text(newest_submission.get("Id")) or "unknown"
+                self._defer_submitter_followup(submission_id)
+            elif contact_id != _clean_text(received.get("ContactId")):
+                update_payload["ContactId"] = contact_id
+                self._record_contact_assignment(
+                    newest_submission, received, account_id, contact_id
+                )
+                received["ContactId"] = contact_id
+            self.client.update_record("Case", case_id, update_payload)
             received["Subject"] = subject
             self._post_if_missing(case_id, summary)
             return "reused"
 
-        contact_id = self._submission_contact(submission, account_id)
+        newest_submission = self._newest_submission_by_account.get(account_id, submission)
+        contact_id = self._submission_contact(newest_submission, account_id)
+        if contact_id is None:
+            submission_id = _clean_text(newest_submission.get("Id")) or "unknown"
+            self._defer_submitter_followup(submission_id)
         subject = build_aisc_profile_update_subject(
             account_name,
             [ProfileUpdateReference(update_name, created_date)],
@@ -390,12 +449,26 @@ class ProfileUpdateService:
         )
         if expected is not None:
             case_id = _required_text(expected, "Id", "Case ID")
-            self.client.update_record("Case", case_id, payload)
-            expected.update(payload)
+            update_payload = dict(payload)
+            if contact_id is None:
+                update_payload.pop("ContactId")
+            self.client.update_record("Case", case_id, update_payload)
+            if contact_id is not None and contact_id != _clean_text(expected.get("ContactId")):
+                self._record_contact_assignment(
+                    newest_submission, expected, account_id, contact_id
+                )
+            expected.update(update_payload)
             self._post_if_missing(case_id, summary)
             return "reused"
 
         case_id = self.client.create_record("Case", payload)
+        if contact_id is not None:
+            self._record_contact_assignment(
+                newest_submission,
+                {"Id": case_id, "ContactId": None},
+                account_id,
+                contact_id,
+            )
         cases.append(
             {
                 "Id": case_id,
@@ -406,6 +479,34 @@ class ProfileUpdateService:
         )
         self._post_if_missing(case_id, summary)
         return "created"
+
+    def _defer_submitter_followup(self, submission_id: str) -> None:
+        """Keep unresolved newest identities visible without hiding Case work."""
+        message = (
+            f"{submission_id}: newest submitter Contact could not be resolved; "
+            "manual follow-up is required."
+        )
+        if message not in self.deferred_followups:
+            self.deferred_followups.append(message)
+            self.errors.append(message)
+
+    def _record_contact_assignment(
+        self,
+        submission: dict[str, Any],
+        case: dict[str, Any],
+        account_id: str,
+        contact_id: str,
+    ) -> None:
+        """Keep the chosen source ID beside each Case Contact assignment."""
+        self.contact_assignments.append(
+            {
+                "source_submission_id": _clean_text(submission.get("Id")),
+                "case_id": _required_text(case, "Id", "Case ID"),
+                "account_id": account_id,
+                "original_contact_id": _clean_text(case.get("ContactId")),
+                "contact_id": contact_id,
+            }
+        )
 
     def _case_payload(
         self,
@@ -514,4 +615,9 @@ def _record_date(value: Any) -> date:
 
 
 def _case_sort_key(record: dict[str, Any]) -> tuple[str, str]:
+    return (_clean_text(record.get("CreatedDate")), _clean_text(record.get("Id")))
+
+
+def _submission_sort_key(record: dict[str, Any]) -> tuple[str, str]:
+    """Sort submissions by creation time, then Salesforce ID for stable ties."""
     return (_clean_text(record.get("CreatedDate")), _clean_text(record.get("Id")))

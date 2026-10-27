@@ -561,6 +561,28 @@ class ProfileUpdateProcessingWorkflow:
                 preserve_completed=True,
             )
             raise
+        for assignment in getattr(self.case_service, "contact_assignments", []):
+            audit_path = session.path / "review_audit.jsonl"
+            entry = {
+                "source_submission_ids": [assignment["source_submission_id"]],
+                "case_id": assignment["case_id"],
+                "account_id": assignment["account_id"],
+                "target_object": "Case",
+                "target_record_id": assignment["case_id"],
+                "field": "ContactId",
+                "label": "Case Contact from newest Profile Update submitter",
+                "original_value": assignment["original_contact_id"],
+                "proposed_value": assignment["contact_id"],
+                "final_value": assignment["contact_id"],
+                "decision": "apply automatically",
+                "action": "assign newest submitter Contact to Case",
+                "result": ActionStatus.APPLIED.value,
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
+            with audit_path.open("a", encoding="utf-8") as audit_file:
+                audit_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                audit_file.flush()
+                os.fsync(audit_file.fileno())
         if counts.failed:
             self.processor.transition_setup(
                 "Case",
@@ -585,8 +607,11 @@ class ProfileUpdateProcessingWorkflow:
         self.output_fn(
             "Case preparation complete: "
             f"{counts.created} created, {counts.reused} reused, "
-            f"{counts.skipped} skipped."
+            f"{counts.skipped} skipped, "
+            f"{counts.deferred_manual} manual follow-up required."
         )
+        for followup in getattr(self.case_service, "deferred_followups", []):
+            self.output_fn(f"Manual follow-up: {followup}")
         return counts
 
     def review(self, session_id: str, output_dir: Path) -> ProcessingResult:
@@ -4197,25 +4222,30 @@ class InteractiveProfileUpdateProcessor:
             batch.account_id,
         )
         self._display_event(ContextLine("Account", (ValueFragment(account_name),)))
-        submitters = dict.fromkeys(
-            (
-                row.get("submitter_name", "").strip(),
-                row.get("submitter_email", "").strip(),
-            )
-            for row in batch.rows
-        )
-        for name, email in submitters:
+        submitters: dict[str, tuple[list[str], str]] = {}
+        for row in batch.rows:
+            name = row.get("submitter_name", "").strip() or "(name unavailable)"
+            email = row.get("submitter_email", "").strip() or "(email unavailable)"
+            normalized = email.casefold() if email != "(email unavailable)" else ""
+            key = normalized or f"missing:{name.casefold()}:{email}"
+            names, shown_email = submitters.setdefault(key, ([], email))
+            if name not in names:
+                names.append(name)
+        for names, email in submitters.values():
             self._display_event(
                 ContextLine(
                     "Submitter",
                     styled(
-                        ValueFragment(name, ValueOrigin.SUBMITTED),
+                        ValueFragment(" / ".join(names), ValueOrigin.SUBMITTED),
                         " <",
                         ValueFragment(email, ValueOrigin.SUBMITTED),
                         ">",
                     ),
                 )
             )
+        self._display_event(
+            Notice(styled("Include all submitters when preparing the participant email."))
+        )
 
         for submission in submissions_by_id.values():
             self._display_event(

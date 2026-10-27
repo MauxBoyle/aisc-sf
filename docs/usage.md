@@ -1101,6 +1101,14 @@ newly created submitter Contact is linked to the Case, the reviewer must
 explicitly verify the identity. Choosing no leaves the Case open and unlinked
 for follow-up.
 
+At the start of the Case review, the context lists submitters deduplicated by
+trimmed, case-insensitive email address. Distinct names associated with the
+same address are all shown. Include all listed parties when preparing the
+participant email. During Case preparation, the submitter on the newest source
+submission supplies the Case Contact; ties use the highest Salesforce ID. If
+that submitter cannot be matched to one safe Contact, leave the Case Contact
+unchanged and handle the identity as manual follow-up.
+
 For another front end, implement `ReviewUI.display(event)` and
 `ReviewUI.ask(question)`, then pass that object to
 `InteractiveProfileUpdateProcessor`. Events include headings, notices, scalar
