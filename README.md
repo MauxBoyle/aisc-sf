@@ -804,6 +804,13 @@ decisions always require an explicit answer. Published CSV files must include
 the complete current contract, including `contact_resolutions`; older staged
 files fail validation.
 
+The read-only overview checks each freshly fetched submission for an incomplete
+submitter identity, different names using the same normalized email, and an
+email-domain change across submissions. Warnings name the source Profile Update
+and reason, including earlier names that the combined CSV row may hide. Before
+a newly created submitter Contact is linked to the Case, explicitly confirm its
+identity. Answer `N` to leave the Case open and unlinked for follow-up.
+
 Each real field change accepts a shortcut or its complete decision phrase:
 
 - `A` or `apply automatically` writes the displayed value to Salesforce.

@@ -159,9 +159,10 @@ def account_record(**changes):
 
 
 class Feeder:
-    def __init__(self, answers, *, row_answers=None):
+    def __init__(self, answers, *, row_answers=None, identity_answer="yes"):
         self.answers = iter(answers)
         self.row_answers = iter(row_answers or [])
+        self.identity_answer = identity_answer
         self.prompts = []
 
     def __call__(self, prompt):
@@ -171,6 +172,8 @@ class Feeder:
             if isinstance(answer, BaseException):
                 raise answer
             return answer
+        if prompt.startswith("Verify that the newly created submitter Contact"):
+            return self.identity_answer
         answer = next(self.answers)
         if isinstance(answer, BaseException):
             raise answer
@@ -2591,6 +2594,78 @@ def test_new_contract_reuses_submitter_role_contact_and_assigns_case(tmp_path):
     assert contact_create["comparison_key"] == "sam@example.com"
     assert case_assignment["target_record_id"] == "case-1"
     assert role_assignment["selected_contact"]["Id"] == "created-1"
+
+
+def test_declining_created_submitter_identity_check_leaves_case_open_and_unlinked(
+    tmp_path,
+):
+    client = FakeClient()
+    sources = [ContactSource("submitter", submission_id="submission-1")]
+    row = staged_row(
+        contact_resolutions=staged_resolution(
+            sources=sources,
+            submitted={
+                "first_name": "Sam",
+                "last_name": "Submitter",
+                "email": "sam@example.com",
+            },
+        )
+    )
+    feeder = Feeder(["apply automatically"] * 3, identity_answer="no")
+    processor = InteractiveProfileUpdateProcessor(
+        client, input_fn=feeder, output_fn=lambda message: None, now=NOW
+    )
+
+    result = processor.review([row], tmp_path)
+
+    assert not any(
+        object_name == "Case" and "ContactId" in values
+        for object_name, _, values in client.updated
+    )
+    assert client.records[("Case", "case-1")]["Status"] == "Pending"
+    assert result.pending_batches == 1
+
+
+def test_submitter_identity_warnings_name_each_source_and_reason():
+    output = []
+    processor = InteractiveProfileUpdateProcessor(
+        FakeClient(), output_fn=output.append, now=NOW
+    )
+
+    processor._show_submitter_identity_warnings(
+        [
+            source_record(
+                Id="submission-1",
+                Name="PU-100",
+                Name__c="Sam Smith",
+                Email__c="SAM@example.com",
+            ),
+            source_record(
+                Id="submission-2",
+                Name="PU-101",
+                Name__c="Samuel Smith",
+                Email__c="SAM@example.com",
+            ),
+            source_record(
+                Id="submission-3",
+                Name="PU-102",
+                Name__c="Sam Smith",
+                Email__c="sam@new-example.com",
+            ),
+            source_record(
+                Id="submission-4",
+                Name="PU-103",
+                Name__c="Sam Smith",
+                Email__c="",
+            ),
+        ]
+    )
+
+    rendered = "\n".join(output)
+    assert "PU-100: submitted name 'Sam Smith'" in rendered
+    assert "PU-101: submitted name 'Samuel Smith'" in rendered
+    assert "PU-102: submitter email domain changed" in rendered
+    assert "PU-103: incomplete submitter identity (missing email)" in rendered
 
 
 def test_fresh_contact_collection_normalizes_values_before_comparison():

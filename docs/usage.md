@@ -1091,6 +1091,16 @@ and does not become a proposed write. Comments, Other Personnel Notes, and Key
 Data answers are shown for context; detailed review decisions still control
 which Salesforce fields are changed.
 
+The overview also checks every freshly fetched source submission for an
+incomplete submitter name or email, different names sharing a normalized email,
+and an email-domain change for the same normalized local part. Each warning
+names the source Profile Update and reason, so an earlier identity is visible
+even when the combined CSV row contains only a later value. These are review
+signals and do not by themselves block unrelated review decisions. Before a
+newly created submitter Contact is linked to the Case, the reviewer must
+explicitly verify the identity. Choosing no leaves the Case open and unlinked
+for follow-up.
+
 For another front end, implement `ReviewUI.display(event)` and
 `ReviewUI.ask(question)`, then pass that object to
 `InteractiveProfileUpdateProcessor`. Events include headings, notices, scalar

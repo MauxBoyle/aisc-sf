@@ -2947,6 +2947,23 @@ class InteractiveProfileUpdateProcessor:
             source.kind == "submitter" for source in item.sources
         ):
             return []
+        answer = self._ask_choice(
+            ChoiceQuestion(
+                styled(
+                    "Verify that the newly created submitter Contact matches "
+                    "the person who submitted this Profile Update? [Y/N] "
+                ),
+                (
+                    ReviewChoice("verify", "Yes, verify identity", ("y", "yes")),
+                    ReviewChoice(
+                        "defer", "No, leave Case open for follow-up", ("n", "no")
+                    ),
+                ),
+                styled("Choose Y to verify or N to defer Case linking."),
+            )
+        )
+        if answer != "verify":
+            raise ProcessingStoppedEarly
         item.submitter_assigned = True
         return [
             self._assign_created_submitter_to_case(
@@ -3579,6 +3596,7 @@ class InteractiveProfileUpdateProcessor:
         snapshots: dict[tuple[str, str], _RoleContactSnapshot],
     ) -> None:
         """Show a read-only summary of submitted data beside current Salesforce."""
+        self._show_submitter_identity_warnings(submissions)
         account = target_accounts[0] if target_accounts else {}
         account_fields = (
             ("Company Name", "Revised_Company_Name__c", "Name", "revised_company_name"),
@@ -3635,6 +3653,7 @@ class InteractiveProfileUpdateProcessor:
                     ValueFragment(_display(account.get(current_field)) or "(blank)"),
                 )
             )
+
         for label, csv_field in (
             ("Key Data", "has_key_updates"),
             ("Profile", "comments"),
@@ -3764,6 +3783,69 @@ class InteractiveProfileUpdateProcessor:
                         ),
                     )
                 )
+
+    def _show_submitter_identity_warnings(
+        self, submissions: list[dict[str, Any]]
+    ) -> None:
+        """Show source-specific identity warnings from freshly fetched submissions."""
+        identities: list[tuple[str, str, str]] = []
+        for submission in submissions:
+            name = normalize_contact_value("name", submission.get("Name__c"))
+            email = normalize_contact_value("email", submission.get("Email__c"))
+            first_name, last_name = _split_person_name(name)
+            source = _display(submission.get("Name") or submission.get("Id"))
+            if not first_name or not last_name or not email:
+                missing = []
+                if not first_name or not last_name:
+                    missing.append("full name")
+                if not email:
+                    missing.append("email")
+                self._display_event(
+                    WarningNotice(
+                        styled(
+                            f"Profile Update {source}: incomplete submitter identity "
+                            f"(missing {' and '.join(missing)})."
+                        )
+                    )
+                )
+            identities.append((source, name, email))
+
+        by_email: dict[str, list[tuple[str, str, str]]] = {}
+        by_local: dict[str, list[tuple[str, str, str]]] = {}
+        for identity in identities:
+            _, email_key, _ = normalize_email(identity[2])
+            if email_key:
+                by_email.setdefault(email_key, []).append(identity)
+                by_local.setdefault(email_key.split("@", 1)[0], []).append(identity)
+        for group in by_email.values():
+            if len({name.casefold() for _, name, _ in group if name}) > 1:
+                for source, name, email in group:
+                    self._display_event(
+                        WarningNotice(
+                            styled(
+                                f"Profile Update {source}: submitted name {name!r} "
+                                f"shares normalized email {email!r} with a different "
+                                "submitted name."
+                            )
+                        )
+                    )
+        for group in by_local.values():
+            domains = {
+                email.rsplit("@", 1)[1].casefold()
+                for _, _, email in group
+                if "@" in email
+            }
+            if len(domains) > 1:
+                for source, _, email in group:
+                    self._display_event(
+                        WarningNotice(
+                            styled(
+                                f"Profile Update {source}: submitter email domain "
+                                f"changed to {email!r} across submissions sharing "
+                                "the same normalized local part."
+                            )
+                        )
+                    )
 
     def _fresh_case_submissions(self, batch: CaseBatch) -> dict[str, dict[str, Any]]:
         return {
