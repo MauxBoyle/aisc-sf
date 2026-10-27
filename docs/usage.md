@@ -1084,6 +1084,13 @@ review actions. The CLI adapter sends both kinds of output to the configured
 terminal output function. Visual separators mark stages, Cases, staged rows,
 individual Contact reviews, and response-email sections.
 
+Before each staged-row continue prompt, review the read-only Profile Update
+overview. It lists submitted role and Account values, staged context values,
+and the current Account role Contacts. Supplemented context is labeled as such
+and does not become a proposed write. Comments, Other Personnel Notes, and Key
+Data answers are shown for context; detailed review decisions still control
+which Salesforce fields are changed.
+
 For another front end, implement `ReviewUI.display(event)` and
 `ReviewUI.ask(question)`, then pass that object to
 `InteractiveProfileUpdateProcessor`. Events include headings, notices, scalar

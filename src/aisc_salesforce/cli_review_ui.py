@@ -31,6 +31,7 @@ from .review_ui import (
     ParentAccountConflict,
     ParentAccountHierarchyConflict,
     ParentAccountNoActiveChildren,
+    ProfileUpdateOverviewRow,
     ResponseEmail,
     ReviewAnswer,
     ReviewEvent,
@@ -247,6 +248,14 @@ class CLIReviewUI:
                     )
                 )
             self._emit(_section_heading(heading, "-" * 72))
+        elif isinstance(event, ProfileUpdateOverviewRow):
+            line = Text(f"{event.section} — {event.label}\nSubmitted: ")
+            line.append_text(_value(event.submitted))
+            line.append("\nSupplemented context: ")
+            line.append_text(_value(event.supplemented))
+            line.append("\nCurrent Salesforce: ")
+            line.append_text(_value(event.current))
+            self._emit(line)
         elif isinstance(event, AccountHistory):
             line = Text("Account History: ")
             line.append_text(_raw_value(event.field))

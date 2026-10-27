@@ -23,6 +23,7 @@ from aisc_salesforce.review_ui import (
     ParentAccountFieldConflict,
     ParentAccountHierarchyConflict,
     ParentAccountNoActiveChildren,
+    ProfileUpdateOverviewRow,
     ResponseEmail,
     ReviewChoice,
     ReviewQueueSnapshot,
@@ -238,6 +239,24 @@ def test_cli_renders_scalar_and_mapping_comparisons_compatibly():
         "\nCompany Name\nCurrent Salesforce value: Acme\nProposed value: Acme Steel",
         "\nContact: Alex Smith\nSalesforce changes:\n"
         "Email: old@example.com -> new@example.com",
+    ]
+
+
+def test_cli_renders_read_only_profile_overview_with_origin_labels():
+    output = []
+    ui = CLIReviewUI(output_fn=output.append)
+    ui.display(
+        ProfileUpdateOverviewRow(
+            "Certification",
+            "Email",
+            ValueFragment("new@example.com", ValueOrigin.SUBMITTED),
+            ValueFragment("(none)"),
+            ValueFragment("old@example.com"),
+        )
+    )
+    assert output == [
+        "Certification — Email\nSubmitted: new@example.com\n"
+        "Supplemented context: (none)\nCurrent Salesforce: old@example.com"
     ]
 
 

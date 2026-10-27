@@ -607,6 +607,12 @@ other cases needing human review. An unmatched submitted name uses the
 `create_contact` resolution action and warns that a new Contact will need to be
 created.
 
+During interactive review, a read-only overview appears before the staged-row
+continue prompt. It compares submitted Account and role values with current
+Salesforce values and labels staged context separately. Review it alongside
+Key Data answers, Comments, and Other Personnel Notes; it does not approve or
+propose any Salesforce write.
+
 Each run creates an independent timestamped directory. The CSV is first written
 inside a temporary directory and is published only after the complete write
 succeeds, so a failed run cannot leave a partial snapshot.

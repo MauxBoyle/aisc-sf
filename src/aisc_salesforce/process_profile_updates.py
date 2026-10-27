@@ -84,6 +84,7 @@ from .review_ui import (
     ParentAccountFieldConflict,
     ParentAccountHierarchyConflict,
     ParentAccountNoActiveChildren,
+    ProfileUpdateOverviewRow,
     ResponseEmail,
     ReviewChoice,
     ReviewEvent,
@@ -1803,13 +1804,20 @@ class InteractiveProfileUpdateProcessor:
             return self._defer_parent_batch(batch, routing)
         self._show_account_history(batch, list(fresh_by_id.values()))
 
-        # Every row checkpoint happens before the first Salesforce write.
-        for row in batch.rows:
-            self._checkpoint_row(row)
-
         role_contact_snapshots = self._capture_role_contact_snapshots(
             routing.target_accounts
         )
+
+        # Every row overview and checkpoint happens before the first Salesforce write.
+        for row in batch.rows:
+            row_submissions = [
+                fresh_by_id[source_id]
+                for source_id in _json_string_list(row["source_submission_ids"])
+            ]
+            self._show_profile_update_overview(
+                row, row_submissions, routing.target_accounts, role_contact_snapshots
+            )
+            self._checkpoint_row(row)
 
         self._update_status_with_audit(
             batch,
@@ -3562,6 +3570,200 @@ class InteractiveProfileUpdateProcessor:
         )
         if answer == "quit":
             raise ProcessingStoppedEarly
+
+    def _show_profile_update_overview(
+        self,
+        row: dict[str, str],
+        submissions: list[dict[str, Any]],
+        target_accounts: tuple[dict[str, Any], ...],
+        snapshots: dict[tuple[str, str], _RoleContactSnapshot],
+    ) -> None:
+        """Show a read-only summary of submitted data beside current Salesforce."""
+        account = target_accounts[0] if target_accounts else {}
+        account_fields = (
+            ("Company Name", "Revised_Company_Name__c", "Name", "revised_company_name"),
+            (
+                "Company Owner",
+                "Revised_Company_Owner__c",
+                "Company_Owner__c",
+                "revised_company_owner",
+            ),
+            (
+                "Facility Street",
+                "Revised_Facility_Street__c",
+                "BillingStreet",
+                "revised_facility_street",
+            ),
+            (
+                "Facility City",
+                "Revised_Facility_City__c",
+                "BillingCity",
+                "revised_facility_city",
+            ),
+            (
+                "Facility State",
+                "Revised_Facility_State__c",
+                "BillingState",
+                "revised_facility_state",
+            ),
+            (
+                "Facility ZIP",
+                "Revised_Facility_Zip__c",
+                "BillingPostalCode",
+                "revised_facility_zip",
+            ),
+            (
+                "Facility Country",
+                "Revised_Facility_Country__c",
+                "BillingCountry",
+                "revised_facility_country",
+            ),
+        )
+        for label, source_field, current_field, csv_field in account_fields:
+            submitted = _latest_nonblank(submissions, source_field)
+            fallback = row.get(csv_field, "").strip()
+            self._display_event(
+                ProfileUpdateOverviewRow(
+                    "Account",
+                    label,
+                    ValueFragment(submitted, ValueOrigin.SUBMITTED)
+                    if submitted
+                    else ValueFragment("(blank)"),
+                    ValueFragment(fallback, ValueOrigin.SUPPLEMENTED)
+                    if fallback and not submitted
+                    else ValueFragment("(none)"),
+                    ValueFragment(_display(account.get(current_field)) or "(blank)"),
+                )
+            )
+        for label, csv_field in (
+            ("Key Data", "has_key_updates"),
+            ("Profile", "comments"),
+            ("Profile", "personnel_notes"),
+        ):
+            raw = row.get(csv_field, "").strip()
+            self._display_event(
+                ProfileUpdateOverviewRow(
+                    label,
+                    csv_field.replace("_", " ").title(),
+                    ValueFragment(
+                        raw or "(blank)",
+                        ValueOrigin.SUBMITTED if raw else ValueOrigin.NEUTRAL,
+                    ),
+                    ValueFragment("(none)"),
+                    ValueFragment("(not an Account field)"),
+                )
+            )
+        for role in ACCOUNT_ROLE_DEFINITIONS:
+            snapshot = snapshots.get((_display(account.get("Id")), role.prefix))
+            current_contact = snapshot.contact if snapshot else None
+            matched_contact = None
+            try:
+                resolutions = json.loads(row.get("contact_resolutions", "[]"))
+            except json.JSONDecodeError:
+                resolutions = []
+            for resolution in resolutions if isinstance(resolutions, list) else []:
+                if not isinstance(resolution, dict):
+                    continue
+                if any(
+                    isinstance(source, dict)
+                    and source.get("kind") == "role"
+                    and source.get("role") == role.prefix
+                    for source in resolution.get("sources", [])
+                ):
+                    selected = resolution.get("selected_contact")
+                    if isinstance(selected, dict):
+                        matched_contact = selected
+                    break
+            for suffix, source_field in role.submitted_fields:
+                submitted = _latest_nonblank(submissions, source_field)
+                staged = row.get(f"{role.prefix}_{suffix}", "").strip()
+                supplemented = staged if staged and not submitted else ""
+                current_field = {
+                    "first_name": "FirstName",
+                    "last_name": "LastName",
+                    "title": "Title",
+                    "email": "Email",
+                    "phone": "Phone",
+                }[suffix]
+                self._display_event(
+                    ProfileUpdateOverviewRow(
+                        role.label,
+                        suffix.replace("_", " ").title(),
+                        ValueFragment(submitted, ValueOrigin.SUBMITTED)
+                        if submitted
+                        else ValueFragment("(blank)"),
+                        ValueFragment(supplemented, ValueOrigin.SUPPLEMENTED)
+                        if supplemented
+                        else ValueFragment("(none)"),
+                        ValueFragment(
+                            _display(current_contact.get(current_field))
+                            if current_contact
+                            else "(no current role holder)"
+                        ),
+                    )
+                )
+            if matched_contact:
+                matched_name = " ".join(
+                    filter(
+                        None,
+                        (
+                            _display(matched_contact.get("FirstName")),
+                            _display(matched_contact.get("LastName")),
+                        ),
+                    )
+                )
+                self._display_event(
+                    ProfileUpdateOverviewRow(
+                        role.label,
+                        "Matched Contact",
+                        ValueFragment(
+                            " ".join(
+                                filter(
+                                    None,
+                                    (
+                                        _latest_nonblank(
+                                            submissions, role.first_name_field
+                                        ),
+                                        _latest_nonblank(
+                                            submissions, role.last_name_field
+                                        ),
+                                    ),
+                                )
+                            )
+                            or "(blank)",
+                            ValueOrigin.SUBMITTED,
+                        ),
+                        ValueFragment(
+                            "; ".join(
+                                filter(
+                                    None,
+                                    (
+                                        matched_name,
+                                        _display(matched_contact.get("Email")),
+                                    ),
+                                )
+                            )
+                            or "(unavailable)",
+                            ValueOrigin.SUPPLEMENTED,
+                        ),
+                        ValueFragment(
+                            " ".join(
+                                filter(
+                                    None,
+                                    (
+                                        _display(current_contact.get("FirstName"))
+                                        if current_contact
+                                        else "",
+                                        _display(current_contact.get("LastName"))
+                                        if current_contact
+                                        else "",
+                                    ),
+                                )
+                            )
+                            or "(no current role holder)"
+                        ),
+                    )
+                )
 
     def _fresh_case_submissions(self, batch: CaseBatch) -> dict[str, dict[str, Any]]:
         return {
