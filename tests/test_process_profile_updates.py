@@ -25,6 +25,7 @@ from aisc_salesforce.process_profile_updates import (
     ProcessingInterrupted,
     ProfileUpdateProcessingWorkflow,
     ReviewDecision,
+    _ContactWorkItem,
     build_case_batches,
     format_response_emails,
     load_staging_session,
@@ -168,6 +169,60 @@ def test_role_decision_preview_shows_portal_user_outcome(
     )
 
     assert processor._portal_user_preview(proposal) == expected
+
+
+@pytest.mark.parametrize(("linked_account_id", "expected_ignored"), [("account-1", False), ("other-account", True)])
+def test_shared_mailbox_name_change_checks_all_role_accounts(
+    linked_account_id, expected_ignored
+):
+    class RoleLookupClient(FakeClient):
+        def query_records(self, object_name, fields, *, where=None, order_by=None):
+            if object_name == "Account" and where and "Cert_Certification_Contact__c" in where:
+                return [{
+                    "Id": linked_account_id,
+                    "Name": "Other Company" if linked_account_id != "account-1" else "Acme Steel",
+                    "Cert_Certification_Contact__c": "shared-contact",
+                }]
+            return super().query_records(object_name, fields, where=where, order_by=order_by)
+
+        def get_record(self, object_name, record_id, fields):
+            if object_name == "Contact" and record_id == "shared-contact":
+                return {
+                    "Id": record_id, "Email": "quality@example.com",
+                    "FirstName": "Old", "LastName": "Quality",
+                }
+            return super().get_record(object_name, record_id, fields)
+
+    client = RoleLookupClient()
+    processor = InteractiveProfileUpdateProcessor(
+        client, input_fn=Feeder([]), output_fn=lambda message: None
+    )
+    handoffs = []
+    processor._record_handoff = lambda *args, **kwargs: handoffs.append(args[1])
+    source = ContactSource("role", "quality", "submission-1")
+    item = _ContactWorkItem(
+        "id:shared-contact",
+        ContactResolution(
+            ContactResolutionClassification.USE_EXISTING,
+            "quality@example.com", "quality@example.com", sources=[source],
+            selected_contact={"Id": "shared-contact"},
+        ),
+        staged_row(),
+        proposals={
+            "first_name": {"New": [source]}, "last_name": {"Quality": [source]},
+        },
+        source_keys={("role", "quality", "submission-1")},
+        contact_id="shared-contact",
+    )
+
+    processor._reconcile_contact_fields(
+        CaseBatch("account-1", "case-1", "00010001", [staged_row()], NOW), item
+    )
+
+    assert item.ignored is expected_ignored
+    assert bool(handoffs) is expected_ignored
+    if expected_ignored:
+        assert item.write_values == {}
 
 
 def staged_row(**changes):

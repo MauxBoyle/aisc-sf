@@ -950,6 +950,23 @@ Populated Key Data fields remain visible in their normal CSV columns and in
 
 ## Process Profile Updates command
 
+### Shared mailbox and departure checks
+
+Before a recognized shared mailbox Contact's name is changed, processing looks
+for every Account role that references the Contact. A failed lookup or a role
+outside the current company's family leaves the Contact unchanged and records
+an operator handoff. Review those relationships before retrying the Case.
+
+When a shared mailbox has no submitted replacement name, its Contact is named
+with the company as First Name and the mailbox purpose as Last Name (for
+example, `Acme Steel` / `Quality`). Different names submitted for the same
+email are handed off for clarification. A role change also checks whether the
+former Contact still holds any other Account role; if so, removal is handed to
+the operator. Confirmed departures create a Salesforce Note on the former
+Contact. The note uses the source Profile Update IDs as its retry key, so a
+retry after the role change does not create the same note again. Participant
+response text says who replaces whom at a shared address.
+
 ### Reviewer write and Flow check
 
 Before retrying a failed batch, use the
