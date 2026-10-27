@@ -215,6 +215,17 @@ class StagedRowSummary:
 
 
 @dataclass(frozen=True)
+class ProfileUpdateOverviewRow:
+    """One read-only submitted, supplemented, and current value comparison."""
+
+    section: str
+    label: str
+    submitted: ValueFragment
+    supplemented: ValueFragment
+    current: ValueFragment
+
+
+@dataclass(frozen=True)
 class AccountHistory:
     """One Account field change near the submission date."""
 
@@ -254,6 +265,7 @@ type ReviewEvent = (
     | ParentAccountNoActiveChildren
     | ParentAccountHierarchyConflict
     | StagedRowSummary
+    | ProfileUpdateOverviewRow
     | AccountHistory
     | ResponseEmail
     | ReviewQueueSnapshot
