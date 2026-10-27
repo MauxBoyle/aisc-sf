@@ -1205,6 +1205,13 @@ The next prompt is a checkpoint:
 Checkpoint answers are case-insensitive. Continue is the default only at this
 checkpoint. For a real change, choose an explicit decision:
 
+Before each Contact or role decision, the review shows the current and proposed
+values plus the Portal User outcome when it can be determined. New Contacts are
+marked deferred until creation and role assignment. Existing active Users are
+reused; an eligible role on a Certified Account can create access; an Applicant
+Account defers access until certification. Salesforce is refreshed again after
+the decision and immediately before an automatic write.
+
 | Shortcut | Complete phrase | Result |
 |---|---|---|
 | `A` | `apply automatically` | Update Salesforce with the proposed value |
@@ -1308,8 +1315,18 @@ the actual final Salesforce record.
 
 ### Account Updates and Role Links
 
-Ordinary company-name, owner, and billing-address changes run only after the
-Contact phase is complete. The final role-link phase uses the preserved mapping
+Company-name, facility-address, and ownership changes are handed to the
+operator. The workflow records each reason in `review_audit.jsonl` and marks
+the corresponding queue item blocked. Missing submitter last name or email,
+different submitted names using one email, and an email-domain change are also
+operator handoffs; the affected Contact and role work is held while independent
+Contacts and roles continue. Portal User provisioning failures are recorded as
+operator handoffs after safe work finishes. A Case with any handoff remains
+Pending, even when its source Profile Updates can be closed after completed
+work. Review the handoff reason and completed outcomes before resolving the
+Case.
+
+The final role-link phase uses the preserved mapping
 from each submission/role source to its resolved Contact ID, so it still works
 when phase one changed the Contact email or created a Contact shared by several
 roles. This phase may update Account role lookup fields only. It performs no
@@ -1343,13 +1360,14 @@ produces a typed summary with the field label, requested value, and every
 qualifying child's current name, ID, and value. A non-qualifying Parent with no
 qualifying direct children produces a typed notice listing the direct children's
 statuses when present; this also applies when there are no direct children. The
-reviewer acknowledges any of these messages; the processor then
-writes a `deferred manual follow-up` audit event, marks the complete Case batch
-blocked, leaves every included Profile Update and the Case open, performs no
-Salesforce write for that batch, and advances to the next Case. An interruption
-during the acknowledgement also occurs before any Salesforce write. On a later
-run, staging and preflight refetch the hierarchy and values, so manually
-reconciled work can be retried without carrying stale child routing.
+reviewer acknowledges any of these messages; the processor writes a
+`deferred manual follow-up` audit event and marks the Account and role work
+blocked. Safe independent Contact changes can still finish. Source Profile
+Updates may close after that work, while the Case remains Pending for the
+operator. An interruption during the acknowledgement happens before Salesforce
+writes. On a later run, staging and preflight refetch the hierarchy and values,
+so manually reconciled work can be retried without carrying stale child
+routing.
 
 Account-role proposals use friendly Contact names and emails for current and
 proposed values. Salesforce IDs remain available internally for record writes

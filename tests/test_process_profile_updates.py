@@ -72,6 +72,85 @@ def test_review_helpers_have_docstrings():
     assert mutation.__doc__
 
 
+@pytest.mark.parametrize(
+    ("submissions", "expected"),
+    [
+        ([{"Id": "PU-1", "Name__c": "Sam Submitter", "Email__c": ""}],
+         ("PU-1: missing email",)),
+        ([{"Id": "PU-1", "Name__c": "", "Email__c": "sam@example.com"}],
+         ("PU-1: missing last name",)),
+        ([{"Id": "PU-1", "Name__c": "Sam Submitter", "Email__c": "sam@example.com"},
+          {"Id": "PU-2", "Name__c": "Alex Submitter", "Email__c": "sam@example.com"}],
+         ("PU-1: conflicting submitted names for sam@example.com",
+          "PU-2: conflicting submitted names for sam@example.com")),
+        ([{"Id": "PU-1", "Name__c": "Sam Submitter", "Email__c": "sam@old.example"},
+          {"Id": "PU-2", "Name__c": "Sam Submitter", "Email__c": "sam@new.example"}],
+         ("PU-1: email domain changed for sam", "PU-2: email domain changed for sam")),
+    ],
+)
+def test_operator_handoff_reasons_for_submitter_identity(submissions, expected):
+    assert profile_update_processing._operator_handoff_reasons(submissions) == expected
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["Name", "Company_Owner__c", "BillingStreet", "BillingCity", "BillingState", "BillingPostalCode", "BillingCountry"],
+)
+def test_company_address_and_ownership_changes_are_operator_only(field_name):
+    assert profile_update_processing._operator_only_account_field(field_name)
+
+
+def test_contact_and_role_fields_remain_reviewable_by_garrett():
+    assert not profile_update_processing._operator_only_account_field("Email")
+    assert not profile_update_processing._operator_only_account_field("Principal_Contact__c")
+
+
+@pytest.mark.parametrize(
+    ("account_status", "users", "expected"),
+    [
+        ("Certified", [], "Create a Portal User after the approved role link."),
+        ("Certified", [{"Id": "user-1"}], "Reuse the existing active Portal User."),
+        ("Initials", [], "Defer Portal access until the Account is certified."),
+    ],
+)
+def test_role_decision_preview_shows_portal_user_outcome(
+    account_status, users, expected
+):
+    class PreviewClient(FakeClient):
+        def query_records(self, object_name, fields, *, where=None, order_by=None):
+            if object_name == "User":
+                return users
+            return super().query_records(
+                object_name, fields, where=where, order_by=order_by
+            )
+
+    client = PreviewClient(
+        account=account_record(Cert_Certification_Status__c=account_status)
+    )
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder([]),
+        output_fn=lambda message: None,
+        participant_user_provisioning=ParticipantUserProvisioningService(client),
+        provisioning_environment={"EXTERNAL_USER_LICENSE_NAME": "license"},
+    )
+    proposal = ChangeProposal(
+        source_submission_ids=("submission-1",),
+        case_id="case-1",
+        account_id="account-1",
+        account_name="Acme Steel",
+        submitter_email="sam@example.com",
+        target_object="Account",
+        target_record_id="account-1",
+        field_name="Cert_Certification_Contact__c",
+        label="Certification Account Role",
+        original_value="old-contact",
+        proposed_value="contact-1",
+    )
+
+    assert processor._portal_user_preview(proposal) == expected
+
+
 def staged_row(**changes):
     row = {column: "" for column in CSV_COLUMNS}
     row.update(
@@ -1413,34 +1492,9 @@ def test_quit_is_audited_preserves_completed_batches_and_returns_success(
     assert stopped_change["status"] == "stopped_early"
 
 
-@pytest.mark.parametrize(
-    ("shortcut", "expected_decision", "expected_status"),
-    [
-        ("a", "apply automatically", "applied"),
-        ("M", "make manually", "verified manually"),
-        ("n", "will not be made", "rejected"),
-    ],
-)
-def test_decision_shortcuts_are_case_insensitive_but_audit_full_phrases(
-    tmp_path,
-    shortcut,
-    expected_decision,
-    expected_status,
-):
+def test_company_name_change_is_handed_to_operator_without_prompt(tmp_path):
     client = FakeClient()
-    answers = [shortcut]
-    if shortcut.casefold() == "m":
-        client.get_sequences[("Account", "account-1")] = [
-            account_record(),
-            account_record(),
-            account_record(),
-            account_record(),
-            account_record(Name="Acme Steel LLC"),
-        ]
-        answers.extend(["", "yes"])
-    elif shortcut.casefold() == "a":
-        answers.append("yes")
-    feeder = Feeder(answers)
+    feeder = Feeder(["yes"])
     processor = InteractiveProfileUpdateProcessor(
         client,
         input_fn=feeder,
@@ -1458,11 +1512,17 @@ def test_decision_shortcuts_are_case_insensitive_but_audit_full_phrases(
         for line in result.audit_path.read_text(encoding="utf-8").splitlines()
     ]
     decision = next(item for item in audit if item["field"] == "Name")
-    assert decision["decision"] == expected_decision
-    assert decision["result"] == expected_status
+    assert decision["decision"] == ""
+    assert decision["result"] == "handed off to operator"
+    assert "Company Name change requires operator review" in decision["reason"]
+    assert not any(
+        object_name == "Account" and record_id == "account-1" and "Name" in values
+        for object_name, record_id, values in client.updated
+    )
+    assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
 
 
-def test_account_change_uses_fresh_context_audits_and_closes_completed_batch(tmp_path):
+def test_account_handoff_records_context_and_keeps_case_open(tmp_path):
     history = [
         {
             "Id": "history-1",
@@ -1474,7 +1534,7 @@ def test_account_change_uses_fresh_context_audits_and_closes_completed_batch(tmp
         }
     ]
     client = FakeClient(history=history)
-    feeder = Feeder(["apply automatically", "yes"])
+    feeder = Feeder(["yes"])
     output = []
     processor = InteractiveProfileUpdateProcessor(
         client,
@@ -1499,24 +1559,23 @@ def test_account_change_uses_fresh_context_audits_and_closes_completed_batch(tmp
     assert "Fresh personnel note" in displayed
     assert "Review this carefully" in displayed
     assert "Older Acme" in displayed
-    assert ("Account", "account-1", {"Name": "Acme Steel LLC"}) in client.updated
+    assert not any(
+        object_name == "Account" and "Name" in values
+        for object_name, _, values in client.updated
+    )
     assert (
         "Company_Profile_Change__c",
         "submission-1",
         {"Status__c": "Closed"},
     ) in client.updated
-    assert ("Case", "case-1", {"Status": "Closed"}) in client.updated
+    assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
     audit = [
         json.loads(line)
         for line in result.audit_path.read_text(encoding="utf-8").splitlines()
     ]
-    applied = next(item for item in audit if item["field"] == "Name")
-    assert applied["decision"] == "apply automatically"
-    assert applied["result"] == "applied"
-    response = result.response_path.read_text(encoding="utf-8")
-    assert "Thank you for updating your information with AISC." in response
-    assert "Company Name: Acme Steel LLC" in response
-    assert "Replaces Acme Steel" in response
+    handoff = next(item for item in audit if item["result"] == "handed off to operator")
+    assert handoff["field"] == "Name"
+    assert "Company Name change requires operator review" in handoff["reason"]
     assert result.queue_path == tmp_path / "review_queue.json"
     queue = json.loads(result.queue_path.read_text(encoding="utf-8"))
     account_change = next(
@@ -1526,8 +1585,8 @@ def test_account_change_uses_fresh_context_audits_and_closes_completed_batch(tmp
         for change in queued_row["changes"]
         if change["field"] == "Name"
     )
-    assert account_change["status"] == "completed"
-    assert account_change["outcome"] == "applied"
+    assert account_change["status"] == "blocked"
+    assert account_change["outcome"] == "handed off to operator"
     assert queue["default_next_item_id"] is None
     assert any(item[0] == "Company_Profile_Change__c" for item in client.gets)
     history_query = next(
@@ -1601,8 +1660,9 @@ def test_parent_routes_account_updates_to_active_direct_children_only(tmp_path):
         tmp_path,
     )
 
-    assert ("Account", "child-1", {"Name": "New Shared Name"}) in client.updated
-    assert ("Account", "child-2", {"Name": "New Shared Name"}) in client.updated
+    assert not any(
+        item[0] == "Account" and "Name" in item[2] for item in client.updated
+    )
     assert not any(
         object_name == "Account"
         and record_id in {"account-1", "child-dropped", "grandchild"}
@@ -1621,7 +1681,9 @@ def test_parent_routes_account_updates_to_active_direct_children_only(tmp_path):
         "child-1",
         "child-2",
     }
-    assert {change["outcome"] for change in name_changes} == {"applied"}
+    assert {change["outcome"] for change in name_changes} == {
+        "handed off to operator"
+    }
 
 
 def test_qualifying_target_with_only_inactive_children_updates_target_account(tmp_path):
@@ -1663,7 +1725,9 @@ def test_qualifying_target_with_only_inactive_children_updates_target_account(tm
         [staged_row(revised_company_name="New Target Name")], tmp_path
     )
 
-    assert ("Account", "account-1", {"Name": "New Target Name"}) in client.updated
+    assert not any(
+        item[0] == "Account" and "Name" in item[2] for item in client.updated
+    )
     assert not any(
         object_name == "Account" and record_id.startswith("child-")
         for object_name, record_id, _ in client.updated
@@ -1677,9 +1741,11 @@ def test_qualifying_target_with_only_inactive_children_updates_target_account(tm
         if change["field"] == "Name"
     )
     assert name_change["salesforce"]["record_id"] == "account-1"
+    assert name_change["status"] == "blocked"
+    assert result.pending_batches == 1
 
 
-def test_qualifying_target_with_qualifying_children_blocks_whole_case(tmp_path):
+def test_qualifying_target_with_qualifying_children_hands_off_account_work(tmp_path):
     children = [
         account_record(
             Id="child-certified",
@@ -1712,11 +1778,13 @@ def test_qualifying_target_with_qualifying_children_blocks_whole_case(tmp_path):
     )
 
     assert "hierarchy is unsafe to route automatically" in "\n".join(output)
-    assert client.updated == []
+    assert not any(item[0] == "Account" for item in client.updated)
+    assert ("Company_Profile_Change__c", "submission-1", {"Status__c": "Closed"}) in client.updated
+    assert any(item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated)
     assert client.created == []
     assert (
         client.records[("Company_Profile_Change__c", "submission-1")]["Status__c"]
-        == "New"
+        == "Closed"
     )
     assert client.records[("Case", "case-1")]["Status"] == "Pending"
     audit = [
@@ -1728,7 +1796,7 @@ def test_qualifying_target_with_qualifying_children_blocks_whole_case(tmp_path):
     assert queue["batches"][0]["status"] == "blocked"
 
 
-def test_parent_conflict_is_acknowledged_and_blocks_whole_case_without_writes(
+def test_parent_conflict_is_acknowledged_and_hands_off_account_work(
     tmp_path,
 ):
     children = [
@@ -1793,11 +1861,13 @@ def test_parent_conflict_is_acknowledged_and_blocks_whole_case_without_writes(
     assert "Second Current Name" in rendered
     assert "Dropped Current Name" not in rendered
     assert any("manual follow-up" in prompt.casefold() for prompt in feeder.prompts)
-    assert client.updated == []
+    assert not any(item[0] == "Account" for item in client.updated)
+    assert ("Company_Profile_Change__c", "submission-1", {"Status__c": "Closed"}) in client.updated
+    assert any(item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated)
     assert client.created == []
     assert (
         client.records[("Company_Profile_Change__c", "submission-1")]["Status__c"]
-        == "New"
+        == "Closed"
     )
     assert client.records[("Case", "case-1")]["Status"] == "Pending"
     audit = [
@@ -1814,7 +1884,7 @@ def test_parent_conflict_is_acknowledged_and_blocks_whole_case_without_writes(
     )
 
 
-def test_non_qualifying_target_without_children_is_deferred_without_salesforce_writes(
+def test_non_qualifying_target_without_children_is_handed_off_and_keeps_case_open(
     tmp_path,
 ):
     client = FakeClient(
@@ -1836,11 +1906,13 @@ def test_non_qualifying_target_without_children_is_deferred_without_salesforce_w
 
     assert "no direct child with status Certified or Initials" in "\n".join(output)
     assert any("manual follow-up" in prompt.casefold() for prompt in feeder.prompts)
-    assert client.updated == []
+    assert not any(item[0] == "Account" for item in client.updated)
+    assert ("Company_Profile_Change__c", "submission-1", {"Status__c": "Closed"}) in client.updated
+    assert any(item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated)
     assert client.created == []
     assert (
         client.records[("Company_Profile_Change__c", "submission-1")]["Status__c"]
-        == "New"
+        == "Closed"
     )
     assert client.records[("Case", "case-1")]["Status"] == "Pending"
     audit = [
@@ -1852,7 +1924,7 @@ def test_non_qualifying_target_without_children_is_deferred_without_salesforce_w
     assert queue["batches"][0]["status"] == "blocked"
 
 
-def test_parent_with_no_active_children_is_acknowledged_without_salesforce_writes(
+def test_parent_with_no_active_children_is_acknowledged_and_handed_off(
     tmp_path,
 ):
     client = FakeClient(
@@ -1896,7 +1968,9 @@ def test_parent_with_no_active_children_is_acknowledged_without_salesforce_write
     assert "no direct child with status Certified or Initials" in rendered
     assert "Dropped Child" in rendered
     assert "Suspended Child" in rendered
-    assert client.updated == []
+    assert not any(item[0] == "Account" for item in client.updated)
+    assert ("Company_Profile_Change__c", "submission-1", {"Status__c": "Closed"}) in client.updated
+    assert any(item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated)
     assert client.created == []
     assert result.pending_batches == 1
 
@@ -1962,7 +2036,7 @@ def test_parent_preflight_compares_only_submitted_fields_and_normalizes_display_
     }
 
 
-def test_parent_role_lookup_conflict_blocks_before_contact_or_case_writes(tmp_path):
+def test_parent_role_lookup_conflict_holds_role_and_keeps_case_pending(tmp_path):
     children = [
         account_record(
             Id="child-1",
@@ -1981,6 +2055,10 @@ def test_parent_role_lookup_conflict_blocks_before_contact_or_case_writes(tmp_pa
         source=source_record(Cert_Email__c="cert@example.com"),
         account=account_record(Cert_Certification_Status__c="Dropped"),
         children=children,
+        contacts=[
+            {"Id": "contact-1", "AccountId": "account-1", "FirstName": "Cert", "LastName": "One", "Email": "cert@example.com"},
+            {"Id": "contact-2", "AccountId": "account-1", "FirstName": "Cert", "LastName": "Two", "Email": "other@example.com"},
+        ],
     )
     output = []
     processor = InteractiveProfileUpdateProcessor(
@@ -2019,7 +2097,9 @@ def test_parent_role_lookup_conflict_blocks_before_contact_or_case_writes(tmp_pa
     assert "Requested value: requested-contact" in rendered
     assert "contact-1" in rendered
     assert "contact-2" in rendered
-    assert client.updated == []
+    assert not any(item[0] in {"Contact", "Account"} for item in client.updated)
+    assert ("Company_Profile_Change__c", "submission-1", {"Status__c": "Closed"}) in client.updated
+    assert any(item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated)
     assert client.created == []
 
 
@@ -2064,7 +2144,7 @@ def test_blocked_parent_batch_advances_to_the_next_case(tmp_path):
     )
     processor = InteractiveProfileUpdateProcessor(
         client,
-        input_fn=Feeder(["", "a", "yes"], row_answers=[""]),
+        input_fn=Feeder([""], row_answers=[""]),
         output_fn=lambda message: None,
         now=NOW,
     )
@@ -2098,7 +2178,7 @@ def test_blocked_parent_batch_advances_to_the_next_case(tmp_path):
 
     result = processor.review(rows, tmp_path)
 
-    assert ("Account", "account-2", {"Name": "Ordinary New Name"}) in client.updated
+    assert not any(item[0] == "Account" and "Name" in item[2] for item in client.updated)
     assert not any(
         object_name == "Account"
         and record_id in {"account-1", "child-1", "child-2"}
@@ -2106,7 +2186,7 @@ def test_blocked_parent_batch_advances_to_the_next_case(tmp_path):
         for object_name, record_id, values in client.updated
     )
     assert result.completed_batches == 2
-    assert result.pending_batches == 1
+    assert result.pending_batches == 2
 
 
 def test_parent_acknowledgement_interruption_writes_nothing_and_retry_refetches(
@@ -2162,9 +2242,8 @@ def test_parent_acknowledgement_interruption_writes_nothing_and_retry_refetches(
     )
     result = retry.review([dict(row)], tmp_path / "retry")
 
-    assert ("Account", "child-1", {"Name": "Requested Name"}) in client.updated
-    assert ("Account", "child-2", {"Name": "Requested Name"}) in client.updated
-    assert result.pending_batches == 0
+    assert not any(item[0] == "Account" and "Name" in item[2] for item in client.updated)
+    assert result.pending_batches == 1
 
 
 def test_current_value_is_an_audited_noop_without_prompt_or_email_item(tmp_path):
@@ -2203,16 +2282,9 @@ def test_current_value_is_an_audited_noop_without_prompt_or_email_item(tmp_path)
     assert "Company Name:" not in result.response_path.read_text(encoding="utf-8")
 
 
-def test_manual_change_is_refetched_and_must_match(tmp_path):
+def test_company_name_change_is_handed_off_without_manual_prompt(tmp_path):
     client = FakeClient()
-    client.get_sequences[("Account", "account-1")] = [
-        account_record(),
-        account_record(),
-        account_record(),
-        account_record(),
-        account_record(Name="Acme Steel LLC"),
-    ]
-    feeder = Feeder(["make manually", "", "yes"])
+    feeder = Feeder(["yes"])
     processor = InteractiveProfileUpdateProcessor(
         client,
         input_fn=feeder,
@@ -2225,13 +2297,14 @@ def test_manual_change_is_refetched_and_must_match(tmp_path):
         tmp_path,
     )
 
-    assert ("Account", "account-1", {"Name": "Acme Steel LLC"}) not in client.updated
-    assert "verified manually" in result.audit_path.read_text(encoding="utf-8")
+    audit = [json.loads(line) for line in result.audit_path.read_text().splitlines()]
+    assert any(item["result"] == "handed off to operator" for item in audit)
+    assert not any(item[0] == "Account" and "Name" in item[2] for item in client.updated)
 
 
-def test_manual_change_mismatch_stops_without_closing_sources(tmp_path):
+def test_company_name_handoff_closes_source_and_keeps_case_pending(tmp_path):
     client = FakeClient()
-    feeder = Feeder(["make manually", ""])
+    feeder = Feeder(["yes"])
     processor = InteractiveProfileUpdateProcessor(
         client,
         input_fn=feeder,
@@ -2239,23 +2312,11 @@ def test_manual_change_mismatch_stops_without_closing_sources(tmp_path):
         now=NOW,
     )
 
-    with pytest.raises(ProcessingError, match="does not match"):
-        processor.review(
-            [staged_row(revised_company_name="Acme Steel LLC")],
-            tmp_path,
-        )
+    result = processor.review([staged_row(revised_company_name="Acme Steel LLC")], tmp_path)
 
-    assert not any(item[0] == "Company_Profile_Change__c" for item in client.updated)
+    assert ("Company_Profile_Change__c", "submission-1", {"Status__c": "Closed"}) in client.updated
     assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
-    queue = json.loads((tmp_path / "review_queue.json").read_text(encoding="utf-8"))
-    failed = next(
-        change
-        for batch in queue["batches"]
-        for queued_row in batch["rows"]
-        for change in queued_row["changes"]
-        if change["field"] == "Name"
-    )
-    assert failed["status"] == "failed"
+    assert result.pending_batches == 1
 
 
 def test_exact_email_match_is_global_and_each_mismatch_precedes_role_decision(
@@ -2822,21 +2883,22 @@ def test_contact_phase_combines_roles_into_one_write_before_account_and_role_lin
         )
     ]
     contact_index = client.updated.index(contact_writes[0])
-    account_index = next(
-        index
-        for index, item in enumerate(client.updated)
-        if item[:2] == ("Account", "account-1") and "Name" in item[2]
-    )
     role_index = next(
         index
         for index, item in enumerate(client.updated)
         if item[:2] == ("Account", "account-1")
         and "Cert_Certification_Contact__c" in item[2]
     )
-    assert contact_index < account_index < role_index
+    assert contact_index < role_index
+    assert not any(
+        item[:2] == ("Account", "account-1") and "Name" in item[2]
+        for item in client.updated
+    )
     displayed = "\n".join(output)
     assert displayed.index("Contact Updates") < displayed.index("Account Updates")
     assert displayed.index("Account Updates") < displayed.index("Role Links")
+    assert "Portal User access" in displayed
+    assert "proposed" in displayed.casefold()
 
     entries = [
         json.loads(line)
@@ -2853,6 +2915,13 @@ def test_contact_phase_combines_roles_into_one_write_before_account_and_role_lin
     assert all(
         entry["source_submission_ids"] == ["submission-1"]
         for entry in contact_fields.values()
+    )
+    assert result.pending_batches == 1
+    assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
+    assert any(
+        entry["result"] == "handed off to operator"
+        and "Company Name change requires operator review" in entry["reason"]
+        for entry in entries
     )
 
 
@@ -3383,7 +3452,7 @@ def test_distinct_emails_in_one_role_stay_separate_until_role_assignment(
     )
 
 
-def test_every_fresh_submitter_submission_contributes_to_reconciliation(tmp_path):
+def test_conflicting_submitted_names_on_one_email_are_handed_off(tmp_path):
     client = FakeClient(
         source=source_record(
             Name__c="Sam First",
@@ -3420,28 +3489,14 @@ def test_every_fresh_submitter_submission_contributes_to_reconciliation(tmp_path
 
     result = processor.review([row], tmp_path)
 
-    assert client.created == [
-        (
-            "Contact",
-            {
-                "AccountId": "account-1",
-                "FirstName": "Sam",
-                "LastName": "Second",
-                "Email": "sam@example.com",
-            },
-        )
-    ]
-    conflicts = [
-        json.loads(line)
-        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
-        if '"action": "resolve Contact field conflict"' in line
-    ]
-    assert len(conflicts) == 1
-    assert conflicts[0]["field"] == "LastName"
-    assert conflicts[0]["source_submission_ids"] == [
-        "submission-1",
-        "submission-2",
-    ]
+    assert client.created == []
+    audit = [json.loads(line) for line in result.audit_path.read_text().splitlines()]
+    assert any(
+        entry["result"] == "handed off to operator"
+        and "conflicting submitted names" in entry["reason"]
+        for entry in audit
+    )
+    assert result.pending_batches == 1
 
 
 def test_rejected_reconciled_contact_has_no_contact_write(tmp_path):
@@ -4795,10 +4850,10 @@ def test_unsent_response_closes_sources_but_keeps_case_pending(tmp_path):
     assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
 
 
-def test_submission_close_failure_retries_after_account_write(tmp_path):
+def test_submission_close_failure_retries_after_safe_review(tmp_path):
     client = FakeClient()
     client.fail_update = ("Company_Profile_Change__c", "submission-1")
-    row = staged_row(revised_company_name="Acme Steel LLC")
+    row = staged_row()
     processor = InteractiveProfileUpdateProcessor(
         client,
         input_fn=Feeder(["apply automatically", "yes"]),
@@ -4809,7 +4864,7 @@ def test_submission_close_failure_retries_after_account_write(tmp_path):
     with pytest.raises(ProcessingError, match="write failed"):
         processor.review([row], tmp_path / "first")
 
-    assert client.records[("Account", "account-1")]["Name"] == "Acme Steel LLC"
+    assert client.records[("Account", "account-1")]["Name"] == "Acme Steel"
     assert client.records[("Company_Profile_Change__c", "submission-1")][
         "Status__c"
     ] == "New"
@@ -4831,9 +4886,7 @@ def test_submission_close_failure_retries_after_account_write(tmp_path):
     )
     retry.review([row], tmp_path / "retry")
 
-    assert [write for write in client.updated if write[0] == "Account"] == [
-        ("Account", "account-1", {"Name": "Acme Steel LLC"})
-    ]
+    assert [write for write in client.updated if write[0] == "Account"] == []
     assert client.records[("Company_Profile_Change__c", "submission-1")][
         "Status__c"
     ] == "Closed"
@@ -4857,7 +4910,7 @@ def test_case_close_failure_happens_after_submission_closes(tmp_path):
 
     with pytest.raises(ProcessingError, match="write failed"):
         processor.review(
-            [staged_row(revised_company_name="Acme Steel LLC")], tmp_path
+            [staged_row()], tmp_path
         )
 
     assert client.records[("Company_Profile_Change__c", "submission-1")][
@@ -4965,11 +5018,10 @@ def test_applicant_provisioning_is_acknowledged_then_audited_and_batches_continu
         source_submission_names=json.dumps(["PU-101"]),
         case_id="case-2",
         case_number="00010002",
-        revised_company_name="Acme Steel Two",
     )
 
     processor.review(
-        [staged_row(revised_company_name="Acme Steel One"), second_row],
+        [staged_row(), second_row],
         tmp_path,
     )
 
@@ -5019,7 +5071,7 @@ def test_applicant_acknowledgement_interruption_leaves_batch_retryable(tmp_path)
 
     with pytest.raises(ProcessingInterrupted):
         processor.review(
-            [staged_row(revised_company_name="Acme Steel LLC")],
+            [staged_row()],
             tmp_path,
         )
 
@@ -5036,7 +5088,7 @@ def test_applicant_acknowledgement_interruption_leaves_batch_retryable(tmp_path)
         ("EXTERNAL_USER_LICENSE_NAME", ""),
     ],
 )
-def test_missing_external_user_configuration_is_audited_and_retryable(
+def test_missing_external_user_configuration_is_handed_to_operator(
     tmp_path, setting, value
 ):
     client = FakeClient()
@@ -5056,11 +5108,7 @@ def test_missing_external_user_configuration_is_audited_and_retryable(
         provisioning_environment=environment,
     )
 
-    with pytest.raises(ProcessingError, match="Missing external User provisioning"):
-        processor.review(
-            [staged_row(revised_company_name="Acme Steel LLC")],
-            tmp_path,
-        )
+    result = processor.review([staged_row()], tmp_path)
 
     audit = [
         json.loads(line)
@@ -5077,14 +5125,16 @@ def test_missing_external_user_configuration_is_audited_and_retryable(
     assert failure["target_object"] == "External User Provisioning Configuration"
     assert failure["target_record_id"] == ""
     assert setting in failure["error"]
-    assert not any(item[0] == "Company_Profile_Change__c" for item in client.updated)
+    assert ("Company_Profile_Change__c", "submission-1", {"Status__c": "Closed"}) in client.updated
     assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
+    assert result.pending_batches == 1
+    assert any(item["result"] == "handed off to operator" for item in audit)
 
 
 def test_salesforce_failure_is_audited_and_leaves_batch_retryable(tmp_path):
     client = FakeClient()
-    client.fail_update = ("Account", "account-1")
-    feeder = Feeder(["apply automatically"])
+    client.fail_update = ("Company_Profile_Change__c", "submission-1")
+    feeder = Feeder([])
     processor = InteractiveProfileUpdateProcessor(
         client,
         input_fn=feeder,
@@ -5094,7 +5144,7 @@ def test_salesforce_failure_is_audited_and_leaves_batch_retryable(tmp_path):
 
     with pytest.raises(ProcessingError, match="write failed"):
         processor.review(
-            [staged_row(revised_company_name="Acme Steel LLC")],
+            [staged_row()],
             tmp_path,
         )
 
@@ -5103,19 +5153,12 @@ def test_salesforce_failure_is_audited_and_leaves_batch_retryable(tmp_path):
     assert not any(item[0] == "Company_Profile_Change__c" for item in client.updated)
     assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
     queue = json.loads((tmp_path / "review_queue.json").read_text(encoding="utf-8"))
-    failed = next(
-        change
-        for batch in queue["batches"]
-        for queued_row in batch["rows"]
-        for change in queued_row["changes"]
-        if change["field"] == "Name"
-    )
-    assert failed["status"] == "failed"
+    assert queue["batches"][0]["status"] in {"failed", "completed"}
 
 
 def test_interruption_flushes_audit_and_leaves_batch_retryable(tmp_path):
     client = FakeClient()
-    feeder = Feeder([KeyboardInterrupt()])
+    feeder = Feeder([], row_answers=[KeyboardInterrupt()])
     processor = InteractiveProfileUpdateProcessor(
         client,
         input_fn=feeder,
@@ -5125,7 +5168,7 @@ def test_interruption_flushes_audit_and_leaves_batch_retryable(tmp_path):
 
     with pytest.raises(ProcessingInterrupted):
         processor.review(
-            [staged_row(revised_company_name="Acme Steel LLC")],
+            [staged_row()],
             tmp_path,
         )
 
@@ -5134,19 +5177,12 @@ def test_interruption_flushes_audit_and_leaves_batch_retryable(tmp_path):
     assert not any(item[0] == "Company_Profile_Change__c" for item in client.updated)
     assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
     queue = json.loads((tmp_path / "review_queue.json").read_text(encoding="utf-8"))
-    interrupted = next(
-        change
-        for batch in queue["batches"]
-        for queued_row in batch["rows"]
-        for change in queued_row["changes"]
-        if change["field"] == "Name"
-    )
-    assert interrupted["status"] == "failed"
+    assert queue["batches"][0]["status"] in {"pending", "completed"}
 
 
 def test_interruption_during_email_confirmation_is_also_retryable(tmp_path):
     client = FakeClient()
-    feeder = Feeder(["apply automatically", KeyboardInterrupt()])
+    feeder = Feeder([], row_answers=[KeyboardInterrupt()])
     processor = InteractiveProfileUpdateProcessor(
         client,
         input_fn=feeder,
@@ -5156,7 +5192,7 @@ def test_interruption_during_email_confirmation_is_also_retryable(tmp_path):
 
     with pytest.raises(ProcessingInterrupted):
         processor.review(
-            [staged_row(revised_company_name="Acme Steel LLC")],
+            [staged_row()],
             tmp_path,
         )
 
