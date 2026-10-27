@@ -1953,7 +1953,11 @@ class InteractiveProfileUpdateProcessor:
             account_results,
             role_responses,
             (
-                {item.contact_id for item in contact_items if item.contact_id}
+                {
+                    item.contact_id
+                    for item in contact_items
+                    if item.contact_id and not item.handoff_reasons
+                }
                 if not routing.blocked
                 else set()
             ),
