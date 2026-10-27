@@ -86,26 +86,60 @@ def test_response_email_includes_request_result_and_pending_handoff():
         ],
     )
 
-    assert "Comment from PU-1: Operator will confirm the facility address." in emails[
-        "sam@example.com"
-    ]
+    assert (
+        "Comment from PU-1: Operator will confirm the facility address."
+        in emails["sam@example.com"]
+    )
     assert "Pending follow-up" in emails["sam@example.com"]
 
 
 @pytest.mark.parametrize(
     ("submissions", "expected"),
     [
-        ([{"Id": "PU-1", "Name__c": "Sam Submitter", "Email__c": ""}],
-         ("PU-1: missing email",)),
-        ([{"Id": "PU-1", "Name__c": "", "Email__c": "sam@example.com"}],
-         ("PU-1: missing last name",)),
-        ([{"Id": "PU-1", "Name__c": "Sam Submitter", "Email__c": "sam@example.com"},
-          {"Id": "PU-2", "Name__c": "Alex Submitter", "Email__c": "sam@example.com"}],
-         ("PU-1: conflicting submitted names for sam@example.com",
-          "PU-2: conflicting submitted names for sam@example.com")),
-        ([{"Id": "PU-1", "Name__c": "Sam Submitter", "Email__c": "sam@old.example"},
-          {"Id": "PU-2", "Name__c": "Sam Submitter", "Email__c": "sam@new.example"}],
-         ("PU-1: email domain changed for sam", "PU-2: email domain changed for sam")),
+        (
+            [{"Id": "PU-1", "Name__c": "Sam Submitter", "Email__c": ""}],
+            ("PU-1: missing email",),
+        ),
+        (
+            [{"Id": "PU-1", "Name__c": "", "Email__c": "sam@example.com"}],
+            ("PU-1: missing last name",),
+        ),
+        (
+            [
+                {
+                    "Id": "PU-1",
+                    "Name__c": "Sam Submitter",
+                    "Email__c": "sam@example.com",
+                },
+                {
+                    "Id": "PU-2",
+                    "Name__c": "Alex Submitter",
+                    "Email__c": "sam@example.com",
+                },
+            ],
+            (
+                "PU-1: conflicting submitted names for sam@example.com",
+                "PU-2: conflicting submitted names for sam@example.com",
+            ),
+        ),
+        (
+            [
+                {
+                    "Id": "PU-1",
+                    "Name__c": "Sam Submitter",
+                    "Email__c": "sam@old.example",
+                },
+                {
+                    "Id": "PU-2",
+                    "Name__c": "Sam Submitter",
+                    "Email__c": "sam@new.example",
+                },
+            ],
+            (
+                "PU-1: email domain changed for sam",
+                "PU-2: email domain changed for sam",
+            ),
+        ),
     ],
 )
 def test_operator_handoff_reasons_for_submitter_identity(submissions, expected):
@@ -114,7 +148,15 @@ def test_operator_handoff_reasons_for_submitter_identity(submissions, expected):
 
 @pytest.mark.parametrize(
     "field_name",
-    ["Name", "Company_Owner__c", "BillingStreet", "BillingCity", "BillingState", "BillingPostalCode", "BillingCountry"],
+    [
+        "Name",
+        "Company_Owner__c",
+        "BillingStreet",
+        "BillingCity",
+        "BillingState",
+        "BillingPostalCode",
+        "BillingCountry",
+    ],
 )
 def test_company_address_and_ownership_changes_are_operator_only(field_name):
     assert profile_update_processing._operator_only_account_field(field_name)
@@ -122,7 +164,9 @@ def test_company_address_and_ownership_changes_are_operator_only(field_name):
 
 def test_contact_and_role_fields_remain_reviewable_by_garrett():
     assert not profile_update_processing._operator_only_account_field("Email")
-    assert not profile_update_processing._operator_only_account_field("Principal_Contact__c")
+    assert not profile_update_processing._operator_only_account_field(
+        "Principal_Contact__c"
+    )
 
 
 @pytest.mark.parametrize(
@@ -171,25 +215,40 @@ def test_role_decision_preview_shows_portal_user_outcome(
     assert processor._portal_user_preview(proposal) == expected
 
 
-@pytest.mark.parametrize(("linked_account_id", "expected_ignored"), [("account-1", False), ("other-account", True)])
+@pytest.mark.parametrize(
+    ("linked_account_id", "expected_ignored"),
+    [("account-1", False), ("other-account", True)],
+)
 def test_shared_mailbox_name_change_checks_all_role_accounts(
     linked_account_id, expected_ignored
 ):
     class RoleLookupClient(FakeClient):
         def query_records(self, object_name, fields, *, where=None, order_by=None):
-            if object_name == "Account" and where and "Cert_Certification_Contact__c" in where:
-                return [{
-                    "Id": linked_account_id,
-                    "Name": "Other Company" if linked_account_id != "account-1" else "Acme Steel",
-                    "Cert_Certification_Contact__c": "shared-contact",
-                }]
-            return super().query_records(object_name, fields, where=where, order_by=order_by)
+            if (
+                object_name == "Account"
+                and where
+                and "Cert_Certification_Contact__c" in where
+            ):
+                return [
+                    {
+                        "Id": linked_account_id,
+                        "Name": "Other Company"
+                        if linked_account_id != "account-1"
+                        else "Acme Steel",
+                        "Cert_Certification_Contact__c": "shared-contact",
+                    }
+                ]
+            return super().query_records(
+                object_name, fields, where=where, order_by=order_by
+            )
 
         def get_record(self, object_name, record_id, fields):
             if object_name == "Contact" and record_id == "shared-contact":
                 return {
-                    "Id": record_id, "Email": "quality@example.com",
-                    "FirstName": "Old", "LastName": "Quality",
+                    "Id": record_id,
+                    "Email": "quality@example.com",
+                    "FirstName": "Old",
+                    "LastName": "Quality",
                 }
             return super().get_record(object_name, record_id, fields)
 
@@ -204,12 +263,15 @@ def test_shared_mailbox_name_change_checks_all_role_accounts(
         "id:shared-contact",
         ContactResolution(
             ContactResolutionClassification.USE_EXISTING,
-            "quality@example.com", "quality@example.com", sources=[source],
+            "quality@example.com",
+            "quality@example.com",
+            sources=[source],
             selected_contact={"Id": "shared-contact"},
         ),
         staged_row(),
         proposals={
-            "first_name": {"New": [source]}, "last_name": {"Quality": [source]},
+            "first_name": {"New": [source]},
+            "last_name": {"Quality": [source]},
         },
         source_keys={("role", "quality", "submission-1")},
         contact_id="shared-contact",
@@ -1610,6 +1672,112 @@ def test_company_name_change_is_handed_to_operator_without_prompt(tmp_path):
     assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
 
 
+@pytest.mark.parametrize(
+    "address_change",
+    [
+        {"revised_facility_street": "99"},
+        {"revised_facility_city": "Atlantis"},
+        {"revised_facility_zip": "not-a-postal-code"},
+    ],
+)
+def test_partial_or_implausible_address_stays_with_operator(address_change, tmp_path):
+    client = FakeClient()
+    processor = InteractiveProfileUpdateProcessor(
+        client, input_fn=Feeder(["yes"]), output_fn=lambda message: None, now=NOW
+    )
+
+    result = processor.review([staged_row(**address_change)], tmp_path)
+
+    entries = [
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    handoff = next(
+        entry for entry in entries if entry["result"] == "handed off to operator"
+    )
+    assert handoff["field"].startswith("Billing")
+    assert not any(
+        object_name == "Account"
+        and record_id == "account-1"
+        and any(field.startswith("Billing") for field in values)
+        for object_name, record_id, values in client.updated
+    )
+
+
+def test_future_effective_date_is_recorded_on_company_name_handoff(tmp_path):
+    client = FakeClient()
+    processor = InteractiveProfileUpdateProcessor(
+        client, input_fn=Feeder(["yes"]), output_fn=lambda message: None, now=NOW
+    )
+
+    result = processor.review(
+        [
+            staged_row(
+                revised_company_name="Acme Steel LLC",
+                effective_date="2027-01-15",
+            )
+        ],
+        tmp_path,
+    )
+
+    entries = [
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    handoff = next(
+        entry for entry in entries if entry["result"] == "handed off to operator"
+    )
+    assert "Effective date: 2027-01-15" in handoff["context"]
+    assert "Do not apply before effective date 2027-01-15" in handoff["reason"]
+    assert not any(
+        object_name == "Account" and "Name" in values
+        for object_name, _, values in client.updated
+    )
+
+
+def test_facility_move_with_company_name_or_role_change_is_flagged():
+    assert profile_update_processing._is_combined_move_review(
+        staged_row(
+            revised_facility_city="Chicago",
+            revised_company_name="Acme Steel LLC",
+        )
+    )
+    assert profile_update_processing._is_combined_move_review(
+        staged_row(revised_facility_city="Chicago", principal_first_name="Alex")
+    )
+    assert not profile_update_processing._is_combined_move_review(
+        staged_row(revised_facility_city="Chicago")
+    )
+
+
+def test_combined_move_flag_is_in_operator_handoff_audit(tmp_path):
+    processor = InteractiveProfileUpdateProcessor(
+        FakeClient(),
+        input_fn=Feeder(["yes"]),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    result = processor.review(
+        [
+            staged_row(
+                revised_company_name="Acme Steel LLC",
+                revised_facility_city="Chicago",
+            )
+        ],
+        tmp_path,
+    )
+
+    entries = [
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    handoffs = [
+        entry for entry in entries if entry["result"] == "handed off to operator"
+    ]
+    assert any("needs closer review" in entry["reason"] for entry in handoffs)
+
+
 def test_account_handoff_records_context_and_keeps_case_open(tmp_path):
     history = [
         {
@@ -1769,9 +1937,7 @@ def test_parent_routes_account_updates_to_active_direct_children_only(tmp_path):
         "child-1",
         "child-2",
     }
-    assert {change["outcome"] for change in name_changes} == {
-        "handed off to operator"
-    }
+    assert {change["outcome"] for change in name_changes} == {"handed off to operator"}
 
 
 def test_qualifying_target_with_only_inactive_children_updates_target_account(tmp_path):
@@ -1867,8 +2033,14 @@ def test_qualifying_target_with_qualifying_children_hands_off_account_work(tmp_p
 
     assert "hierarchy is unsafe to route automatically" in "\n".join(output)
     assert not any(item[0] == "Account" for item in client.updated)
-    assert ("Company_Profile_Change__c", "submission-1", {"Status__c": "Closed"}) in client.updated
-    assert any(item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated)
+    assert (
+        "Company_Profile_Change__c",
+        "submission-1",
+        {"Status__c": "Closed"},
+    ) in client.updated
+    assert any(
+        item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated
+    )
     assert client.non_note_creates == []
     assert (
         client.records[("Company_Profile_Change__c", "submission-1")]["Status__c"]
@@ -1950,8 +2122,14 @@ def test_parent_conflict_is_acknowledged_and_hands_off_account_work(
     assert "Dropped Current Name" not in rendered
     assert any("manual follow-up" in prompt.casefold() for prompt in feeder.prompts)
     assert not any(item[0] == "Account" for item in client.updated)
-    assert ("Company_Profile_Change__c", "submission-1", {"Status__c": "Closed"}) in client.updated
-    assert any(item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated)
+    assert (
+        "Company_Profile_Change__c",
+        "submission-1",
+        {"Status__c": "Closed"},
+    ) in client.updated
+    assert any(
+        item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated
+    )
     assert client.non_note_creates == []
     assert (
         client.records[("Company_Profile_Change__c", "submission-1")]["Status__c"]
@@ -1995,8 +2173,14 @@ def test_non_qualifying_target_without_children_is_handed_off_and_keeps_case_ope
     assert "no direct child with status Certified or Initials" in "\n".join(output)
     assert any("manual follow-up" in prompt.casefold() for prompt in feeder.prompts)
     assert not any(item[0] == "Account" for item in client.updated)
-    assert ("Company_Profile_Change__c", "submission-1", {"Status__c": "Closed"}) in client.updated
-    assert any(item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated)
+    assert (
+        "Company_Profile_Change__c",
+        "submission-1",
+        {"Status__c": "Closed"},
+    ) in client.updated
+    assert any(
+        item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated
+    )
     assert client.non_note_creates == []
     assert (
         client.records[("Company_Profile_Change__c", "submission-1")]["Status__c"]
@@ -2057,8 +2241,14 @@ def test_parent_with_no_active_children_is_acknowledged_and_handed_off(
     assert "Dropped Child" in rendered
     assert "Suspended Child" in rendered
     assert not any(item[0] == "Account" for item in client.updated)
-    assert ("Company_Profile_Change__c", "submission-1", {"Status__c": "Closed"}) in client.updated
-    assert any(item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated)
+    assert (
+        "Company_Profile_Change__c",
+        "submission-1",
+        {"Status__c": "Closed"},
+    ) in client.updated
+    assert any(
+        item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated
+    )
     assert client.non_note_creates == []
     assert result.pending_batches == 1
 
@@ -2144,8 +2334,20 @@ def test_parent_role_lookup_conflict_holds_role_and_keeps_case_pending(tmp_path)
         account=account_record(Cert_Certification_Status__c="Dropped"),
         children=children,
         contacts=[
-            {"Id": "contact-1", "AccountId": "account-1", "FirstName": "Cert", "LastName": "One", "Email": "cert@example.com"},
-            {"Id": "contact-2", "AccountId": "account-1", "FirstName": "Cert", "LastName": "Two", "Email": "other@example.com"},
+            {
+                "Id": "contact-1",
+                "AccountId": "account-1",
+                "FirstName": "Cert",
+                "LastName": "One",
+                "Email": "cert@example.com",
+            },
+            {
+                "Id": "contact-2",
+                "AccountId": "account-1",
+                "FirstName": "Cert",
+                "LastName": "Two",
+                "Email": "other@example.com",
+            },
         ],
     )
     output = []
@@ -2186,8 +2388,14 @@ def test_parent_role_lookup_conflict_holds_role_and_keeps_case_pending(tmp_path)
     assert "contact-1" in rendered
     assert "contact-2" in rendered
     assert not any(item[0] in {"Contact", "Account"} for item in client.updated)
-    assert ("Company_Profile_Change__c", "submission-1", {"Status__c": "Closed"}) in client.updated
-    assert any(item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated)
+    assert (
+        "Company_Profile_Change__c",
+        "submission-1",
+        {"Status__c": "Closed"},
+    ) in client.updated
+    assert any(
+        item[0] == "Case" and item[2]["Status"] == "Pending" for item in client.updated
+    )
     assert client.non_note_creates == []
 
 
@@ -2266,7 +2474,9 @@ def test_blocked_parent_batch_advances_to_the_next_case(tmp_path):
 
     result = processor.review(rows, tmp_path)
 
-    assert not any(item[0] == "Account" and "Name" in item[2] for item in client.updated)
+    assert not any(
+        item[0] == "Account" and "Name" in item[2] for item in client.updated
+    )
     assert not any(
         object_name == "Account"
         and record_id in {"account-1", "child-1", "child-2"}
@@ -2330,7 +2540,9 @@ def test_parent_acknowledgement_interruption_writes_nothing_and_retry_refetches(
     )
     result = retry.review([dict(row)], tmp_path / "retry")
 
-    assert not any(item[0] == "Account" and "Name" in item[2] for item in client.updated)
+    assert not any(
+        item[0] == "Account" and "Name" in item[2] for item in client.updated
+    )
     assert result.pending_batches == 1
 
 
@@ -2387,7 +2599,9 @@ def test_company_name_change_is_handed_off_without_manual_prompt(tmp_path):
 
     audit = [json.loads(line) for line in result.audit_path.read_text().splitlines()]
     assert any(item["result"] == "handed off to operator" for item in audit)
-    assert not any(item[0] == "Account" and "Name" in item[2] for item in client.updated)
+    assert not any(
+        item[0] == "Account" and "Name" in item[2] for item in client.updated
+    )
 
 
 def test_company_name_handoff_closes_source_and_keeps_case_pending(tmp_path):
@@ -2400,9 +2614,15 @@ def test_company_name_handoff_closes_source_and_keeps_case_pending(tmp_path):
         now=NOW,
     )
 
-    result = processor.review([staged_row(revised_company_name="Acme Steel LLC")], tmp_path)
+    result = processor.review(
+        [staged_row(revised_company_name="Acme Steel LLC")], tmp_path
+    )
 
-    assert ("Company_Profile_Change__c", "submission-1", {"Status__c": "Closed"}) in client.updated
+    assert (
+        "Company_Profile_Change__c",
+        "submission-1",
+        {"Status__c": "Closed"},
+    ) in client.updated
     assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
     assert result.pending_batches == 1
 
@@ -5006,9 +5226,10 @@ def test_submission_close_failure_retries_after_safe_review(tmp_path):
         processor.review([row], tmp_path / "first")
 
     assert client.records[("Account", "account-1")]["Name"] == "Acme Steel"
-    assert client.records[("Company_Profile_Change__c", "submission-1")][
-        "Status__c"
-    ] == "New"
+    assert (
+        client.records[("Company_Profile_Change__c", "submission-1")]["Status__c"]
+        == "New"
+    )
     assert client.records[("Case", "case-1")]["Status"] == "Pending"
     assert any(
         json.loads(line)["field"] == "Status__c"
@@ -5028,9 +5249,10 @@ def test_submission_close_failure_retries_after_safe_review(tmp_path):
     retry.review([row], tmp_path / "retry")
 
     assert [write for write in client.updated if write[0] == "Account"] == []
-    assert client.records[("Company_Profile_Change__c", "submission-1")][
-        "Status__c"
-    ] == "Closed"
+    assert (
+        client.records[("Company_Profile_Change__c", "submission-1")]["Status__c"]
+        == "Closed"
+    )
     assert client.records[("Case", "case-1")]["Status"] == "Closed"
 
 
@@ -5050,13 +5272,12 @@ def test_case_close_failure_happens_after_submission_closes(tmp_path):
     )
 
     with pytest.raises(ProcessingError, match="write failed"):
-        processor.review(
-            [staged_row()], tmp_path
-        )
+        processor.review([staged_row()], tmp_path)
 
-    assert client.records[("Company_Profile_Change__c", "submission-1")][
-        "Status__c"
-    ] == "Closed"
+    assert (
+        client.records[("Company_Profile_Change__c", "submission-1")]["Status__c"]
+        == "Closed"
+    )
     assert client.records[("Case", "case-1")]["Status"] == "Pending"
     audit = [
         json.loads(line)
@@ -5174,8 +5395,7 @@ def test_applicant_provisioning_is_acknowledged_then_audited_and_batches_continu
     assert len(acknowledgement_questions) == 2
     assert all(
         "This is an applicant account, so Portal access will not be created "
-        "automatically."
-        in "".join(fragment.text for fragment in question.prompt)
+        "automatically." in "".join(fragment.text for fragment in question.prompt)
         for question in acknowledgement_questions
     )
     assert all(ui.acknowledgement_checks)
@@ -5266,7 +5486,11 @@ def test_missing_external_user_configuration_is_handed_to_operator(
     assert failure["target_object"] == "External User Provisioning Configuration"
     assert failure["target_record_id"] == ""
     assert setting in failure["error"]
-    assert ("Company_Profile_Change__c", "submission-1", {"Status__c": "Closed"}) in client.updated
+    assert (
+        "Company_Profile_Change__c",
+        "submission-1",
+        {"Status__c": "Closed"},
+    ) in client.updated
     assert ("Case", "case-1", {"Status": "Pending"}) in client.updated
     assert result.pending_batches == 1
     assert any(item["result"] == "handed off to operator" for item in audit)

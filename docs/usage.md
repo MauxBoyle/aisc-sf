@@ -1365,6 +1365,16 @@ Pending, even when its source Profile Updates can be closed after completed
 work. Review the handoff reason and completed outcomes before resolving the
 Case.
 
+Every proposed facility-address field remains operator-only, including a
+partial address or a value that looks implausible. The application does not
+guess whether an address is valid. When a company-name or facility-address
+change has an effective date, the handoff audit includes that date and tells
+the operator not to apply the change early. A facility move submitted with a
+company-name or Certification/Principal Contact change is explicitly flagged
+for closer review. These safeguards keep automated review from writing the
+name or address to Salesforce before the operator's decision and effective
+date.
+
 The final role-link phase uses the preserved mapping
 from each submission/role source to its resolved Contact ID, so it still works
 when phase one changed the Contact email or created a Contact shared by several

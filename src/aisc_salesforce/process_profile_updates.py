@@ -1873,7 +1873,10 @@ class InteractiveProfileUpdateProcessor:
                             "contact_id": snapshot.contact_id,
                             "contact": snapshot.contact,
                         }
-                        for (account_id, role), snapshot in role_contact_snapshots.items()
+                        for (
+                            account_id,
+                            role,
+                        ), snapshot in role_contact_snapshots.items()
                     },
                     ensure_ascii=False,
                     sort_keys=True,
@@ -3787,7 +3790,10 @@ class InteractiveProfileUpdateProcessor:
             not response.submitter_email.strip() for response in role_responses
         )
         all_sent = all_sent and not successful_without_email and not missing_role_email
-        if not self._blank_pending_source_ids and self.participant_user_provisioning is not None:
+        if (
+            not self._blank_pending_source_ids
+            and self.participant_user_provisioning is not None
+        ):
             self._provision_missing_participant_users(batch, contact_ids)
         for source_id in batch.source_submission_ids:
             if source_id in self._blank_pending_source_ids:
@@ -3846,7 +3852,11 @@ class InteractiveProfileUpdateProcessor:
         if self._queue_store is None:
             return {}
         return next(
-            (dict(item.outcomes) for item in self._queue_store.manifest.batches if item.case.record_id == batch.case_id),
+            (
+                dict(item.outcomes)
+                for item in self._queue_store.manifest.batches
+                if item.case.record_id == batch.case_id
+            ),
             {},
         )
 
@@ -3854,7 +3864,11 @@ class InteractiveProfileUpdateProcessor:
         if self._queue_store is None:
             return ""
         return next(
-            (item.response_context for item in self._queue_store.manifest.batches if item.case.record_id == batch.case_id),
+            (
+                item.response_context
+                for item in self._queue_store.manifest.batches
+                if item.case.record_id == batch.case_id
+            ),
             "",
         )
 
@@ -3862,7 +3876,11 @@ class InteractiveProfileUpdateProcessor:
         if self._queue_store is None:
             return
         queued = next(
-            (item for item in self._queue_store.manifest.batches if item.case.record_id == batch.case_id),
+            (
+                item
+                for item in self._queue_store.manifest.batches
+                if item.case.record_id == batch.case_id
+            ),
             None,
         )
         if queued is not None:
@@ -3871,11 +3889,17 @@ class InteractiveProfileUpdateProcessor:
     def _record_batch_outcome(self, batch: CaseBatch, key: str, value: str) -> None:
         if self._queue_store is not None:
             queue_batch = next(
-                (item for item in self._queue_store.manifest.batches if item.case.record_id == batch.case_id),
+                (
+                    item
+                    for item in self._queue_store.manifest.batches
+                    if item.case.record_id == batch.case_id
+                ),
                 None,
             )
             if queue_batch is not None:
-                self._queue_store.record_batch_state(queue_batch.id, outcome=(key, value))
+                self._queue_store.record_batch_state(
+                    queue_batch.id, outcome=(key, value)
+                )
             self._display_event(ReviewQueueSnapshot(self._queue_store.manifest))
 
     def _queued_request_items(self, batch: CaseBatch):
@@ -4108,7 +4132,9 @@ class InteractiveProfileUpdateProcessor:
             self._record_batch_outcome(
                 batch,
                 "portal_user",
-                "deferred" if outcome.code == "applicant_portal_access_deferred" else "completed",
+                "deferred"
+                if outcome.code == "applicant_portal_access_deferred"
+                else "completed",
             )
 
     def _append_provisioning_audit(
@@ -5158,9 +5184,28 @@ class InteractiveProfileUpdateProcessor:
                     self._append_audit(result)
                     results.append(result)
                     continue
+                handoff_reason = f"{label} change requires operator review."
+                effective_dates = _batch_effective_dates(batch)
+                if effective_dates and account_field in {
+                    "Name",
+                    "BillingStreet",
+                    "BillingCity",
+                    "BillingState",
+                    "BillingPostalCode",
+                    "BillingCountry",
+                }:
+                    handoff_reason += (
+                        " Do not apply before effective date "
+                        f"{', '.join(effective_dates)}."
+                    )
+                if _is_combined_move_review(row):
+                    handoff_reason += (
+                        " This facility move is combined with a company-name or "
+                        "Certification/Principal Contact change and needs closer review."
+                    )
                 self._record_handoff(
                     batch,
-                    f"{label} change requires operator review.",
+                    handoff_reason,
                     target_object="Account",
                     target_record_id=target_account_id,
                     field_name=account_field,
@@ -6037,6 +6082,9 @@ class InteractiveProfileUpdateProcessor:
             original_value="",
             proposed_value=proposed_value,
             reason=reason,
+            context="\n".join(
+                f"Effective date: {value}" for value in _batch_effective_dates(batch)
+            ),
         )
         self._append_audit(
             ActionResult(
@@ -6483,6 +6531,41 @@ def _operator_only_account_field(field_name: str) -> bool:
         "BillingPostalCode",
         "BillingCountry",
     }
+
+
+def _batch_effective_dates(batch: CaseBatch) -> tuple[str, ...]:
+    """Return distinct effective dates recorded on a Case batch."""
+    return tuple(
+        dict.fromkeys(
+            row.get("effective_date", "").strip()
+            for row in batch.rows
+            if row.get("effective_date", "").strip()
+        )
+    )
+
+
+def _is_combined_move_review(row: dict[str, str]) -> bool:
+    """Return whether a facility move also changes a name or account role."""
+    address_changed = any(
+        row.get(field_name, "").strip()
+        for field_name in (
+            "revised_facility_street",
+            "revised_facility_city",
+            "revised_facility_state",
+            "revised_facility_zip",
+            "revised_facility_country",
+        )
+    )
+    if not address_changed:
+        return False
+    if row.get("revised_company_name", "").strip():
+        return True
+    return any(
+        row.get(f"{role.prefix}_{suffix}", "").strip()
+        for role in ACCOUNT_ROLE_DEFINITIONS
+        if role.prefix in {"certification", "principal"}
+        for suffix, _ in role.submitted_fields
+    )
 
 
 def _account_choice_label(account: dict[str, Any]) -> str:

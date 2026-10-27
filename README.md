@@ -631,6 +631,11 @@ change and the expected Portal User result before the final Salesforce check.
 See [Profile Update processing](docs/usage.md#process-profile-updates-command)
 for operator steps.
 
+Partial and implausible facility addresses also stay with the operator. Future
+effective dates appear in the handoff audit, which states not to apply the
+company-name or address change early. A move combined with a company-name or
+Certification/Principal Contact change is flagged for closer review.
+
 Blank Key Data submissions receive a separate review path. The operator sees
 recent Account History and whether Susan Thomas made a change within six hours,
 A matching change selects an acknowledgment; no match selects a clarification
