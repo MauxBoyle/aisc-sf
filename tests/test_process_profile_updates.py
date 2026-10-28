@@ -3275,6 +3275,44 @@ def test_contact_phase_combines_roles_into_one_write_before_account_and_role_lin
     )
 
 
+def test_unresolved_role_contact_is_named_in_operator_handoff(tmp_path):
+    client = FakeClient()
+    client.records[("Company_Profile_Change__c", "submission-1")].update(
+        {
+            "NY_First_Name__c": "Jordan",
+            "NY_Last_Name__c": "Taylor",
+        }
+    )
+    row = staged_row(
+        new_york_first_name="Jordan",
+        new_york_last_name="Taylor",
+        contact_resolutions="[]",
+    )
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["apply automatically"] * 3 + ["yes"]),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    result = processor.review([row], tmp_path)
+
+    entries = [
+        json.loads(line)
+        for line in result.audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    handoffs = [
+        entry
+        for entry in entries
+        if entry["result"] == "handed off to operator"
+        and entry["field"] == "Cert_Safety_Contact__c"
+    ]
+    assert len(handoffs) == 1
+    assert "New York role" in handoffs[0]["reason"]
+    assert "Contact" in handoffs[0]["reason"]
+    assert result.pending_batches == 1
+
+
 def test_conflicting_contact_values_are_resolved_before_any_contact_write(tmp_path):
     contact = {
         "Id": "contact-1",
