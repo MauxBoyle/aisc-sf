@@ -1227,6 +1227,28 @@ Account name, company owner, and each billing-address component are separate
 proposals. Effective date and the Key Update answers remain context unless
 they map to one of those real Account fields.
 
+For a changed company name or facility address with a future effective date,
+review asks the operator to create a Notion task linked to the Case and confirm
+that the task exists. Choose `no` to stop this Case review with the source
+Profile Update still New and the Case Pending; create the task, then resume the
+same session. The application records the confirmation in
+the Case batch's `review_queue.json` outcomes and does not create or inspect the
+Notion task itself. A saved confirmation is not asked again when that session
+resumes.
+
+The review also asks whether the operator used `f.k.a.` for a future company
+name or `(pending address change)` for a future facility address. The answer is
+saved in the same queue outcomes. When used, the handoff summary and audit
+record carry the cleanup trigger: remove `f.k.a.` after the first subsequent
+Audit Review changes from In Progress to Completed; remove `(pending address
+change)` shortly after the scheduled auditor visit, without checking Audit
+completion status. These cleanup reminders do not by themselves keep the Case
+open. Before finishing, the review asks the operator to confirm that the
+participant's future-change plan was sent. A `no` keeps the Case Pending and
+records a retryable plan outcome; a later resume asks again. Once the plan has
+been sent and no other work remains pending, the Case can close while notation
+cleanup stays outstanding.
+
 Before every staged CSV row, a heading shows its Account, submitter, and source
 Profile Update names. When the matching CSV flag is `true`, the heading also
 shows one or both of these lines:

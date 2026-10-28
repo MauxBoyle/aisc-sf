@@ -677,6 +677,16 @@ composes three independently callable session phases in this order:
    possible Cases, refresh the same captured data set, and review changes in
    deterministic order.
 
+For future company-name or facility-address changes, review requires operator
+confirmation that a Notion task linked to the Case exists. The operator records
+whether `f.k.a.` or `(pending address change)` was used; the saved session then
+retains the applicable cleanup reminder. Review also records operator
+confirmation that the participant received the future-change plan before it
+closes the Case. These actions stay manual, and notation cleanup may remain
+outstanding after closure.
+See the [Profile Update operator instructions](docs/usage.md#process-profile-updates-command)
+for the retry and cleanup rules.
+
 Run the phases separately when a person or TUI needs to inspect the stable
 artifacts before any Salesforce write or before interactive review:
 

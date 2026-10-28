@@ -1749,7 +1749,10 @@ def test_partial_or_implausible_address_stays_with_operator(address_change, tmp_
 def test_future_effective_date_is_recorded_on_company_name_handoff(tmp_path):
     client = FakeClient()
     processor = InteractiveProfileUpdateProcessor(
-        client, input_fn=Feeder(["yes"]), output_fn=lambda message: None, now=NOW
+        client,
+        input_fn=Feeder(["yes", "not_used", "yes"]),
+        output_fn=lambda message: None,
+        now=NOW,
     )
 
     result = processor.review(
@@ -1775,6 +1778,221 @@ def test_future_effective_date_is_recorded_on_company_name_handoff(tmp_path):
         object_name == "Account" and "Name" in values
         for object_name, _, values in client.updated
     )
+
+
+class FutureChangeFollowupUI:
+    def __init__(self, answers, *, interrupt_at=None):
+        self.answers = iter(answers)
+        self.interrupt_at = interrupt_at
+        self.events = []
+        self.questions = []
+
+    def display(self, event):
+        self.events.append(event)
+
+    def ask(self, question):
+        self.questions.append(question)
+        if self.interrupt_at == len(self.questions):
+            raise KeyboardInterrupt
+        answer = next(self.answers)
+        if isinstance(question, ChoiceQuestion):
+            choice = next(choice for choice in question.choices if choice.key == answer)
+            return ChoiceAnswer(choice)
+        if isinstance(question, AcknowledgementQuestion):
+            return AcknowledgementAnswer()
+        raise AssertionError(type(question))
+
+
+@pytest.mark.parametrize(
+    ("change", "notation_prompt", "cleanup"),
+    [
+        ({"revised_company_name": "Acme Steel LLC"}, "f.k.a.", "Audit Review"),
+        (
+            {"revised_facility_city": "Milwaukee"},
+            "(pending address change)",
+            "scheduled auditor visit",
+        ),
+    ],
+)
+def test_future_change_requires_notion_confirmation_and_records_notation(
+    tmp_path, change, notation_prompt, cleanup
+):
+    row = staged_row(effective_date="2027-01-15", **change)
+    ui = FutureChangeFollowupUI(["continue", "yes", "used", "yes"])
+    client = FakeClient()
+    processor = InteractiveProfileUpdateProcessor(client, ui=ui, now=NOW)
+
+    processor.review([row], tmp_path)
+
+    questions = [
+        "".join(
+            getattr(fragment, "text", getattr(fragment, "value", ""))
+            for fragment in question.prompt
+        )
+        for question in ui.questions
+    ]
+    assert "Notion task" in questions[1]
+    assert "00010001" in questions[1]
+    assert notation_prompt in questions[2]
+    assert "sent the participant the plan" in questions[3]
+    manifest = read_review_queue(tmp_path / "review_queue.json")
+    outcomes = dict(manifest.batches[0].outcomes)
+    assert outcomes["future_change_task"] == "created"
+    assert outcomes["future_change_plan"] == "sent"
+    notation_key = (
+        "notation:fka" if notation_prompt == "f.k.a." else "notation:pending_address"
+    )
+    assert outcomes[notation_key] == "used"
+    audit = (tmp_path / "review_audit.jsonl").read_text(encoding="utf-8")
+    assert cleanup in audit
+    account_field = "Name" if "revised_company_name" in change else "BillingCity"
+    assert not any(
+        object_name == "Account" and account_field in values
+        for object_name, _, values in client.updated
+    )
+    assert client.records[("Case", "case-1")]["Status"] == "Closed"
+
+
+def test_case_stays_pending_until_future_change_plan_is_confirmed_sent(tmp_path):
+    row = staged_row(effective_date="2027-01-15", revised_company_name="Acme Steel LLC")
+    client = FakeClient()
+    first_ui = FutureChangeFollowupUI(["continue", "yes", "not_used", "no"])
+    first = InteractiveProfileUpdateProcessor(client, ui=first_ui, now=NOW)
+
+    result = first.review([row], tmp_path)
+
+    assert result.pending_batches == 1
+    assert client.records[("Case", "case-1")]["Status"] == "Pending"
+    assert (
+        dict(read_review_queue(tmp_path / "review_queue.json").batches[0].outcomes)[
+            "future_change_plan"
+        ]
+        == "pending"
+    )
+
+    retry_ui = FutureChangeFollowupUI(["continue", "yes"])
+    retry = InteractiveProfileUpdateProcessor(client, ui=retry_ui, now=NOW)
+    retry.load_review_queue([row], tmp_path, resume=True)
+    retry.review([row], tmp_path)
+
+    assert client.records[("Case", "case-1")]["Status"] == "Closed"
+    assert (
+        dict(read_review_queue(tmp_path / "review_queue.json").batches[0].outcomes)[
+            "future_change_plan"
+        ]
+        == "sent"
+    )
+    saved_queue = read_review_queue(tmp_path / "review_queue.json")
+    assert saved_queue.batches[0].status is QueueStatus.BLOCKED
+    retry_prompts = [
+        "".join(
+            getattr(fragment, "text", getattr(fragment, "value", ""))
+            for fragment in question.prompt
+        )
+        for question in retry_ui.questions
+    ]
+    assert all("Notion task" not in prompt for prompt in retry_prompts)
+
+
+def test_future_change_declined_notion_task_stays_pending_and_retryable(tmp_path):
+    row = staged_row(effective_date="2027-01-15", revised_company_name="Acme Steel LLC")
+    client = FakeClient()
+    processor = InteractiveProfileUpdateProcessor(
+        client, ui=FutureChangeFollowupUI(["continue", "no"]), now=NOW
+    )
+
+    with pytest.raises(ProcessingInterrupted, match="Notion task"):
+        processor.review([row], tmp_path)
+
+    outcomes = dict(
+        read_review_queue(tmp_path / "review_queue.json").batches[0].outcomes
+    )
+    assert outcomes["future_change_task"] == "pending"
+    assert client.records[("Case", "case-1")]["Status"] == "Pending"
+    assert (
+        client.records[("Company_Profile_Change__c", "submission-1")]["Status__c"]
+        == "New"
+    )
+
+    retry_ui = FutureChangeFollowupUI(["continue", "yes", "not_used", "yes"])
+    retry = InteractiveProfileUpdateProcessor(client, ui=retry_ui, now=NOW)
+    retry.load_review_queue([row], tmp_path, resume=True)
+    retry.review([row], tmp_path)
+    assert "Notion task" in "".join(
+        getattr(fragment, "text", getattr(fragment, "value", ""))
+        for fragment in retry_ui.questions[1].prompt
+    )
+
+
+def test_future_change_interrupted_notion_prompt_is_retryable(tmp_path):
+    row = staged_row(effective_date="2027-01-15", revised_facility_city="Milwaukee")
+    client = FakeClient()
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        ui=FutureChangeFollowupUI(["continue"], interrupt_at=2),
+        now=NOW,
+    )
+
+    with pytest.raises(ProcessingInterrupted):
+        processor.review([row], tmp_path)
+
+    assert "future_change_task" not in dict(
+        read_review_queue(tmp_path / "review_queue.json").batches[0].outcomes
+    )
+    assert client.records[("Case", "case-1")]["Status"] == "Pending"
+    assert (
+        client.records[("Company_Profile_Change__c", "submission-1")]["Status__c"]
+        == "New"
+    )
+
+
+def test_confirmed_future_task_is_not_asked_again_after_interruption(tmp_path):
+    row = staged_row(effective_date="2027-01-15", revised_company_name="Acme Steel LLC")
+    client = FakeClient()
+    interrupted = InteractiveProfileUpdateProcessor(
+        client,
+        ui=FutureChangeFollowupUI(["continue", "yes"], interrupt_at=3),
+        now=NOW,
+    )
+
+    with pytest.raises(ProcessingInterrupted):
+        interrupted.review([row], tmp_path)
+
+    outcomes = dict(
+        read_review_queue(tmp_path / "review_queue.json").batches[0].outcomes
+    )
+    assert outcomes["future_change_task"] == "created"
+    retry_ui = FutureChangeFollowupUI(["continue", "not_used", "yes"])
+    retry = InteractiveProfileUpdateProcessor(client, ui=retry_ui, now=NOW)
+    retry.load_review_queue([row], tmp_path, resume=True)
+    retry.review([row], tmp_path)
+    retried_prompts = [
+        "".join(
+            getattr(fragment, "text", getattr(fragment, "value", ""))
+            for fragment in question.prompt
+        )
+        for question in retry_ui.questions
+    ]
+    assert all("Notion task" not in prompt for prompt in retried_prompts)
+
+
+def test_future_company_owner_handoff_does_not_request_name_or_address_followups(
+    tmp_path,
+):
+    row = staged_row(effective_date="2027-01-15", revised_company_owner="New Owner")
+    client = FakeClient()
+    ui = FutureChangeFollowupUI(["continue"])
+    InteractiveProfileUpdateProcessor(client, ui=ui, now=NOW).review([row], tmp_path)
+
+    assert all(
+        "Notion task"
+        not in "".join(
+            getattr(fragment, "text", getattr(fragment, "value", ""))
+            for fragment in question.prompt
+        )
+        for question in ui.questions
+    )
+    assert client.records[("Case", "case-1")]["Status"] == "Pending"
 
 
 def test_facility_move_with_company_name_or_role_change_is_flagged():
