@@ -1321,7 +1321,9 @@ class InteractiveProfileUpdateProcessor:
         self._review_rows: list[dict[str, str]] | None = None
         self._resuming_session = False
         self._handoff_reasons: list[str] = []
+        self._case_pending = False
         self._blank_pending_source_ids: set[str] = set()
+        self._notation_cleanup_reminders: set[str] = set()
         self.participant_user_provisioning = participant_user_provisioning
         self.provisioning_environment = provisioning_environment
 
@@ -1831,7 +1833,9 @@ class InteractiveProfileUpdateProcessor:
         fresh_by_id = self._fresh_case_submissions(batch)
         self._refresh_request_items_from_fresh(batch, fresh_by_id)
         self._handoff_reasons = []
+        self._case_pending = False
         self._blank_pending_source_ids = set()
+        self._notation_cleanup_reminders = set()
         self._record_batch_outcome(batch, "profile_change", "pending")
         identity_reasons = _operator_handoff_reasons(list(fresh_by_id.values()))
         for reason in identity_reasons:
@@ -3588,8 +3592,7 @@ class InteractiveProfileUpdateProcessor:
                 self._record_handoff(
                     batch,
                     f"{role.label} role link is held because its Contact requires "
-                    "operator follow-up: "
-                    + "; ".join(item.handoff_reasons),
+                    "operator follow-up: " + "; ".join(item.handoff_reasons),
                     target_object="Account",
                     target_record_id=target_account_id,
                     field_name=role.account_lookup,
@@ -3811,6 +3814,44 @@ class InteractiveProfileUpdateProcessor:
             )
             all_sent = all_sent and sent
 
+        if self._batch_outcomes(batch).get("future_change_task") == "created":
+            plan_outcome = self._batch_outcomes(batch).get("future_change_plan")
+            if plan_outcome != "sent":
+                plan_choice = self._ask_choice(
+                    ChoiceQuestion(
+                        styled(
+                            "Have you sent the participant the plan for the future "
+                            "company or facility change on Case ",
+                            ValueFragment(batch.case_number or batch.case_id),
+                            " (effective ",
+                            ValueFragment(
+                                ", ".join(
+                                    _future_effective_dates(
+                                        batch, self.now.astimezone(CHICAGO).date()
+                                    )
+                                )
+                            ),
+                            ")? ",
+                        ),
+                        (
+                            ReviewChoice(
+                                "yes", "yes, the participant received the plan"
+                            ),
+                            ReviewChoice("no", "no, the plan is still pending"),
+                        ),
+                        styled(
+                            "The Case can close after the participant receives this plan."
+                        ),
+                    )
+                )
+                plan_outcome = "sent" if plan_choice == "yes" else "pending"
+                self._record_batch_outcome(batch, "future_change_plan", plan_outcome)
+            if plan_outcome != "sent":
+                self._case_pending = True
+                all_sent = False
+            else:
+                self._block_future_change_queue(batch)
+
         successful_without_email = any(
             result.status in {ActionStatus.APPLIED, ActionStatus.VERIFIED_MANUAL}
             and not result.proposal.submitter_email.strip()
@@ -3863,7 +3904,7 @@ class InteractiveProfileUpdateProcessor:
             self._record_batch_outcome(batch, "profile_change", "closed")
         case_status = (
             CaseStatus.PENDING
-            if self._handoff_reasons or not all_sent
+            if self._case_pending or not all_sent
             else CaseStatus.CLOSED
         )
         case_outcome = "closed" if case_status is CaseStatus.CLOSED else "pending"
@@ -3876,7 +3917,7 @@ class InteractiveProfileUpdateProcessor:
                 case_status,
             )
             self._record_batch_outcome(batch, "case", case_outcome)
-        return bool(self._handoff_reasons) or not all_sent
+        return self._case_pending or not all_sent
 
     def _show_manager_handoff_summary(
         self,
@@ -4139,6 +4180,7 @@ class InteractiveProfileUpdateProcessor:
                 self._display_event(ReviewQueueSnapshot(self._queue_store.manifest))
             if decision == "handed_off":
                 self._handoff_reasons.append(f"{change.label} was handed off: {result}")
+                self._case_pending = True
             responses.append(
                 (
                     self._request_submitter_email(batch, change),
@@ -4855,6 +4897,7 @@ class InteractiveProfileUpdateProcessor:
             error=reason,
         )
         self._handoff_reasons.append(reason)
+        self._case_pending = True
         return True
 
     def _show_case_context(
@@ -5214,6 +5257,7 @@ class InteractiveProfileUpdateProcessor:
                     self._handoff_reasons.append(
                         "Blank submission response is pending because no submitter email is available."
                     )
+                    self._case_pending = True
                     continue
                 self._display_event(
                     ResponseEmail(ValueFragment(email, ValueOrigin.SUBMITTED), body)
@@ -5238,6 +5282,7 @@ class InteractiveProfileUpdateProcessor:
                     self._handoff_reasons.append(
                         f"Blank submission response email to {email} is still pending."
                     )
+                    self._case_pending = True
                     self._blank_pending_source_ids.update(group_source_ids)
 
     def _review_account_proposals(
@@ -5302,19 +5347,54 @@ class InteractiveProfileUpdateProcessor:
                     results.append(result)
                     continue
                 handoff_reason = f"{label} change requires operator review."
-                effective_dates = _batch_effective_dates(batch)
-                if effective_dates and account_field in {
+                future_date = _future_effective_date(
+                    row, self.now.astimezone(CHICAGO).date()
+                )
+                is_name_or_address = account_field in {
                     "Name",
                     "BillingStreet",
                     "BillingCity",
                     "BillingState",
                     "BillingPostalCode",
                     "BillingCountry",
-                }:
+                }
+                is_future_name_or_address = (
+                    future_date is not None and is_name_or_address
+                )
+                if is_future_name_or_address:
+                    self._confirm_future_change_task(batch, (future_date,))
+                if is_future_name_or_address:
                     handoff_reason += (
                         " Do not apply before effective date "
-                        f"{', '.join(effective_dates)}."
+                        f"{future_date}."
                     )
+                if is_name_or_address and account_field == "Name":
+                    reminder = self._record_temporary_notation(
+                        batch,
+                        key="fka",
+                        notation="f.k.a.",
+                        confirm_used=is_future_name_or_address,
+                        cleanup=(
+                            "Remove f.k.a. after the first subsequent Audit Review "
+                            "changes from In Progress to Completed."
+                        ),
+                    )
+                    if reminder:
+                        handoff_reason += f" {reminder}"
+                elif is_name_or_address and account_field.startswith("Billing"):
+                    reminder = self._record_temporary_notation(
+                        batch,
+                        key="pending_address",
+                        notation="(pending address change)",
+                        confirm_used=is_future_name_or_address,
+                        cleanup=(
+                            "Remove (pending address change) shortly after the "
+                            "scheduled auditor visit; no Audit completion-status "
+                            "check is required."
+                        ),
+                    )
+                    if reminder:
+                        handoff_reason += f" {reminder}"
                 if _is_combined_move_review(row):
                     handoff_reason += (
                         " This facility move is combined with a company-name or "
@@ -5327,6 +5407,10 @@ class InteractiveProfileUpdateProcessor:
                     target_record_id=target_account_id,
                     field_name=account_field,
                     proposed_value=proposed,
+                    keep_case_pending=(
+                        not is_future_name_or_address or _is_combined_move_review(row)
+                    ),
+                    update_queue=not is_future_name_or_address,
                 )
                 continue
             proposal = self._proposal(
@@ -5344,6 +5428,115 @@ class InteractiveProfileUpdateProcessor:
             )
             results.append(self._review_proposal(proposal))
         return results
+
+    def _confirm_future_change_task(
+        self, batch: CaseBatch, effective_dates: tuple[str, ...]
+    ) -> None:
+        """Pause a future Account change until its linked Notion task exists."""
+        if self._batch_outcomes(batch).get("future_change_task") == "created":
+            return
+        case_label = batch.case_number or batch.case_id
+        choice = self._ask_choice(
+            ChoiceQuestion(
+                styled(
+                    "Create a Notion task linked to Case ",
+                    ValueFragment(case_label),
+                    " for the future company or facility change effective ",
+                    ValueFragment(", ".join(effective_dates)),
+                    ". Confirm once the task exists. Has it been created? ",
+                ),
+                (
+                    ReviewChoice("yes", "yes, the Notion task exists"),
+                    ReviewChoice("no", "no, create it later"),
+                ),
+                styled("Choose yes only after the Case-linked Notion task exists."),
+            )
+        )
+        if choice != "yes":
+            self._record_batch_outcome(batch, "future_change_task", "pending")
+            raise ProcessingInterrupted(
+                "The Case-linked Notion task is not confirmed; this review is "
+                "pending and can be retried after the task is created."
+            )
+        self._record_batch_outcome(batch, "future_change_task", "created")
+
+    def _record_temporary_notation(
+        self,
+        batch: CaseBatch,
+        *,
+        key: str,
+        notation: str,
+        confirm_used: bool,
+        cleanup: str,
+    ) -> str:
+        """Persist notation use, asking only when a future change may use it."""
+        outcome_key = f"notation:{key}"
+        outcome = self._batch_outcomes(batch).get(outcome_key)
+        if outcome is None:
+            if confirm_used:
+                choice = self._ask_choice(
+                    ChoiceQuestion(
+                        styled(
+                            "Was the temporary notation ",
+                            ValueFragment(notation),
+                            " used in Salesforce for this Case? ",
+                        ),
+                        (
+                            ReviewChoice("used", "yes, it was used"),
+                            ReviewChoice("not_used", "no, it was not used"),
+                        ),
+                        styled("Choose whether this temporary notation was used."),
+                    )
+                )
+                outcome = choice
+            else:
+                # Temporary notations apply only while a future change is pending.
+                # Save an explicit state without consuming an unrelated UI answer.
+                outcome = "not_used"
+            self._record_batch_outcome(batch, outcome_key, outcome)
+        if outcome != "used" or key in self._notation_cleanup_reminders:
+            return ""
+        self._notation_cleanup_reminders.add(key)
+        self._display_event(WarningNotice(styled(cleanup)))
+        return cleanup
+
+    def _block_future_change_queue(self, batch: CaseBatch) -> None:
+        """Mark scheduled operator changes as handed off after the plan is sent."""
+        if self._queue_store is None:
+            return
+        today = self.now.astimezone(CHICAGO).date()
+        future_dates = set(_future_effective_dates(batch, today))
+        future_source_ids = {
+            source_id
+            for row in batch.rows
+            if row.get("effective_date", "").strip() in future_dates
+            for source_id in _json_string_list(row["source_submission_ids"])
+        }
+        account_fields = {
+            "Name",
+            "BillingStreet",
+            "BillingCity",
+            "BillingState",
+            "BillingPostalCode",
+            "BillingCountry",
+        }
+        item_ids = [
+            change.id
+            for change in iter_changes(self._queue_store.manifest)
+            if change.phase is QueuePhase.ACCOUNT
+            and change.salesforce.object_name == "Account"
+            and change.field in account_fields
+            and change.status is QueueStatus.PENDING
+            and future_source_ids.intersection(change.source_submission_ids)
+        ]
+        for item_id in item_ids:
+            self._queue_store.transition(
+                item_id,
+                QueueStatus.BLOCKED,
+                outcome="future change plan sent; operator follow-up remains",
+            )
+        if item_ids:
+            self._display_event(ReviewQueueSnapshot(self._queue_store.manifest))
 
     def _capture_role_contact_snapshots(
         self,
@@ -6182,9 +6375,12 @@ class InteractiveProfileUpdateProcessor:
         target_record_id: str,
         field_name: str = "",
         proposed_value: Any = "",
+        keep_case_pending: bool = True,
+        update_queue: bool = True,
     ) -> None:
         """Record an operator handoff without stopping unrelated Case work."""
         self._handoff_reasons.append(reason)
+        self._case_pending = self._case_pending or keep_case_pending
         proposal = ChangeProposal(
             source_submission_ids=batch.source_submission_ids,
             case_id=batch.case_id,
@@ -6210,13 +6406,16 @@ class InteractiveProfileUpdateProcessor:
                 ActionStatus.HANDED_OFF,
                 action="route decision to operator",
                 error=reason,
-            )
+            ),
+            update_queue=update_queue,
         )
 
-    def _append_audit(self, result: ActionResult) -> None:
+    def _append_audit(self, result: ActionResult, *, update_queue: bool = True) -> None:
         if self._audit is None:
             raise RuntimeError("Audit writer is unavailable.")
         self._audit.append(result)
+        if not update_queue:
+            return
         if result.status in {
             ActionStatus.APPLIED,
             ActionStatus.VERIFIED_MANUAL,
@@ -6707,6 +6906,31 @@ def _batch_effective_dates(batch: CaseBatch) -> tuple[str, ...]:
             if row.get("effective_date", "").strip()
         )
     )
+
+
+def _future_effective_dates(batch: CaseBatch, today: date) -> tuple[str, ...]:
+    """Return valid Case effective dates that occur after the review date."""
+    future_dates: list[str] = []
+    for value in _batch_effective_dates(batch):
+        try:
+            effective_date = date.fromisoformat(value[:10])
+        except ValueError:
+            continue
+        if effective_date > today:
+            future_dates.append(value)
+    return tuple(future_dates)
+
+
+def _future_effective_date(row: dict[str, str], today: date) -> str | None:
+    """Return this row's valid effective date when it is later than today."""
+    value = row.get("effective_date", "").strip()
+    if not value:
+        return None
+    try:
+        effective_date = date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+    return value if effective_date > today else None
 
 
 def _is_combined_move_review(row: dict[str, str]) -> bool:

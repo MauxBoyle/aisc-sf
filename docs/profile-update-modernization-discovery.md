@@ -292,6 +292,15 @@ Completed. Remove `(pending address change)` shortly after the scheduled
 auditor visit; the scheduled visit date is the reminder, without a completion
 status check.
 
+**Implemented in the terminal review:** before a future-dated name or address
+handoff continues, the operator confirms that a Case-linked Notion task exists.
+The review saves that confirmation and each temporary-notation choice in the
+session queue so an interrupted session can resume safely. It does not create
+or verify Notion tasks. Used notations add their cleanup trigger to the handoff
+audit. Before closure, the operator confirms the participant received the plan;
+that confirmation is saved for retry. The cleanup reminders alone do not keep
+the Case open after the participant plan is sent.
+
 ## Discovery state
 
 The real example supports the overview section and shows a routine pattern of
