@@ -3557,6 +3557,23 @@ class InteractiveProfileUpdateProcessor:
                     item = items_by_key.get(mapped_key)
                     break
             if item is None or item.ignored or not item.contact_id:
+                reason = (
+                    f"{role.label} role could not be linked because its submitted "
+                    "Contact could not be safely resolved. Review the submitted "
+                    "Contact details, then retry the Case."
+                )
+                self._record_handoff(
+                    batch,
+                    reason,
+                    target_object="Account",
+                    target_record_id=target_account_id,
+                    field_name=role.account_lookup,
+                    proposed_value=(
+                        item.resolution.normalized_email
+                        if item is not None
+                        else "submitted Contact unresolved"
+                    ),
+                )
                 responses.append(
                     self._build_role_response(
                         row,
@@ -3568,6 +3585,16 @@ class InteractiveProfileUpdateProcessor:
                 )
                 continue
             if item.handoff_reasons:
+                self._record_handoff(
+                    batch,
+                    f"{role.label} role link is held because its Contact requires "
+                    "operator follow-up: "
+                    + "; ".join(item.handoff_reasons),
+                    target_object="Account",
+                    target_record_id=target_account_id,
+                    field_name=role.account_lookup,
+                    proposed_value=item.contact_id,
+                )
                 continue
 
             # A role change is a departure from the old Contact. Do not

@@ -1392,6 +1392,13 @@ roles. This phase may update Account role lookup fields only. It performs no
 Contact create or update. Contact identity and field updates therefore finish
 before role assignment can influence an Account lookup.
 
+If a submitted role has no safely resolved Contact, or its Contact work was
+handed off, the role lookup is left unchanged. The audit records a separate
+handoff naming the role and Account lookup field, and the Case stays Pending.
+Resolve the Contact issue described in the audit, then retry the same staging
+session; already completed Contact work is rechecked against Salesforce before
+the role decision is offered again.
+
 At the start of every Case batch, the submitted Account and its direct children
 are fetched again. Only that first child level is inspected, so grandchildren
 are never selected. An Account is qualifying only when
