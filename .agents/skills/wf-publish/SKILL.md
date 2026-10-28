@@ -5,6 +5,8 @@ description: >-
   merging a PR, finalizing work, or cleaning up after a merge.
 ---
 
+- Always execute git-related actions (commits, staging, branches) by writing and executing raw bash commands in the integrated terminal. Do not use internal filesystem APIs to modify the .git directory.
+
 # Publish — Merge PR and Clean Up
 
 Merge an approved pull request and clean up Git.

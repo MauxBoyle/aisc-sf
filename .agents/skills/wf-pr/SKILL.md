@@ -6,6 +6,8 @@ description: >-
   opening a pull request.
 ---
 
+- Always execute git-related actions (commits, staging, branches) by writing and executing raw bash commands in the integrated terminal. Do not use internal filesystem APIs to modify the .git directory.
+
 # PR — Create a Pull Request
 
 Create a pull request from the current branch.

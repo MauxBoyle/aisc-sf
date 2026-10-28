@@ -6,6 +6,8 @@ description: >-
   a PR, checking code quality, or auditing changes before merge.
 ---
 
+- Always execute git-related actions (commits, staging, branches) by writing and executing raw bash commands in the integrated terminal. Do not use internal filesystem APIs to modify the .git directory.
+
 # Review — Review a Pull Request
 
 Analyze a pull request for critical issues and post the review as a comment.
