@@ -10,7 +10,7 @@ import re
 import shutil
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, TextIO
@@ -45,6 +45,7 @@ from .queried_fields import (
     ACCOUNT_HISTORY_FIELDS,
     ACCOUNT_REVIEW_FIELDS,
     CONTACT_REVIEW_FIELDS,
+    PROFILE_AUDIT_FIELDS,
     SUBMISSION_FIELDS,
 )
 from .review_queue import (
@@ -3755,6 +3756,8 @@ class InteractiveProfileUpdateProcessor:
         role_responses: list[_RoleResponse],
         contact_ids: set[str],
     ) -> bool:
+        if self._handoff_reasons:
+            self._show_manager_handoff_summary(batch, results, account_results)
         request_responses = self._review_request_items(batch)
         emails = format_response_emails(
             account_results, role_responses, request_responses
@@ -3847,6 +3850,93 @@ class InteractiveProfileUpdateProcessor:
             )
             self._record_batch_outcome(batch, "case", case_outcome)
         return bool(self._handoff_reasons) or not all_sent
+
+    def _show_manager_handoff_summary(
+        self,
+        batch: CaseBatch,
+        results: list[ActionResult],
+        account_results: list[ActionResult],
+    ) -> None:
+        """Display a copyable summary of completed work and manager follow-up."""
+        lines = [f"Manager handoff summary — Case {batch.case_number or batch.case_id}"]
+        completed = [
+            result
+            for result in results
+            if result.status in {ActionStatus.APPLIED, ActionStatus.VERIFIED_MANUAL}
+        ]
+        if completed:
+            lines.append("Completed changes:")
+            lines.extend(
+                f"- {result.proposal.label}: "
+                f"{_display(result.proposal.original_value) or '(blank)'} → "
+                f"{_display(result.final_value if result.final_value is not _FINAL_VALUE_UNSET else result.proposal.proposed_value)}"
+                for result in completed
+            )
+        else:
+            lines.append("Completed changes: none recorded")
+        if self._handoff_reasons:
+            lines.append("Pending decisions:")
+            lines.extend(
+                f"- {reason}" for reason in dict.fromkeys(self._handoff_reasons)
+            )
+        else:
+            lines.append("Pending decisions: none recorded")
+
+        key_answers = list(
+            dict.fromkeys(
+                row.get("key_answers", "").strip()
+                for row in batch.rows
+                if row.get("key_answers", "").strip()
+            )
+        )
+        if key_answers:
+            lines.append("Key Update answers:")
+            lines.extend(f"- {answer.replace(chr(10), '; ')}" for answer in key_answers)
+
+        moves = [
+            result
+            for result in account_results
+            if result.proposal.field_name
+            in {
+                "BillingStreet",
+                "BillingCity",
+                "BillingState",
+                "BillingPostalCode",
+                "BillingCountry",
+            }
+            and result.proposal.original_value != result.proposal.proposed_value
+        ]
+        if moves:
+            lines.append("Facility move:")
+            lines.extend(
+                f"- {result.proposal.label}: {_display(result.proposal.original_value) or '(blank)'} → {_display(result.proposal.proposed_value)}"
+                for result in moves
+            )
+            lines.append(
+                "- Driving time: no route distance is available; estimate at 30 miles per hour when the distance is known."
+            )
+
+        try:
+            audits = self.client.query_records(
+                "Cert_Audit__c",
+                list(dict.fromkeys(PROFILE_AUDIT_FIELDS)),
+                where=f"Cert_Account__c = '{escape_soql_string(batch.account_id)}'",
+                order_by="Cert_Audit_Date__c ASC",
+            )
+            timeline = _manager_audit_timeline(audits, self.now.date())
+            lines.append("Audit timeline:")
+            lines.extend(
+                f"- {entry}" for entry in timeline or ["No qualifying Audits found."]
+            )
+        except Exception as error:
+            lines.append(
+                f"Audit timeline unavailable: {_display(error) or 'Salesforce query failed'}."
+            )
+        if self._handoff_reasons:
+            lines.append(
+                "Suggested next step: review the pending decisions above and coordinate with the manager."
+            )
+        self._display_event(Notice(styled("\n".join(lines))))
 
     def _batch_outcomes(self, batch: CaseBatch) -> dict[str, str]:
         if self._queue_store is None:
@@ -6436,6 +6526,54 @@ def _display(value: Any) -> str:
     if isinstance(value, bool):
         return "Yes" if value else "No"
     return str(value).strip()
+
+
+def _manager_audit_timeline(audits: list[dict[str, Any]], today: date) -> list[str]:
+    """Choose future Audit context and the relevant most recent completed Audit."""
+    parsed: list[tuple[dict[str, Any], date]] = []
+    for audit in audits:
+        raw_date = _display(audit.get("Cert_Audit_Date__c"))
+        if not raw_date:
+            continue
+        try:
+            audit_date = datetime.fromisoformat(raw_date.replace("Z", "+00:00")).date()
+        except ValueError:
+            continue
+        parsed.append((audit, audit_date))
+    future = [
+        (audit, date)
+        for audit, date in parsed
+        if date > today and _display(audit.get("Cert_Audit_Type__c")) != "SA-NYC"
+    ]
+    completed = [
+        (audit, date)
+        for audit, date in parsed
+        if date < today
+        and _display(audit.get("Cert_Audit_Type__c")) != "SA-NYC"
+        and _display(audit.get("Cert_Audit_Status__c")).startswith("Completed")
+    ]
+    lines: list[str] = []
+    for audit, audit_date in sorted(future, key=lambda item: item[1]):
+        status = _display(audit.get("Cert_Audit_Status__c")) or "status unavailable"
+        name = _display(audit.get("Name")) or _display(audit.get("Id")) or "Audit"
+        label = "future Audit"
+        if status.casefold() in {"canceled", "cancelled", "withdrawn"}:
+            label = f"{status} future Audit (context only; not planned)"
+        else:
+            label = f"{label} ({status})"
+        lines.append(f"{label}: {name}, {audit_date.isoformat()}")
+    if completed:
+        last_audit, last_date = max(completed, key=lambda item: item[1])
+        if not future or (min(date for _, date in future) - last_date).days <= 35:
+            name = (
+                _display(last_audit.get("Name"))
+                or _display(last_audit.get("Id"))
+                or "Audit"
+            )
+            lines.append(
+                f"Last completed non-New York Audit: {name}, {last_date.isoformat()}"
+            )
+    return lines
 
 
 def _required_record_text(record: dict[str, Any], field_name: str, label: str) -> str:
