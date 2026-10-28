@@ -1375,6 +1375,16 @@ for closer review. These safeguards keep automated review from writing the
 name or address to Salesforce before the operator's decision and effective
 date.
 
+When a Case has operator handoffs, the review also displays a copyable manager
+summary with recorded completed changes, pending decisions, submitted Key
+Update answers, move address details, and the relevant Audit timeline. Canceled
+or withdrawn future Audits are labeled as context, and `SA-NYC` Audits are
+excluded. When an Audit query fails, the summary says the timeline is
+unavailable and review continues. The project has no routing service or stored
+distance for a move, so driving time is marked unavailable until a distance is
+known; estimate one hour per 30 miles. The workflow leaves the Case under its
+existing owner and keeps it Pending for operator follow-up.
+
 The final role-link phase uses the preserved mapping
 from each submission/role source to its resolved Contact ID, so it still works
 when phase one changed the Contact email or created a Contact shared by several

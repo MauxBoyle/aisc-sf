@@ -93,6 +93,48 @@ def test_response_email_includes_request_result_and_pending_handoff():
     assert "Pending follow-up" in emails["sam@example.com"]
 
 
+def test_manager_audit_timeline_filters_ny_and_labels_canceled_context():
+    audits = [
+        {
+            "Id": "ny",
+            "Name": "NY",
+            "Cert_Audit_Date__c": "2026-11-01",
+            "Cert_Audit_Type__c": "SA-NYC",
+            "Cert_Audit_Status__c": "Scheduled - Approved",
+        },
+        {
+            "Id": "cancel",
+            "Name": "Canceled",
+            "Cert_Audit_Date__c": "2026-11-03",
+            "Cert_Audit_Type__c": "Renewal",
+            "Cert_Audit_Status__c": "Canceled",
+        },
+        {
+            "Id": "next",
+            "Name": "Next",
+            "Cert_Audit_Date__c": "2026-11-10",
+            "Cert_Audit_Type__c": "Renewal",
+            "Cert_Audit_Status__c": "New",
+        },
+        {
+            "Id": "done",
+            "Name": "Last completed",
+            "Cert_Audit_Date__c": "2026-10-20",
+            "Cert_Audit_Type__c": "Renewal",
+            "Cert_Audit_Status__c": "Completed - Granted",
+        },
+    ]
+
+    timeline = profile_update_processing._manager_audit_timeline(
+        audits, datetime(2026, 10, 28).date()
+    )
+
+    assert len(timeline) == 3
+    assert "Canceled future Audit (context only; not planned)" in timeline[0]
+    assert "Last completed non-New York Audit" in timeline[-1]
+    assert all("NY" not in line for line in timeline)
+
+
 @pytest.mark.parametrize(
     ("submissions", "expected"),
     [
