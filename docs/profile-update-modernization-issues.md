@@ -238,6 +238,15 @@ coverage only after its scope is understood.
    there being the same person in all filled roles, the response email should
    include an admonition referencing section 1.1.2 of the Governing Requirements.
 
+9. **Email typo check needs more information** in a12Qj000005TjGb, the script flagged
+   an email typo: Likely email typo: dalesley@steel-works.com was compared as 
+   dalesley@steel-works.com. The suggested correction is dlesley@steel-works.com 
+   (dlesley@steel-works.com). I thought this made sense, but now I see that 
+   dlesley@ is donnie lesley and dalesley@ is daniel lesley and a second letter
+   of the first name was needed to distinguish the two. I wouldn't expect the
+   script to necessarily catch that, but the user needs to be given more
+   information.
+
 Add future entries with the submission/update context, observed problem or
 idea, and the question that needs investigation.
 
