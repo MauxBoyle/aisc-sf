@@ -303,6 +303,7 @@ def main(
                 return _run_prepare_profile_update_session(
                     args.session_id,
                     args.output_dir,
+                    input_fn=input_fn,
                     output_fn=output_fn,
                     **color_kwargs,
                 )
@@ -791,6 +792,7 @@ def _run_prepare_profile_update_session(
     session_id: str,
     output_dir: Path,
     *,
+    input_fn: Callable[[str], str] = input,
     output_fn: Callable[[str], None] = print,
     color_mode: ColorMode | str | bool | None = None,
 ) -> int:
@@ -801,7 +803,7 @@ def _run_prepare_profile_update_session(
     processor = InteractiveProfileUpdateProcessor(
         client,
         CLIReviewUI(
-            input_fn=input,
+            input_fn=input_fn,
             output_fn=output_fn,
             color_mode=color_mode,
         ),

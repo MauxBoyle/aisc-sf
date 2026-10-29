@@ -840,6 +840,67 @@ def test_process_profile_update_nested_operations_route_session_and_output_dir(
     ]
 
 
+def test_process_profile_update_prepare_forwards_injected_input_fn(
+    monkeypatch, tmp_path
+):
+    def input_fn(prompt):
+        return "continue"
+
+    output = []
+    captured = {}
+    monkeypatch.setattr(app, "_load_dotenv", lambda path: None)
+    monkeypatch.setattr(
+        app,
+        "get_profile_update_configuration",
+        lambda environment: ("queue", "responder"),
+    )
+    monkeypatch.setattr(app, "get_credentials", lambda environment: {"ok": "yes"})
+    monkeypatch.setattr(app, "get_oauth_url", lambda environment: "token-url")
+    monkeypatch.setattr(
+        app, "request_access_token", lambda credentials, oauth_url: "auth"
+    )
+    monkeypatch.setattr(app, "SalesforceClient", lambda auth: "client")
+    monkeypatch.setattr(app, "ProfileUpdateService", lambda *args: "cases")
+    monkeypatch.setattr(app, "ProfileUpdateStagingService", lambda client: "staging")
+
+    class ReviewUI:
+        def __init__(self, *, input_fn, output_fn, color_mode):
+            captured["input_fn"] = input_fn
+
+    class Processor:
+        def __init__(self, client, ui):
+            captured["ui"] = ui
+
+    class Workflow:
+        def __init__(self, case_service, staging_service, processor, *, output_fn):
+            captured["processor"] = processor
+
+        def prepare(self, session_id, output_dir):
+            captured["prepare"] = (session_id, output_dir)
+
+    monkeypatch.setattr(app, "CLIReviewUI", ReviewUI)
+    monkeypatch.setattr(app, "InteractiveProfileUpdateProcessor", Processor)
+    monkeypatch.setattr(app, "ProfileUpdateProcessingWorkflow", Workflow)
+
+    assert (
+        app.main(
+            [
+                "process-profile-updates",
+                "prepare",
+                "session",
+                "--output-dir",
+                str(tmp_path),
+            ],
+            input_fn=input_fn,
+            output_fn=output.append,
+        )
+        == 0
+    )
+    assert captured["input_fn"] is input_fn
+    assert captured["processor"].__class__ is Processor
+    assert captured["prepare"] == ("session", tmp_path)
+
+
 def test_process_profile_update_nested_operation_preserves_parent_output_dir(
     monkeypatch, tmp_path
 ):
