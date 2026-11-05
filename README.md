@@ -945,6 +945,24 @@ Account-role proposals show current and proposed Contact names and emails;
 Salesforce Contact IDs remain internal to writes and the audit trail instead of
 appearing in decision prompts.
 
+A routine role replacement updates only the Account role submitted on the
+Profile Update. If the outgoing Contact holds other Account roles, the reviewer
+sees their names and a notice that those links will stay unchanged. The
+Contact's company association also stays intact. The new role link still needs
+its own explicit approval.
+
+Clear departure statements in `Comments__c` or `Other_Personnel_Notes__c` start
+a separate review of the Contact's Account roles and company associations.
+Uncertain, conditional, negated, or unclear departure wording asks the reviewer
+to confirm whether a departure should be reviewed. The statement alone never
+authorizes relationship changes; each proposed change requires a separate
+decision. This review-only handoff records the relationships found, pending
+work, reason, and next step in the audit and leaves the Case Pending.
+
+Held or partially completed work is shown immediately as it is identified. The
+warning, final handoff summary, and audit trail describe the remaining work and
+why it stopped, then state the next action.
+
 If a Contact create is blocked by Salesforce with `DUPLICATES_DETECTED`, the
 structured error is retained and the reviewer can create manually, update an
 existing Contact manually, use a Contact with another email, or ignore that

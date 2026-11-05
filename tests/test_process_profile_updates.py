@@ -504,6 +504,26 @@ class FakeClient:
                 and record.get("Title") == title
             ]
         if object_name == "Account":
+            if where and any(
+                role.account_lookup in where
+                for role in profile_update_processing.ACCOUNT_ROLE_DEFINITIONS
+            ):
+                account_records = [
+                    record
+                    for (kind, _), record in self.records.items()
+                    if kind == "Account"
+                ]
+                account_records.extend(self.children)
+                requested_ids = re.findall(r"= '([^']+?)'", where)
+                return [
+                    dict(item)
+                    for item in account_records
+                    if any(
+                        str(item.get(field) or "") == contact_id
+                        for contact_id in requested_ids
+                        for field in fields
+                    )
+                ]
             return [
                 dict(item)
                 for item in self.children
@@ -5366,6 +5386,197 @@ def test_role_contact_snapshot_reads_happen_before_first_batch_write(tmp_path):
         for contact_id in role_contact_ids
     ]
     assert max(snapshot_reads) < first_write
+
+
+@pytest.mark.parametrize(
+    ("comments", "notes", "expected"),
+    [
+        ("Our certification contact has left the company.", "", "explicit"),
+        ("", "The principal is no longer with Acme.", "explicit"),
+        ("The contact may be leaving.", "", "ambiguous"),
+        ("Pat will be leaving next month.", "", "explicit"),
+        ("The contact is not leaving.", "", "ambiguous"),
+        ("If the contact leaves, use Alex.", "", "ambiguous"),
+        ("Replace Pat with Alex.", "", "none"),
+        ("", "Updated phone number.", "none"),
+    ],
+)
+def test_departure_language_classification(comments, notes, expected):
+    assert profile_update_processing._departure_language_status(
+        [source_record(Comments__c=comments, Other_Personnel_Notes__c=notes)]
+    ) == expected
+
+
+def test_explicit_departure_creates_review_only_handoff_and_keeps_role_approval(
+    tmp_path,
+):
+    old = {
+        "Id": "old-contact",
+        "AccountId": "account-1",
+        "FirstName": "Pat",
+        "LastName": "Jones",
+        "Title": "President",
+        "Email": "pat@example.com",
+        "Phone": "312-555-0100",
+    }
+    new = {
+        "Id": "new-contact",
+        "AccountId": "account-1",
+        "FirstName": "Alex",
+        "LastName": "Smith",
+        "Title": "Director",
+        "Email": "alex@example.com",
+        "Phone": "312-555-0200",
+    }
+    client = FakeClient(
+        source=source_record(Comments__c="Pat has left the company."),
+        account=account_record(Cert_Certification_Contact__c="old-contact"),
+        contacts=[old, new],
+    )
+    client.records[("Company_Profile_Change__c", "submission-1")].update(
+        {
+            "Cert_First_Name__c": "Alex",
+            "Cert_Last_Name__c": "Smith",
+            "Cert_Title__c": "Director",
+            "Cert_Email__c": "alex@example.com",
+            "Cert_Phone__c": "312-555-0200",
+        }
+    )
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["apply automatically"] * 10 + ["yes"] * 10),
+        output_fn=lambda message: None,
+        now=NOW,
+    )
+
+    result = processor.review(
+        [
+            staged_row(
+                certification_first_name="Alex",
+                certification_last_name="Smith",
+                certification_title="Director",
+                certification_email="alex@example.com",
+                certification_phone="312-555-0200",
+            )
+        ],
+        tmp_path,
+    )
+
+    audit = [json.loads(line) for line in result.audit_path.read_text().splitlines()]
+    assert any(
+        entry["field"] == "Account roles and company associations"
+        and entry["result"] == "handed off to operator"
+        for entry in audit
+    )
+    assert (
+        client.records[("Account", "account-1")]["Cert_Certification_Contact__c"]
+        == "new-contact"
+    )
+
+
+def test_ambiguous_departure_wording_requires_operator_confirmation():
+    class AuditCapture:
+        def __init__(self):
+            self.results = []
+
+        def append(self, result):
+            self.results.append(result)
+
+    contact = {
+        "Id": "old-contact",
+        "AccountId": "account-1",
+        "FirstName": "Pat",
+        "LastName": "Jones",
+    }
+    client = FakeClient(
+        account=account_record(Cert_Certification_Contact__c="old-contact")
+    )
+    feeder = Feeder(["yes"])
+    processor = InteractiveProfileUpdateProcessor(
+        client, input_fn=feeder, output_fn=lambda message: None, now=NOW
+    )
+    processor._audit = AuditCapture()
+    processor._review_departure_language(
+        CaseBatch("account-1", "case-1", "00010001", [staged_row()], NOW),
+        {"submission-1": source_record(Comments__c="Pat may be leaving.")},
+        {
+            ("account-1", "certification"):
+                profile_update_processing._RoleContactSnapshot("old-contact", contact)
+        },
+    )
+
+    assert feeder.prompts
+    assert "uncertain, conditional, or negated" in feeder.prompts[0]
+    assert processor._audit.results[0].status is ActionStatus.HANDED_OFF
+    assert processor._case_pending is True
+
+
+def test_role_replacement_preserves_other_roles_and_account_association(tmp_path):
+    old = {
+        "Id": "old-contact",
+        "AccountId": "account-1",
+        "FirstName": "Pat",
+        "LastName": "Jones",
+        "Title": "President",
+        "Email": "pat@example.com",
+        "Phone": "312-555-0100",
+    }
+    new = {
+        "Id": "new-contact",
+        "AccountId": "account-1",
+        "FirstName": "Alex",
+        "LastName": "Smith",
+        "Title": "Director",
+        "Email": "alex@example.com",
+        "Phone": "312-555-0200",
+    }
+    account = account_record(
+        Cert_Certification_Contact__c="old-contact",
+        Cert_Principal_Contact__c="old-contact",
+    )
+    client = FakeClient(account=account, contacts=[old, new])
+    client.records[("Company_Profile_Change__c", "submission-1")].update(
+        {
+            "Cert_First_Name__c": "Alex",
+            "Cert_Last_Name__c": "Smith",
+            "Cert_Title__c": "Director",
+            "Cert_Email__c": "alex@example.com",
+            "Cert_Phone__c": "312-555-0200",
+        }
+    )
+    output = []
+    processor = InteractiveProfileUpdateProcessor(
+        client,
+        input_fn=Feeder(["apply automatically"] * 10 + ["yes"] * 10),
+        output_fn=output.append,
+        now=NOW,
+    )
+
+    processor.review(
+        [
+            staged_row(
+                certification_first_name="Alex",
+                certification_last_name="Smith",
+                certification_title="Director",
+                certification_email="alex@example.com",
+                certification_phone="312-555-0200",
+            )
+        ],
+        tmp_path,
+    )
+
+    assert (
+        client.records[("Account", "account-1")]["Cert_Certification_Contact__c"]
+        == "new-contact"
+    )
+    assert (
+        client.records[("Account", "account-1")]["Cert_Principal_Contact__c"]
+        == "old-contact"
+    )
+    assert client.records[("Contact", "old-contact")]["AccountId"] == "account-1"
+    assert any(
+        "Principal" in message and "stay unchanged" in message for message in output
+    ), [message for message in output if "Pat" in message or "Account roles" in message]
 
 
 def test_parent_role_response_uses_target_accounts_original_contact(tmp_path):

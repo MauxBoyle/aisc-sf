@@ -974,12 +974,29 @@ an operator handoff. Review those relationships before retrying the Case.
 When a shared mailbox has no submitted replacement name, its Contact is named
 with the company as First Name and the mailbox purpose as Last Name (for
 example, `Acme Steel` / `Quality`). Different names submitted for the same
-email are handed off for clarification. A role change also checks whether the
-former Contact still holds any other Account role; if so, removal is handed to
-the operator. Confirmed departures create a Salesforce Note on the former
-Contact. The note uses the source Profile Update IDs as its retry key, so a
-retry after the role change does not create the same note again. Participant
-response text says who replaces whom at a shared address.
+email are handed off for clarification. A routine role replacement changes
+only the submitted Account role. If the outgoing Contact still holds other
+Account roles, review displays their names and confirms those links will stay
+unchanged. The Contact's company association also stays intact. The replacement
+itself still requires the normal separate role-link approval.
+
+Clear departure statements in Comments or Other Personnel notes trigger a
+separate review of the Contact's Account roles and company associations.
+Conditional, uncertain, negated, or otherwise unclear departure wording asks
+the reviewer to confirm whether a departure should be reviewed. A departure
+statement never authorizes relationship changes: each proposed relationship
+change requires its own review decision. The review-only handoff keeps the Case
+Pending and records the relationships found, what remains to review, and the
+next step in `review_audit.jsonl`. Existing role-assignment decisions continue
+through the ordinary approval prompt.
+
+Any held or partially completed item shows an immediate warning with the
+remaining work, why it stopped, and the next action. The final handoff summary
+and audit trail retain the same pending status and reason. Confirmed departures
+create a Salesforce Note on the former Contact after an approved role link. The
+note uses source Profile Update IDs as its retry key, so a retry does not create
+the same note again. Participant response text says who replaces whom at a
+shared address.
 
 ### Reviewer write and Flow check
 
