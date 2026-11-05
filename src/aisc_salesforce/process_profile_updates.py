@@ -1863,24 +1863,24 @@ class InteractiveProfileUpdateProcessor:
             )
         )
         associations: list[dict[str, Any]] = []
-        company_associations = [
-            {
-                "contact_id": contact_id,
-                "account_id": _display(snapshot.contact.get("AccountId")),
-            }
-            for contact_id in contact_ids
-            for snapshot in role_contact_snapshots.values()
-            if snapshot.contact_id == contact_id
-            and snapshot.contact
-            and _display(snapshot.contact.get("AccountId"))
-        ]
-        company_associations = list(
-            {
-                (item["contact_id"], item["account_id"]): item
-                for item in company_associations
-            }.values()
-        )
+        company_associations: list[dict[str, Any]] = []
         try:
+            if contact_ids:
+                quoted_ids = ", ".join(
+                    f"'{escape_soql_string(contact_id)}'" for contact_id in contact_ids
+                )
+                current_contacts = self.client.query_records(
+                    "Contact", ["Id", "AccountId"], where=f"Id IN ({quoted_ids})"
+                )
+                company_associations = [
+                    {
+                        "contact_id": _display(contact.get("Id")),
+                        "account_id": _display(contact.get("AccountId")),
+                    }
+                    for contact in current_contacts
+                    if _display(contact.get("Id"))
+                    and _display(contact.get("AccountId"))
+                ]
             for contact_id in contact_ids:
                 where = " OR ".join(
                     f"{field} = '{escape_soql_string(contact_id)}'"
