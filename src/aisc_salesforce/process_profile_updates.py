@@ -1807,6 +1807,165 @@ class InteractiveProfileUpdateProcessor:
     def _review_batch(self, batch: CaseBatch, response_writer: _ResponseWriter) -> bool:
         return self._review_resilient_batch(batch, response_writer)
 
+    def _review_departure_language(
+        self,
+        batch: CaseBatch,
+        submissions: dict[str, dict[str, Any]],
+        role_contact_snapshots: dict[tuple[str, str], _RoleContactSnapshot],
+    ) -> None:
+        """Route stated or uncertain departures to review without changing links."""
+        status = _departure_language_status(list(submissions.values()))
+        if status == "none":
+            return
+
+        excerpts = [
+            f"{source_id} ({field_name}): {_display(submission.get(field_name))}"
+            for source_id, submission in submissions.items()
+            for field_name in ("Comments__c", "Other_Personnel_Notes__c")
+            if _display(submission.get(field_name))
+            and _contains_departure_language(_display(submission.get(field_name)))
+        ]
+        if status == "ambiguous":
+            choice = self._ask_choice(
+                ChoiceQuestion(
+                    styled(
+                        "The submitted comments contain uncertain, conditional, "
+                        "or negated departure wording. Should this be reviewed as "
+                        "an employee departure? "
+                    ),
+                    (
+                        ReviewChoice("yes", "yes, review the departure"),
+                        ReviewChoice("no", "no, this is not a departure"),
+                    ),
+                    styled("Choose yes to review Account roles and company links."),
+                    styled("\n".join(excerpts)),
+                )
+            )
+            if choice == "no":
+                proposal = self._departure_review_proposal(batch, excerpts)
+                self._append_audit(
+                    ActionResult(
+                        proposal,
+                        ReviewDecision.WILL_NOT_BE_MADE,
+                        ActionStatus.NOOP,
+                        action="confirm wording does not report a departure",
+                        final_value="no departure review requested",
+                    )
+                )
+                return
+
+        lookups = [role.account_lookup for role in ACCOUNT_ROLE_DEFINITIONS]
+        contact_ids = tuple(
+            dict.fromkeys(
+                snapshot.contact_id
+                for snapshot in role_contact_snapshots.values()
+                if snapshot.contact_id
+            )
+        )
+        associations: list[dict[str, Any]] = []
+        company_associations = [
+            {
+                "contact_id": contact_id,
+                "account_id": _display(snapshot.contact.get("AccountId")),
+            }
+            for contact_id in contact_ids
+            for snapshot in role_contact_snapshots.values()
+            if snapshot.contact_id == contact_id
+            and snapshot.contact
+            and _display(snapshot.contact.get("AccountId"))
+        ]
+        company_associations = list(
+            {
+                (item["contact_id"], item["account_id"]): item
+                for item in company_associations
+            }.values()
+        )
+        try:
+            for contact_id in contact_ids:
+                where = " OR ".join(
+                    f"{field} = '{escape_soql_string(contact_id)}'"
+                    for field in lookups
+                )
+                accounts = self.client.query_records(
+                    "Account", ["Id", "Name", *lookups], where=where
+                )
+                for account in accounts:
+                    roles = [
+                        role.label
+                        for role in ACCOUNT_ROLE_DEFINITIONS
+                        if _display(account.get(role.account_lookup)) == contact_id
+                    ]
+                    if roles:
+                        associations.append(
+                            {
+                                "contact_id": contact_id,
+                                "account_id": _display(account.get("Id")),
+                                "account_name": _display(account.get("Name")),
+                                "roles": roles,
+                            }
+                        )
+        except SalesforceError as error:
+            self._record_handoff(
+                batch,
+                "Departure wording requires a separate review of the Contact's "
+                "Account roles and company associations, but Salesforce could "
+                f"not verify them: {error}. Retry after resolving the lookup error. "
+                "No relationship changes were authorized.",
+                target_object="Contact",
+                target_record_id=contact_ids[0] if contact_ids else batch.account_id,
+                field_name="Account roles and company associations",
+                proposed_value={"wording": excerpts},
+            )
+            return
+
+        self._record_handoff(
+            batch,
+            "Departure wording requires a separate review of the Contact's "
+            "Account roles and company associations. No relationship changes "
+            "were authorized; review each relationship with the operator before "
+            "making any change. "
+            + (
+                "Salesforce relationships found: "
+                + json.dumps(associations, ensure_ascii=False, sort_keys=True)
+                if associations
+                else "No current Account role relationships were found for those Contacts."
+            )
+            + " Contact company associations: "
+            + (
+                json.dumps(company_associations, ensure_ascii=False, sort_keys=True)
+                if company_associations
+                else "none found in the captured Contact records."
+            ),
+            target_object="Contact",
+            target_record_id=contact_ids[0] if contact_ids else batch.account_id,
+            field_name="Account roles and company associations",
+            proposed_value={
+                "wording": excerpts,
+                "relationships": associations,
+                "company_associations": company_associations,
+            },
+        )
+
+    @staticmethod
+    def _departure_review_proposal(
+        batch: CaseBatch, excerpts: list[str]
+    ) -> ChangeProposal:
+        """Build the audit context for a reviewer-confirmed departure question."""
+        return ChangeProposal(
+            source_submission_ids=batch.source_submission_ids,
+            case_id=batch.case_id,
+            case_number=batch.case_number,
+            account_id=batch.account_id,
+            account_name=batch.rows[0].get("account_name", ""),
+            submitter_email="",
+            target_object="CaseBatch",
+            target_record_id=batch.case_id,
+            field_name="departure_review",
+            label="Departure wording review",
+            original_value="uncertain departure wording",
+            proposed_value=excerpts,
+        )
+
     def _review_resilient_batch(
         self, batch: CaseBatch, response_writer: _ResponseWriter
     ) -> bool:
@@ -1887,6 +2046,10 @@ class InteractiveProfileUpdateProcessor:
                     sort_keys=True,
                 ),
             )
+
+        self._review_departure_language(
+            batch, fresh_by_id, role_contact_snapshots
+        )
 
         # Every row overview and checkpoint happens before the first Salesforce write.
         for row in batch.rows:
@@ -2618,7 +2781,9 @@ class InteractiveProfileUpdateProcessor:
                 item.write_values = {}
                 self._record_handoff(
                     batch,
-                    f"Could not verify every Account role for shared mailbox Contact {contact_id}: {error}",
+                    f"Could not verify every Account role for shared mailbox Contact "
+                    f"{contact_id}: {error}. The Contact name remains unchanged; "
+                    "review its Account links before retrying the submitted name change.",
                     target_object="Contact",
                     target_record_id=contact_id,
                     field_name="Name",
@@ -3600,8 +3765,8 @@ class InteractiveProfileUpdateProcessor:
                 )
                 continue
 
-            # A role change is a departure from the old Contact. Do not
-            # silently remove someone who still owns any other Account role.
+            # A routine replacement changes only this submitted Account role.
+            # Other role links and the Contact's Account association stay intact.
             if original.contact_id and original.contact_id != item.contact_id:
                 lookups = [
                     definition.account_lookup for definition in ACCOUNT_ROLE_DEFINITIONS
@@ -3612,41 +3777,45 @@ class InteractiveProfileUpdateProcessor:
                 )
                 try:
                     linked_accounts = self.client.query_records(
-                        "Account", ["Id", *lookups], where=where
+                        "Account", ["Id", "Name", *lookups], where=where
                     )
                 except SalesforceError as error:
                     self._record_handoff(
                         batch,
-                        f"Could not verify every Account role for departing Contact {original.contact_id}: {error}",
+                        f"Could not verify every Account role for outgoing Contact "
+                        f"{original.contact_id}: {error}. The requested role link "
+                        "remains unchanged; retry after resolving the Salesforce "
+                        "lookup error.",
                         target_object="Contact",
                         target_record_id=original.contact_id,
                         field_name="Account roles",
                     )
                     continue
-                remaining = [
-                    account
+                other_roles = [
+                    (
+                        f"{linked_role.label} on "
+                        f"{_display(account.get('Name')) or _display(account.get('Id'))}"
+                    )
                     for account in linked_accounts
-                    if any(
-                        _display(account.get(field)) == original.contact_id
-                        for field in lookups
-                        if not (
-                            _display(account.get("Id")) == target_account_id
-                            and field == role.account_lookup
-                        )
+                    for linked_role in ACCOUNT_ROLE_DEFINITIONS
+                    if _display(account.get(linked_role.account_lookup))
+                    == original.contact_id
+                    and not (
+                        _display(account.get("Id")) == target_account_id
+                        and linked_role.account_lookup == role.account_lookup
                     )
                 ]
-                if remaining:
-                    self._record_handoff(
-                        batch,
-                        f"Departing Contact {original.contact_id} still holds an Account role; review before removing the role.",
-                        target_object="Contact",
-                        target_record_id=original.contact_id,
-                        field_name="Account roles",
-                        proposed_value=[
-                            _display(account.get("Id")) for account in remaining
-                        ],
+                if other_roles:
+                    self._display_event(
+                        Notice(
+                            styled(
+                                f"{_contact_summary(original_contact) or original.contact_id} "
+                                "also holds these Account roles: "
+                                f"{'; '.join(other_roles)}. They will stay unchanged, "
+                                "and the Contact will remain associated with its company."
+                            )
+                        )
                     )
-                    continue
 
             final_contact = item.current_contact
             if final_contact is None:
@@ -3786,8 +3955,6 @@ class InteractiveProfileUpdateProcessor:
         role_responses: list[_RoleResponse],
         contact_ids: set[str],
     ) -> bool:
-        if self._handoff_reasons:
-            self._show_manager_handoff_summary(batch, results, account_results)
         request_responses = self._review_request_items(batch)
         emails = format_response_emails(
             account_results, role_responses, request_responses
@@ -3813,6 +3980,18 @@ class InteractiveProfileUpdateProcessor:
                 batch, f"email:{email}", "sent" if sent else "not_sent"
             )
             all_sent = all_sent and sent
+            if not sent:
+                self._record_handoff(
+                    batch,
+                    f"The response email to {email} remains unsent, so the Case "
+                    "cannot close. Next step: send the prepared email and resume "
+                    "this review session to confirm it.",
+                    target_object="Case",
+                    target_record_id=batch.case_id,
+                    field_name="response_email",
+                    proposed_value=email,
+                    update_queue=False,
+                )
 
         if self._batch_outcomes(batch).get("future_change_task") == "created":
             plan_outcome = self._batch_outcomes(batch).get("future_change_plan")
@@ -3847,8 +4026,18 @@ class InteractiveProfileUpdateProcessor:
                 plan_outcome = "sent" if plan_choice == "yes" else "pending"
                 self._record_batch_outcome(batch, "future_change_plan", plan_outcome)
             if plan_outcome != "sent":
-                self._case_pending = True
                 all_sent = False
+                self._record_handoff(
+                    batch,
+                    "The participant's future-change plan remains unsent, so the "
+                    "Case cannot close. Next step: send the plan and resume this "
+                    "review session to confirm delivery.",
+                    target_object="Case",
+                    target_record_id=batch.case_id,
+                    field_name="future_change_plan",
+                    proposed_value=batch.case_number or batch.case_id,
+                    update_queue=False,
+                )
             else:
                 self._block_future_change_queue(batch)
 
@@ -3860,12 +4049,26 @@ class InteractiveProfileUpdateProcessor:
         missing_role_email = any(
             not response.submitter_email.strip() for response in role_responses
         )
+        if successful_without_email or missing_role_email:
+            self._record_handoff(
+                batch,
+                "Completed Profile Update work has no submitter email address "
+                "for its response, so the Case cannot close. Next step: confirm "
+                "the correct recipient and record the response through the "
+                "approved email process.",
+                target_object="Case",
+                target_record_id=batch.case_id,
+                field_name="response_recipient",
+                update_queue=False,
+            )
         all_sent = all_sent and not successful_without_email and not missing_role_email
         if (
             not self._blank_pending_source_ids
             and self.participant_user_provisioning is not None
         ):
             self._provision_missing_participant_users(batch, contact_ids)
+        if self._handoff_reasons:
+            self._show_manager_handoff_summary(batch, results, account_results)
         for source_id in batch.source_submission_ids:
             if source_id in self._blank_pending_source_ids:
                 self._display_event(
@@ -6381,6 +6584,7 @@ class InteractiveProfileUpdateProcessor:
         """Record an operator handoff without stopping unrelated Case work."""
         self._handoff_reasons.append(reason)
         self._case_pending = self._case_pending or keep_case_pending
+        self._display_event(WarningNotice(styled(reason)))
         proposal = ChangeProposal(
             source_submission_ids=batch.source_submission_ids,
             case_id=batch.case_id,
@@ -6844,6 +7048,49 @@ def _is_duplicate_contact_error(error: SalesforceError) -> bool:
 
 def _section_heading(title: str, separator: str = STAGE_SEPARATOR) -> str:
     return f"\n{separator}\n{title}\n{separator}"
+
+
+_DEPARTURE_PHRASES = re.compile(
+    r"\b(?:left|leaves|leave|leaving|departed|departure|resigned|resignation|"
+    r"retired|retirement|terminated|termination|no longer (?:works|with|employed)|"
+    r"last day)\b",
+    re.IGNORECASE,
+)
+_CLEAR_DEPARTURE = re.compile(
+    r"\b(?:has left|have left|left the (?:company|organization|business)|"
+    r"is leaving|will (?:be )?leaving|will leave|is departing|will depart|"
+    r"is no longer (?:with|employed by)|no longer works (?:for|at)|has departed|"
+    r"departed from|has resigned|resigned from|has retired|retired from|"
+    r"was terminated|employment (?:ended|terminated)|last day (?:was|is))\b",
+    re.IGNORECASE,
+)
+_UNCERTAIN_DEPARTURE = re.compile(
+    r"\b(?:may|might|could|possibly|potentially|if|unless|not|never|no plans? to|"
+    r"not expected to|considering|planning to)\b",
+    re.IGNORECASE,
+)
+
+
+def _contains_departure_language(value: str) -> bool:
+    """Return whether free text refers to a possible departure."""
+    return bool(_DEPARTURE_PHRASES.search(value))
+
+
+def _departure_language_status(submissions: list[dict[str, Any]]) -> str:
+    """Classify submitted departure wording as explicit, ambiguous, or absent."""
+    passages = [
+        _display(submission.get(field_name))
+        for submission in submissions
+        for field_name in ("Comments__c", "Other_Personnel_Notes__c")
+        if _contains_departure_language(_display(submission.get(field_name)))
+    ]
+    if not passages:
+        return "none"
+    if any(_UNCERTAIN_DEPARTURE.search(passage) for passage in passages):
+        return "ambiguous"
+    if all(_CLEAR_DEPARTURE.search(passage) for passage in passages):
+        return "explicit"
+    return "ambiguous"
 
 
 def _operator_handoff_reasons(
