@@ -247,6 +247,11 @@ coverage only after its scope is understood.
    script to necessarily catch that, but the user needs to be given more
    information.
 
+10. **Cert ID matching needs to be more robust** A participant entered
+   2015-09-11-0003893F and the script could not match it to 2015-09-11-003893F.
+   Matching with 3893F should at least prompt a decision for the user (showing 
+   both options in full).
+
 Add future entries with the submission/update context, observed problem or
 idea, and the question that needs investigation.
 
