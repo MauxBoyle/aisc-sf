@@ -886,6 +886,16 @@ Contact is not used merely because of the role. A partial proposal with no
 email may still use its staged or current Account-role Contact ID as a safe
 fallback.
 
+When a role submission has no email and its submitted first and last name
+differs from the Contact currently linked to that role, the processor pauses
+Contact reconciliation and asks the reviewer to resolve identity first. It
+shows every exact first-and-last-name match in the target Account family. The
+reviewer can select a match, explicitly rename a generic/shared functional
+Contact, create a Contact, or defer. Selecting a match only identifies the
+Contact; Contact field changes and the Account role link are reviewed
+separately. Deferring leaves the Case Pending and the queued work available to
+resume. Title-only and phone-only updates still use the current role Contact.
+
 All values for the same email identity are reconciled together. Repeated
 normalized values collapse into one proposal with all of their sources.
 Different email identities remain separate Contact reviews even when they

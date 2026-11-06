@@ -385,6 +385,8 @@ class _ContactWorkItem:
     decisions: dict[str, ReviewDecision] | None = None
     results: dict[str, ActionResult] | None = None
     submitter_assigned: bool = False
+    name_identity_review: bool = False
+    incumbent_contact: dict[str, Any] | None = None
 
     @property
     def sources(self) -> list[ContactSource]:
@@ -1883,8 +1885,7 @@ class InteractiveProfileUpdateProcessor:
                 ]
             for contact_id in contact_ids:
                 where = " OR ".join(
-                    f"{field} = '{escape_soql_string(contact_id)}'"
-                    for field in lookups
+                    f"{field} = '{escape_soql_string(contact_id)}'" for field in lookups
                 )
                 accounts = self.client.query_records(
                     "Account", ["Id", "Name", *lookups], where=where
@@ -2047,9 +2048,7 @@ class InteractiveProfileUpdateProcessor:
                 ),
             )
 
-        self._review_departure_language(
-            batch, fresh_by_id, role_contact_snapshots
-        )
+        self._review_departure_language(batch, fresh_by_id, role_contact_snapshots)
 
         # Every row overview and checkpoint happens before the first Salesforce write.
         for row in batch.rows:
@@ -2256,9 +2255,14 @@ class InteractiveProfileUpdateProcessor:
                 str,
             ]
         ] = []
+        name_identity_by_source: dict[
+            tuple[str, str, str], tuple[bool, dict[str, Any] | None]
+        ] = {}
         for row in batch.rows:
             for submission_id in _json_string_list(row["source_submission_ids"]):
                 record = fresh_by_id[submission_id]
+                name_identity_review = False
+                incumbent_contact = None
                 if submission_id in staged_submitter_ids:
                     name = normalize_contact_value("name", record.get("Name__c"))
                     first_name, last_name = _split_person_name(name)
@@ -2282,6 +2286,8 @@ class InteractiveProfileUpdateProcessor:
                         occurrences.append((source, details, row, ""))
 
                 for role in ACCOUNT_ROLE_DEFINITIONS:
+                    name_identity_review = False
+                    incumbent_contact = None
                     details = {
                         suffix: normalize_contact_value(
                             suffix, record.get(source_field)
@@ -2311,6 +2317,27 @@ class InteractiveProfileUpdateProcessor:
                     # to the Contact currently linked to that role.
                     if not details.get("email") and action != "create_contact":
                         identity_id = staged_id or current_id
+                    if (
+                        not details.get("email")
+                        and identity_id
+                        and (details.get("first_name") or details.get("last_name"))
+                    ):
+                        incumbent_contact = self.client.get_record(
+                            "Contact", identity_id, CONTACT_REVIEW_FIELDS
+                        )
+                        name_identity_review = any(
+                            normalize_contact_value("name", incumbent_contact.get(sf))
+                            != details.get(proposed)
+                            for sf, proposed in (
+                                ("FirstName", "first_name"),
+                                ("LastName", "last_name"),
+                            )
+                            if details.get(proposed)
+                        )
+                        if name_identity_review:
+                            # A name alone cannot establish that the person
+                            # currently holding this role is the submitter.
+                            identity_id = ""
                     staged_resolution = staged_by_source.get(
                         ("role", role.prefix, submission_id)
                     )
@@ -2322,10 +2349,14 @@ class InteractiveProfileUpdateProcessor:
                     if (
                         not details.get("email")
                         and not identity_id
+                        and not name_identity_review
                         and selected is not None
                     ):
                         identity_id = _display(selected.get("Id"))
                     occurrences.append((source, details, row, identity_id))
+                    name_identity_by_source[
+                        (source.kind, source.role, source.submission_id)
+                    ] = (name_identity_review, incumbent_contact)
 
         email_identity_ids: dict[str, set[str]] = {}
         for _, details, _, identity_id in occurrences:
@@ -2403,6 +2434,12 @@ class InteractiveProfileUpdateProcessor:
             elif source not in item.resolution.sources:
                 item.resolution.sources.append(source)
             item.source_keys.add(source_key)
+            name_identity_review, incumbent_contact = name_identity_by_source.get(
+                source_key, (False, None)
+            )
+            if name_identity_review:
+                item.name_identity_review = True
+                item.incumbent_contact = incumbent_contact
             for field_name, value in details.items():
                 item.proposals.setdefault(field_name, {}).setdefault(value, []).append(
                     source
@@ -2445,6 +2482,29 @@ class InteractiveProfileUpdateProcessor:
 
         for item in grouped.values():
             if item.contact_id:
+                continue
+            if item.name_identity_review:
+                submitted_first = next(iter(item.proposals.get("first_name", {})), "")
+                submitted_last = next(iter(item.proposals.get("last_name", {})), "")
+                item.resolution.classification = (
+                    ContactResolutionClassification.AMBIGUOUS
+                )
+                item.resolution.reason = (
+                    "A changed name does not identify the current role Contact."
+                )
+                item.resolution.confidence = "name requires operator choice"
+                item.resolution.candidates = [
+                    contact
+                    for contact in contacts
+                    if submitted_first
+                    and submitted_last
+                    and family_ids
+                    and _display(contact.get("AccountId")) in family_ids
+                    and normalize_contact_value("name", contact.get("FirstName"))
+                    == submitted_first
+                    and normalize_contact_value("name", contact.get("LastName"))
+                    == submitted_last
+                ]
                 continue
             if (
                 not item.resolution.comparison_key
@@ -2500,7 +2560,10 @@ class InteractiveProfileUpdateProcessor:
                     "ignore Contact without safe identity",
                 )
                 continue
-            state = self._review_resolution_choice(batch, item.row, item.resolution)
+            if item.name_identity_review:
+                state = self._review_role_name_identity(batch, item)
+            else:
+                state = self._review_resolution_choice(batch, item.row, item.resolution)
             item.contact_id = state.contact_id
             item.ignored = state.ignored
 
@@ -3536,6 +3599,94 @@ class InteractiveProfileUpdateProcessor:
             resolution.reason = "The operator rejected the likely typo suggestion."
 
         return self._prompt_ambiguous_resolution(batch, row, resolution)
+
+    def _review_role_name_identity(
+        self, batch: CaseBatch, item: _ContactWorkItem
+    ) -> _ResolvedContact:
+        """Resolve a changed role name before allowing Contact field review."""
+        resolution = item.resolution
+        incumbent = item.incumbent_contact or {}
+        self._display_event(
+            Heading(styled("Role name identity review", ITEM_SEPARATOR), ITEM_SEPARATOR)
+        )
+        self._show_contact_details(
+            "Current role Contact (identity unconfirmed)", incumbent
+        )
+        for index, candidate in enumerate(resolution.candidates, start=1):
+            self._show_contact_details(f"Exact-name family match {index}", candidate)
+
+        choices = tuple(
+            ReviewChoice(str(index), f"Select exact-name Contact {index}")
+            for index in range(1, len(resolution.candidates) + 1)
+        )
+        if is_generic_mailbox(_display(incumbent.get("Email"))):
+            choices += (
+                ReviewChoice("rename", "Rename this shared or functional Contact"),
+            )
+        choices += (
+            ReviewChoice("create", "Create a new Contact", ("c",)),
+            ReviewChoice("defer", "Defer and leave the Case pending", ("d",)),
+        )
+        answer = self._ask_choice(
+            ChoiceQuestion(
+                styled("Choose the Contact identity for this changed role name: "),
+                choices,
+                styled("Identity selection does not approve the role assignment."),
+            )
+        )
+        if answer == "defer":
+            self._audit_resolution(
+                batch,
+                item.row,
+                resolution,
+                ActionStatus.DEFERRED_MANUAL,
+                "defer changed role name identity",
+            )
+            raise ProcessingStoppedEarly
+        if answer == "create":
+            resolution.classification = ContactResolutionClassification.CREATE_NEW
+            resolution.selected_contact = None
+            resolution.reason = (
+                "The operator chose to create a Contact for the submitted name."
+            )
+            self._audit_resolution(
+                batch,
+                item.row,
+                resolution,
+                ActionStatus.NOOP,
+                "operator chose create Contact",
+            )
+            return _ResolvedContact(resolution)
+        if answer == "rename":
+            resolution.classification = ContactResolutionClassification.USE_EXISTING
+            resolution.selected_contact = incumbent
+            resolution.reason = "The operator explicitly chose to rename the shared or functional Contact."
+            self._audit_resolution(
+                batch,
+                item.row,
+                resolution,
+                ActionStatus.VERIFIED_MANUAL,
+                "operator chose shared Contact rename",
+            )
+            return _ResolvedContact(
+                resolution, contact_id=_display(incumbent.get("Id"))
+            )
+        if answer.isdigit() and 1 <= int(answer) <= len(resolution.candidates):
+            selected = resolution.candidates[int(answer) - 1]
+            resolution.classification = ContactResolutionClassification.USE_EXISTING
+            resolution.selected_contact = selected
+            resolution.reason = "The operator selected an exact-name family Contact."
+            self._audit_resolution(
+                batch,
+                item.row,
+                resolution,
+                ActionStatus.VERIFIED_MANUAL,
+                "operator selected exact-name Contact",
+            )
+            return _ResolvedContact(resolution, contact_id=_display(selected.get("Id")))
+        raise ProcessingError(
+            "A changed role name requires an explicit identity choice."
+        )
 
     def _prompt_ambiguous_resolution(
         self,
@@ -5568,8 +5719,7 @@ class InteractiveProfileUpdateProcessor:
                     self._confirm_future_change_task(batch, (future_date,))
                 if is_future_name_or_address:
                     handoff_reason += (
-                        " Do not apply before effective date "
-                        f"{future_date}."
+                        f" Do not apply before effective date {future_date}."
                     )
                 if is_name_or_address and account_field == "Name":
                     reminder = self._record_temporary_notation(

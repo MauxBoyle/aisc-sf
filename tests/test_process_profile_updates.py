@@ -3395,6 +3395,185 @@ def test_fresh_role_without_email_is_normalized_before_review(tmp_path):
     ) in client.updated
 
 
+@pytest.mark.parametrize(
+    ("email", "offers_rename"),
+    [("person@example.com", False), ("quality@example.com", True)],
+)
+def test_changed_name_only_role_requires_identity_choice_before_reconciliation(
+    email, offers_rename
+):
+    incumbent = {
+        "Id": "contact-quality",
+        "AccountId": "account-1",
+        "FirstName": "Taylor",
+        "LastName": "Lee",
+        "Title": "Old Title",
+        "Email": email,
+        "Phone": "312-555-0199",
+    }
+    client = FakeClient(
+        source=source_record(
+            Quality_First_Name__c="Jordan", Quality_Last_Name__c="Kim"
+        ),
+        account=account_record(Cert_Marketing_Contact__c="contact-quality"),
+        contacts=[incumbent],
+    )
+    processor = InteractiveProfileUpdateProcessor(client, input_fn=Feeder([]), now=NOW)
+    row = staged_row(contact_resolutions="[]")
+    batch = build_case_batches([row], now=NOW)[0]
+    items, _ = processor._collect_contact_work(
+        batch,
+        {"submission-1": client.records[("Company_Profile_Change__c", "submission-1")]},
+    )
+
+    assert len(items) == 1
+    item = items[0]
+    assert item.name_identity_review
+    assert item.contact_id == ""
+    assert item.incumbent_contact["Id"] == "contact-quality"
+    assert "Jordan" in item.proposals["first_name"]
+    assert offers_rename is profile_update_processing.is_generic_mailbox(email)
+
+
+def test_role_name_identity_lists_all_exact_name_family_matches():
+    contacts = [
+        {
+            "Id": f"candidate-{number}",
+            "AccountId": "account-1",
+            "FirstName": "Jordan",
+            "LastName": "Kim",
+            "Email": f"jordan{number}@example.com",
+        }
+        for number in (1, 2)
+    ]
+    incumbent = {
+        "Id": "incumbent",
+        "AccountId": "account-1",
+        "FirstName": "Taylor",
+        "LastName": "Lee",
+        "Email": "person@example.com",
+    }
+    client = FakeClient(
+        source=source_record(
+            Quality_First_Name__c="Jordan", Quality_Last_Name__c="Kim"
+        ),
+        account=account_record(Cert_Marketing_Contact__c="incumbent"),
+        contacts=[incumbent, *contacts],
+    )
+    processor = InteractiveProfileUpdateProcessor(client, input_fn=Feeder([]), now=NOW)
+    batch = build_case_batches([staged_row(contact_resolutions="[]")], now=NOW)[0]
+    items, _ = processor._collect_contact_work(
+        batch,
+        {"submission-1": client.records[("Company_Profile_Change__c", "submission-1")]},
+    )
+    item = items[0]
+
+    assert [candidate["Id"] for candidate in item.resolution.candidates] == [
+        "candidate-1",
+        "candidate-2",
+    ]
+
+
+def test_same_name_role_submission_keeps_incumbent_fallback():
+    client = FakeClient(
+        source=source_record(
+            Quality_First_Name__c="Taylor", Quality_Last_Name__c="Lee"
+        ),
+        account=account_record(Cert_Marketing_Contact__c="contact-quality"),
+        contacts=[
+            {
+                "Id": "contact-quality",
+                "AccountId": "account-1",
+                "FirstName": "Taylor",
+                "LastName": "Lee",
+                "Email": "person@example.com",
+            }
+        ],
+    )
+    processor = InteractiveProfileUpdateProcessor(client, input_fn=Feeder([]), now=NOW)
+    batch = build_case_batches([staged_row(contact_resolutions="[]")], now=NOW)[0]
+    items, _ = processor._collect_contact_work(
+        batch,
+        {"submission-1": client.records[("Company_Profile_Change__c", "submission-1")]},
+    )
+
+    assert items[0].name_identity_review is False
+    assert items[0].contact_id == "contact-quality"
+
+
+def test_selecting_exact_name_contact_only_resolves_identity():
+    processor = InteractiveProfileUpdateProcessor(FakeClient(), input_fn=Feeder(["1"]))
+    source = ContactSource("role", "quality", "submission-1")
+    match = {
+        "Id": "candidate-1",
+        "AccountId": "account-1",
+        "FirstName": "Jordan",
+        "LastName": "Kim",
+    }
+    item = _ContactWorkItem(
+        "unresolved:1",
+        ContactResolution(
+            ContactResolutionClassification.AMBIGUOUS,
+            "",
+            "",
+            sources=[source],
+            candidates=[match],
+        ),
+        staged_row(),
+        proposals={"first_name": {"Jordan": [source]}, "last_name": {"Kim": [source]}},
+        source_keys={("role", "quality", "submission-1")},
+        name_identity_review=True,
+        incumbent_contact={
+            "Id": "old-contact",
+            "Email": "person@example.com",
+            "FirstName": "Taylor",
+            "LastName": "Lee",
+        },
+    )
+    processor._audit_resolution = lambda *args: None
+
+    outcome = processor._review_role_name_identity(
+        CaseBatch("account-1", "case-1", "00010001", [staged_row()], NOW), item
+    )
+
+    assert outcome.contact_id == "candidate-1"
+    assert processor.client.updated == []
+    assert processor.client.created == []
+
+
+def test_deferring_changed_role_name_keeps_identity_unresolved():
+    processor = InteractiveProfileUpdateProcessor(
+        FakeClient(), input_fn=Feeder(["defer"])
+    )
+    source = ContactSource("role", "quality", "submission-1")
+    item = _ContactWorkItem(
+        "unresolved:1",
+        ContactResolution(
+            ContactResolutionClassification.AMBIGUOUS, "", "", sources=[source]
+        ),
+        staged_row(),
+        proposals={"first_name": {"Jordan": [source]}, "last_name": {"Kim": [source]}},
+        source_keys={("role", "quality", "submission-1")},
+        name_identity_review=True,
+        incumbent_contact={
+            "Id": "old-contact",
+            "Email": "person@example.com",
+            "FirstName": "Taylor",
+            "LastName": "Lee",
+        },
+    )
+    audit_events = []
+    processor._audit_resolution = lambda *args: audit_events.append(args)
+    with pytest.raises(profile_update_processing.ProcessingStoppedEarly):
+        processor._review_role_name_identity(
+            CaseBatch("account-1", "case-1", "00010001", [staged_row()], NOW), item
+        )
+
+    assert processor.client.updated == []
+    assert processor.client.created == []
+    assert audit_events[0][3] is ActionStatus.DEFERRED_MANUAL
+
+
 def test_contact_phase_combines_roles_into_one_write_before_account_and_role_links(
     tmp_path,
 ):
@@ -5402,9 +5581,12 @@ def test_role_contact_snapshot_reads_happen_before_first_batch_write(tmp_path):
     ],
 )
 def test_departure_language_classification(comments, notes, expected):
-    assert profile_update_processing._departure_language_status(
-        [source_record(Comments__c=comments, Other_Personnel_Notes__c=notes)]
-    ) == expected
+    assert (
+        profile_update_processing._departure_language_status(
+            [source_record(Comments__c=comments, Other_Personnel_Notes__c=notes)]
+        )
+        == expected
+    )
 
 
 def test_explicit_departure_creates_review_only_handoff_and_keeps_role_approval(
@@ -5500,8 +5682,10 @@ def test_ambiguous_departure_wording_requires_operator_confirmation():
         CaseBatch("account-1", "case-1", "00010001", [staged_row()], NOW),
         {"submission-1": source_record(Comments__c="Pat may be leaving.")},
         {
-            ("account-1", "certification"):
-                profile_update_processing._RoleContactSnapshot("old-contact", contact)
+            (
+                "account-1",
+                "certification",
+            ): profile_update_processing._RoleContactSnapshot("old-contact", contact)
         },
     )
 
