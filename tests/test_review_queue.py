@@ -225,6 +225,199 @@ def test_contact_change_is_shared_across_source_rows():
     assert len(set(contact_ids)) == 1
 
 
+@pytest.mark.parametrize("field", ["title", "phone"])
+def test_resolved_contact_attribute_conflicts_are_reviewable(field):
+    resolutions = [
+        {
+            "classification": "exact",
+            "comparison_key": "sam@example.com",
+            "sources": [{"submission_id": f"submission-{index}"}],
+            "submitted": {field: value},
+            "selected_contact": {"Id": "contact-1", "Title": "Current", "Phone": "555-0100"},
+        }
+        for index, value in enumerate(("First", "Second"), start=1)
+    ]
+    rows = [
+        queue_row(
+            source_submission_ids=json.dumps([f"submission-{index}"]),
+            case_id=f"case-{index}",
+            contact_resolutions=json.dumps([resolution]),
+        )
+        for index, resolution in enumerate(resolutions, start=1)
+    ]
+
+    manifest = build_review_queue(rows, now=NOW)
+    changes = [
+        change
+        for change in iter_changes(manifest)
+        if change.salesforce.record_id == "contact-1" and change.field == field.title()
+    ]
+
+    assert len(changes) == 1
+    assert changes[0].reviewable
+    assert changes[0].proposed_value == ("First", "Second")
+    assert changes[0].current_value == ("Current" if field == "title" else "555-0100")
+    assert len(manifest.batches) == 2
+    batch_items = [
+        change
+        for batch in manifest.batches
+        for row in batch.rows
+        for change in row.changes
+        if change.salesforce.record_id == "contact-1" and change.field == field.title()
+    ]
+    assert len(batch_items) == 2
+    assert len({change.id for change in batch_items}) == 1
+
+
+def test_new_contact_title_discrepancies_share_provisional_identity_across_accounts():
+    rows = []
+    rows_data = [
+        (
+            "account-1",
+            "case-1",
+            "submission-1",
+            [("certification", "CWI"), ("quality", "QC Manager")],
+        ),
+        ("account-2", "case-2", "submission-2", [("principal", "")]),
+        ("account-3", "case-3", "submission-3", [("accounting", "CWI")]),
+    ]
+    for account_id, case_id, submission_id, roles in rows_data:
+        rows.append(
+            queue_row(
+                account_id=account_id,
+                contact_identity_scope="parent-account",
+                case_id=case_id,
+                case_number=case_id,
+                source_submission_ids=json.dumps([submission_id]),
+                contact_resolutions=json.dumps(
+                    [
+                        {
+                            "classification": "create_new",
+                            "comparison_key": "cameron.lackey@example.com",
+                            "normalized_email": "cameron.lackey@example.com",
+                            "sources": [
+                                {
+                                    "kind": "role",
+                                    "role": role,
+                                    "submission_id": submission_id,
+                                }
+                            ],
+                            "submitted": {"title": title} if title else {},
+                            "selected_contact": None,
+                        }
+                        for role, title in roles
+                    ]
+                ),
+            )
+        )
+
+    manifest = build_review_queue(rows, now=NOW)
+    title_changes = [
+        change
+        for change in iter_changes(manifest)
+        if change.phase.value == "contact" and change.field == "Title"
+    ]
+
+    assert len(title_changes) == 1
+    assert title_changes[0].reviewable
+    assert not title_changes[0].salesforce.record_id
+    assert title_changes[0].context == (
+        "contact:parent-account:email:cameron.lackey@example.com"
+    )
+    assert title_changes[0].source_submission_ids == (
+        "submission-1",
+        "submission-2",
+        "submission-3",
+    )
+    assert title_changes[0].proposed_value == ("CWI", "QC Manager")
+    assert len(manifest.batches) == 3
+    assert len({change.id for change in title_changes}) == 1
+
+
+def test_same_proposed_email_in_unrelated_accounts_keeps_separate_queue_items():
+    rows = []
+    for index, account_id in enumerate(("account-1", "account-2"), start=1):
+        rows.append(
+            queue_row(
+                account_id=account_id,
+                contact_identity_scope=account_id,
+                case_id=f"case-{index}",
+                source_submission_ids=json.dumps([f"submission-{index}"]),
+                contact_resolutions=json.dumps(
+                    [
+                        {
+                            "classification": "create_new",
+                            "comparison_key": "shared@example.com",
+                            "normalized_email": "shared@example.com",
+                            "sources": [{"kind": "role", "role": "quality", "submission_id": f"submission-{index}"}],
+                            "submitted": {"title": f"Title {index}"},
+                            "selected_contact": None,
+                        }
+                    ]
+                ),
+            )
+        )
+
+    title_changes = [
+        change
+        for change in iter_changes(build_review_queue(rows, now=NOW))
+        if change.field == "Title"
+    ]
+
+    assert len(title_changes) == 2
+    assert len({change.id for change in title_changes}) == 2
+    assert all(change.reviewable for change in title_changes)
+
+
+def test_ambiguous_new_contact_identity_still_blocks_field_review():
+    row = queue_row(
+        contact_resolutions=json.dumps(
+            [
+                {
+                    "classification": "ambiguous",
+                    "comparison_key": "office@example.com",
+                    "normalized_email": "office@example.com",
+                    "sources": [{"kind": "role", "role": "quality", "submission_id": "submission-1"}],
+                    "submitted": {"title": "QC Manager"},
+                    "selected_contact": None,
+                }
+            ]
+        )
+    )
+
+    title = next(
+        change
+        for change in iter_changes(build_review_queue([row], now=NOW))
+        if change.field == "Title"
+    )
+
+    assert not title.reviewable
+    assert "ambiguous_contact" in {blocker.code for blocker in title.blockers}
+
+
+def test_identity_field_conflicts_remain_blocked():
+    resolution = {
+        "classification": "exact",
+        "comparison_key": "sam@example.com",
+        "sources": [{"submission_id": "submission-1"}],
+        "selected_contact": {"Id": "contact-1"},
+    }
+    row = queue_row(
+        contact_resolutions=json.dumps(
+            [
+                {**resolution, "submitted": {"first_name": "Sam"}},
+                {**resolution, "submitted": {"first_name": "Samuel"}},
+            ]
+        )
+    )
+
+    changes = [change for change in iter_changes(build_review_queue([row], now=NOW)) if change.field == "FirstName"]
+
+    assert len(changes) == 1
+    assert not changes[0].reviewable
+    assert "conflicting_values" in {blocker.code for blocker in changes[0].blockers}
+
+
 def test_shared_submitted_role_contacts_remain_reviewable_for_reconciliation():
     row = queue_row(
         certification_first_name="Sam",

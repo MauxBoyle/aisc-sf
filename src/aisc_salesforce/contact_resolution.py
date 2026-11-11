@@ -80,6 +80,7 @@ class ContactResolution:
     confidence: str = ""
     warnings: list[str] = field(default_factory=list)
     submitted: dict[str, str] = field(default_factory=dict)
+    field_proposals: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         """Return the stable JSON contract used in staging and audit files."""
@@ -98,6 +99,7 @@ class ContactResolution:
             "confidence": self.confidence,
             "warnings": list(self.warnings),
             "submitted": dict(self.submitted),
+            "field_proposals": [dict(item) for item in self.field_proposals],
         }
 
     @classmethod
@@ -132,6 +134,11 @@ class ContactResolution:
             submitted={
                 str(key): str(item) for key, item in value.get("submitted", {}).items()
             },
+            field_proposals=[
+                dict(item)
+                for item in value.get("field_proposals", [])
+                if isinstance(item, dict)
+            ],
         )
 
 
@@ -456,6 +463,11 @@ def merge_resolution(
             existing.submitted[key] = value
     existing.warnings.extend(
         warning for warning in incoming.warnings if warning not in existing.warnings
+    )
+    existing.field_proposals.extend(
+        proposal
+        for proposal in incoming.field_proposals
+        if proposal not in existing.field_proposals
     )
     return existing
 

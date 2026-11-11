@@ -896,16 +896,27 @@ Contact; Contact field changes and the Account role link are reviewed
 separately. Deferring leaves the Case Pending and the queued work available to
 resume. Title-only and phone-only updates still use the current role Contact.
 
-All values for the same email identity are reconciled together. Repeated
-normalized values collapse into one proposal with all of their sources.
+Values for an existing Contact ID, or a confirmed proposed identity within one
+related Account family, are reconciled together. Repeated normalized values
+collapse into one proposal with all of their sources.
+Title and Phone differences appear as one shared Contact field review for an
+existing Contact or for a proposed new Contact in the same related Account
+family. New shared identities require operator confirmation before creation;
+the queue scopes their temporary identity by Account family and email, so email
+alone does not merge proposals from unrelated Accounts. Blank Titles are
+ignored, capitalization and obvious one-character Title typos are normalized,
+and distinct Titles default to a slash-separated value. A Contact used across
+related Accounts is created under their shared parent Account. Field decisions
+are saved and reused across batches, while each role assignment keeps its own
+review. Differing names or emails, and unresolved or ambiguous Contact
+identities, still require identity review and remain blocking until resolved.
 Different email identities remain separate Contact reviews even when they
 appeared in the same role. If identity review later resolves two entries to the
 same Salesforce Contact ID, their proposals are combined at that point.
-Distinct nonblank values for one resolved Contact are a conflict. The reviewer
-sees every candidate value and its submission/role sources side by side, then
-must choose a candidate or `current` for each conflicting field. Choosing
-`current` removes that field from the eventual Salesforce write. Every conflict
-is resolved before the first Contact write.
+Distinct Title values default to a slash-separated value after capitalization
+and obvious typo normalization. Phone conflicts still show every candidate and
+its submission/role sources so the operator can choose a value or keep the
+current Salesforce value. Identity conflicts remain blocked until resolved.
 
 After reconciliation, the heading identifies the person and email rather than
 leading with a role. One Contact-level table shows each current value,

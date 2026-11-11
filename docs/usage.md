@@ -1329,21 +1329,24 @@ email can still use a staged Contact ID or the fresh current Account-role
 lookup. Ambiguous candidates are shown together; the reviewer may select one,
 create a Contact, or ignore that unresolved entry.
 
-Proposals sharing one email comparison key are grouped across rows, roles, and
-submissions. Different emails remain separate Contact work items even when they
-were submitted for the same role. If identity review later selects the same
-Salesforce Contact ID for two items, they are merged then. Identical normalized
-values are stored once with all their sources. Distinct values for one resolved
-Contact conflict. For each conflict, the command displays numbered candidate
-values beside their submission/role sources and prompts:
-
-```text
-Choose reconciled Title [1-2/current]:
-```
-
-The reviewer must choose one candidate or `current`. Choosing `current` keeps
-the current Salesforce value and removes that field from the final write. All
-identity and field-conflict choices finish before any Contact is written.
+Proposals for an existing Salesforce Contact ID are grouped across rows,
+roles, and submissions. A proposed Contact uses a temporary identity scoped by
+Account family and email, and the operator confirms that identity before its
+fields are reconciled. Different emails remain separate Contact work items
+even when they were submitted for the same role. If identity review later
+selects the same Salesforce Contact ID for two items, they are merged then.
+Identical normalized values are stored once with all their sources. Title and Phone differences are
+reviewable for an existing Contact ID or a proposed new Contact in the same
+related Account family. Matching email alone does not merge proposals from
+unrelated Accounts. Blank Titles do not
+compete with submitted values. Case and obvious one-character Title typos are
+normalized, while distinct Titles default to a slash-separated value. When the
+Contact spans related Accounts, it is created under their shared parent. The
+queue stores one shared field decision and reuses it in later batches. Each
+batch still reviews its own Account changes and role assignments, because a
+Contact field decision does not approve a role link. Differing names or emails
+remain identity-sensitive, and unresolved or ambiguous Contact identities stay
+blocked for identity review.
 
 A final heading identifies each Contact by person and email, independent of
 role. Its table shows `Field`, `Current Salesforce`, `Reconciled`, and
@@ -1366,7 +1369,7 @@ Contact:
   follow-up.
 - `N` omits that field from writes and records the rejection.
 
-All decisions are collected before the first Contact write. Approved fields are
+All field decisions are collected before the first Contact write. Approved fields are
 then combined, so each resolved Contact has at most one automatic create or
 update call in a run. Rejected and manual fields are absent from that payload.
 A new Contact requires an approved Last Name for automatic creation. If Last
@@ -1376,6 +1379,10 @@ fails without creating a partial Contact. If every new-Contact field is
 rejected, no Contact or role link is created. When a new submitter Contact is
 created, its ID is assigned to `Case.ContactId`; matching an existing submitter
 alone does not change that Case lookup.
+
+Conflicting identity values such as different names remain blocked for explicit
+identity review. After identity is settled, the operator reviews the Contact's
+reconciled field values before any Contact write.
 
 After every automatic Contact has finished, a visibly separated `Manual Contact
 Follow-up` heading reminds the reviewer that external Salesforce edits begin.
@@ -1544,9 +1551,9 @@ so the Case is also set to `Closed`. If a response is not sent, the source
 records are closed and the Case stays `Pending`.
 
 Contact audit objects include classification, comparison key, candidates,
-selected Contact, reason, confidence, and warnings. Every field-conflict
-selection is an explicit event that records the candidate values and their
-sources. The final Contact outcome is stored per Salesforce field, even though
+selected Contact, reason, confidence, and warnings. Phone conflict selections
+are explicit events that record the candidate values and their sources. The
+final Contact outcome is stored per Salesforce field, even though
 approved fields share one automatic write. Each field result records its full
 decision phrase, submitted `proposed_value`, and authoritative `final_value`.
 For ordinary applied, rejected, and no-op results this remains backward

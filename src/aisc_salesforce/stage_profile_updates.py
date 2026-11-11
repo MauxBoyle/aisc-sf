@@ -80,6 +80,7 @@ SHARED_COLUMNS = [
     "latest_submission_date",
     "account_id",
     "account_name",
+    "contact_identity_scope",
     "is_parent_account",
     "affected_accounts",
     "submitted_account_fields",
@@ -337,6 +338,13 @@ class ProfileUpdateStagingService:
                 "latest_submission_date": _clean_text(records[-1].get("CreatedDate")),
                 "account_id": account_id,
                 "account_name": _account_name(account, merged),
+                # Siblings share their parent's provisional Contact scope.
+                # This scopes email-based grouping without treating a matching
+                # email as identity across unrelated Accounts.
+                "contact_identity_scope": (
+                    _clean_text(account.get("ParentId") if account else "")
+                    or account_id
+                ),
                 "is_parent_account": "true" if direct_children else "false",
                 "affected_accounts": json.dumps(
                     [
@@ -462,6 +470,7 @@ class ProfileUpdateStagingService:
             account,
             list(all_accounts_by_id.values()),
             contacts,
+            records,
             warnings,
         )
         row["email_assessments"] = _build_email_assessments(row, merged_roles, warnings)
@@ -628,15 +637,24 @@ def _build_contact_resolutions(
     account: dict[str, Any] | None,
     family_accounts: list[dict[str, Any]],
     contacts: list[dict[str, Any]],
+    records: list[dict[str, Any]],
     row_warnings: list[str],
 ) -> str:
     """Build the authoritative email-keyed Contact-resolution staging value."""
     account_ids = family_account_ids(account, family_accounts)
     source_ids = json.loads(row["source_submission_ids"])
-    entries: list[tuple[str, ContactSource, dict[str, str]]] = []
+    entries: list[
+        tuple[str, ContactSource, dict[str, str], dict[str, str]]
+    ] = []
 
     submitter_first, submitter_last = _split_person_name(row["submitter_name"])
     if row["submitter_email"]:
+        submitter_values = {
+            "first_name": submitter_first,
+            "last_name": submitter_last,
+            "email": row["submitter_email"],
+            "phone": row["submitter_phone"],
+        }
         entries.append(
             (
                 row["submitter_email"],
@@ -644,12 +662,8 @@ def _build_contact_resolutions(
                     "submitter",
                     submission_id=_clean_text(source_ids[-1] if source_ids else ""),
                 ),
-                {
-                    "first_name": submitter_first,
-                    "last_name": submitter_last,
-                    "email": row["submitter_email"],
-                    "phone": row["submitter_phone"],
-                },
+                submitter_values,
+                submitter_values,
             )
         )
 
@@ -657,6 +671,20 @@ def _build_contact_resolutions(
         email = role.values.get("email", "")
         if not email:
             continue
+        submitted = dict(role.values)
+        field_values = dict(submitted)
+        title_source_field = dict(role.definition.submitted_fields).get("title")
+        source_record = next(
+            (
+                record
+                for record in records
+                if _clean_text(record.get("Id")) == role.source_submission_id
+            ),
+            {},
+        )
+        raw_title = _clean_text(source_record.get(title_source_field or ""))
+        if raw_title:
+            field_values["title"] = raw_title
         entries.append(
             (
                 email,
@@ -665,13 +693,14 @@ def _build_contact_resolutions(
                     role=role.definition.prefix,
                     submission_id=role.source_submission_id,
                 ),
-                dict(role.values),
+                submitted,
+                field_values,
             )
         )
 
     resolutions: dict[str, ContactResolution] = {}
     invalid_index = 0
-    for email, source, submitted in entries:
+    for email, source, submitted, field_values in entries:
         normalized, comparison_key, _ = normalize_resolution_email(email)
         resolution = resolve_contact(
             normalized,
@@ -679,6 +708,12 @@ def _build_contact_resolutions(
             account_ids,
             sources=[source],
             submitted=submitted,
+        )
+        resolution.field_proposals.append(
+            {
+                "source": source.as_dict(),
+                "submitted": dict(field_values),
+            }
         )
         row_warnings.extend(
             warning for warning in resolution.warnings if warning not in row_warnings
