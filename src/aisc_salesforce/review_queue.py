@@ -1123,60 +1123,88 @@ def _build_contact_changes(
                 or resolution.get("normalized_email")
                 or f"unresolved:{row.id}:{index}"
             )
-            target = record_id or f"email:{comparison_key}"
+            scope = str(
+                raw.get("contact_identity_scope") or raw.get("account_id") or ""
+            ).strip()
+            target = record_id or (
+                f"contact:{scope}:email:{comparison_key}"
+                if scope
+                else f"email:{comparison_key}"
+            )
             submitted = resolution.get("submitted")
             if not isinstance(submitted, dict):
                 submitted = {}
             sources = resolution.get("sources")
             if not isinstance(sources, list):
                 sources = []
-            source_ids = {
-                str(source.get("submission_id", "")).strip()
-                for source in sources
-                if isinstance(source, dict)
-                and str(source.get("submission_id", "")).strip()
-            }
-            source_ids.update(row.source_submission_ids)
-            for suffix, field in CONTACT_FIELDS.items():
-                proposed = submitted.get(suffix)
-                if proposed in (None, ""):
-                    continue
-                entry = grouped.setdefault(
-                    (target, field),
-                    {
-                        "record_id": record_id,
-                        "source_ids": set(),
-                        "row_ids": set(),
-                        "values": [],
-                        "current_values": [],
-                        "warnings": [],
-                        "blockers": [],
-                    },
-                )
-                entry["source_ids"].update(source_ids)
-                entry["row_ids"].add(row.id)
-                entry["values"].append(proposed)
-                entry["current_values"].append(selected.get(field))
-                entry["warnings"].extend(
-                    str(value) for value in resolution.get("warnings", []) if value
-                )
-                classification = str(resolution.get("classification", ""))
-                if classification == "ambiguous":
-                    entry["blockers"].append(
-                        QueueBlocker(
-                            "ambiguous_contact",
-                            "Contact identity requires reviewer resolution.",
-                        )
+            field_proposals = resolution.get("field_proposals")
+            if isinstance(field_proposals, list) and field_proposals:
+                occurrences = [
+                    (
+                        proposal.get("submitted", {}),
+                        [proposal.get("source")],
                     )
+                    for proposal in field_proposals
+                    if isinstance(proposal, dict)
+                    and isinstance(proposal.get("submitted", {}), dict)
+                ]
+            else:
+                occurrences = [(submitted, sources)]
+            for occurrence_submitted, occurrence_sources in occurrences:
+                if not isinstance(occurrence_submitted, dict):
+                    continue
+                source_ids = {
+                    str(source.get("submission_id", "")).strip()
+                    for source in occurrence_sources
+                    if isinstance(source, dict)
+                    and str(source.get("submission_id", "")).strip()
+                }
+                source_ids.update(row.source_submission_ids)
+                for suffix, field in CONTACT_FIELDS.items():
+                    proposed = occurrence_submitted.get(suffix)
+                    if proposed in (None, "") and field != "Title":
+                        continue
+                    entry = grouped.setdefault(
+                        (target, field),
+                        {
+                            "record_id": record_id,
+                            "source_ids": set(),
+                            "row_ids": set(),
+                            "values": [],
+                            "current_values": [],
+                            "warnings": [],
+                            "blockers": [],
+                        },
+                    )
+                    entry["source_ids"].update(source_ids)
+                    entry["row_ids"].add(row.id)
+                    if proposed not in (None, ""):
+                        entry["values"].append(proposed)
+                    entry["current_values"].append(selected.get(field))
+                    entry["warnings"].extend(
+                        str(value)
+                        for value in resolution.get("warnings", [])
+                        if value
+                    )
+                    classification = str(resolution.get("classification", ""))
+                    if classification == "ambiguous":
+                        entry["blockers"].append(
+                            QueueBlocker(
+                                "ambiguous_contact",
+                                "Contact identity requires reviewer resolution.",
+                            )
+                        )
 
     by_row: dict[str, list[ProposedChange]] = {}
     shells = {row.id: row for row in row_models}
     for (target, field), entry in grouped.items():
+        if not entry["values"]:
+            continue
         source_ids = tuple(sorted(entry["source_ids"]))
         row_ids = tuple(sorted(entry["row_ids"]))
         values = tuple(sorted(set(str(value) for value in entry["values"])))
         blockers = _unique_blockers(entry["blockers"])
-        if len(values) > 1:
+        if len(values) > 1 and field not in {"Title", "Phone"}:
             blockers = _unique_blockers(
                 [
                     *blockers,

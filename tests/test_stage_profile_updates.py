@@ -177,7 +177,9 @@ def test_staging_publishes_deduplicated_contact_resolution_contract():
         Cert_First_Name__c="Alex",
         Cert_Last_Name__c="Smith",
         Cert_Email__c="alexsmith@example.com",
+        Cert_Title__c="CWI",
         Principal_Email__c="ALEX.SMITH@example.com",
+        Principal_Title__c="QC Manager",
     )
 
     result, _ = stage([record], accounts=[account(ParentId="")])
@@ -198,6 +200,12 @@ def test_staging_publishes_deduplicated_contact_resolution_contract():
     }
     assert resolution["submitted"]["first_name"] == "Alex"
     assert resolution["submitted"]["last_name"] == "Smith"
+    assert [
+        (entry["source"]["role"], entry["submitted"].get("title"))
+        for entry in resolution["field_proposals"]
+        if entry["source"]["kind"] == "role"
+    ] == [("certification", "CWI"), ("principal", "QC Manager")]
+    assert result.rows[0]["contact_identity_scope"] == "account-1"
 
 
 def test_staging_normalizes_submitter_and_every_submitted_role_consistently():

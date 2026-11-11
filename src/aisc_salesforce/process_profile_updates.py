@@ -9,8 +9,9 @@ import os
 import re
 import shutil
 from collections.abc import Callable, Collection
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
+from difflib import SequenceMatcher
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, TextIO
@@ -387,6 +388,8 @@ class _ContactWorkItem:
     submitter_assigned: bool = False
     name_identity_review: bool = False
     incumbent_contact: dict[str, Any] | None = None
+    account_ids: set[str] = field(default_factory=set)
+    identity_confirmed: bool = False
 
     @property
     def sources(self) -> list[ContactSource]:
@@ -2289,8 +2292,12 @@ class InteractiveProfileUpdateProcessor:
                     name_identity_review = False
                     incumbent_contact = None
                     details = {
-                        suffix: normalize_contact_value(
-                            suffix, record.get(source_field)
+                        suffix: (
+                            _display(record.get(source_field))
+                            if suffix == "title"
+                            else normalize_contact_value(
+                                suffix, record.get(source_field)
+                            )
                         )
                         for suffix, source_field in role.submitted_fields
                     }
@@ -2434,6 +2441,9 @@ class InteractiveProfileUpdateProcessor:
             elif source not in item.resolution.sources:
                 item.resolution.sources.append(source)
             item.source_keys.add(source_key)
+            account_id = _display(row.get("account_id"))
+            if account_id:
+                item.account_ids.add(account_id)
             name_identity_review, incumbent_contact = name_identity_by_source.get(
                 source_key, (False, None)
             )
@@ -2562,6 +2572,12 @@ class InteractiveProfileUpdateProcessor:
                 continue
             if item.name_identity_review:
                 state = self._review_role_name_identity(batch, item)
+            elif (
+                item.resolution.classification
+                is ContactResolutionClassification.CREATE_NEW
+                and self._is_shared_proposed_contact(item)
+            ):
+                state = self._confirm_shared_new_contact(batch, item)
             else:
                 state = self._review_resolution_choice(batch, item.row, item.resolution)
             item.contact_id = state.contact_id
@@ -2588,6 +2604,233 @@ class InteractiveProfileUpdateProcessor:
                     target.extend(source for source in sources if source not in target)
         return list(merged.values())
 
+    def _is_shared_proposed_contact(self, item: _ContactWorkItem) -> bool:
+        """Return whether a proposed identity appears in multiple roles or Accounts."""
+        role_sources = {
+            (source.role, source.submission_id)
+            for source in item.resolution.sources
+            if source.kind == "role"
+        }
+        if len(role_sources) > 1:
+            return True
+        if self._review_rows is None:
+            return False
+        scope = _display(item.row.get("contact_identity_scope")) or _display(
+            item.row.get("account_id")
+        )
+        account_ids: set[str] = set(item.account_ids)
+        for row in self._review_rows:
+            row_scope = _display(row.get("contact_identity_scope")) or _display(
+                row.get("account_id")
+            )
+            if row_scope != scope:
+                continue
+            try:
+                resolutions = json.loads(row.get("contact_resolutions", "") or "[]")
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(resolutions, list):
+                continue
+            if any(
+                isinstance(resolution, dict)
+                and resolution.get("classification") == "create_new"
+                and str(
+                    resolution.get("comparison_key")
+                    or resolution.get("normalized_email")
+                    or ""
+                )
+                == item.resolution.comparison_key
+                for resolution in resolutions
+            ):
+                account_id = _display(row.get("account_id"))
+                if account_id:
+                    account_ids.add(account_id)
+        return len(account_ids) > 1
+
+    def _confirm_shared_new_contact(
+        self, batch: CaseBatch, item: _ContactWorkItem
+    ) -> _ResolvedContact:
+        """Require explicit identity approval before shared Contact creation."""
+        self._display_event(
+            Heading(styled("Proposed shared Contact identity", ITEM_SEPARATOR), ITEM_SEPARATOR)
+        )
+        self._display_event(
+            Notice(
+                styled(
+                    "The same proposed person appears in multiple roles or related "
+                    "Accounts. Confirm that these submissions describe one Contact "
+                    "before the fields are reconciled."
+                )
+            )
+        )
+        self._show_contact_details(
+            "Proposed Contact",
+            {
+                "FirstName": item.resolution.submitted.get("first_name", ""),
+                "LastName": item.resolution.submitted.get("last_name", ""),
+                "Title": item.resolution.submitted.get("title", ""),
+                "Email": item.resolution.submitted.get("email", ""),
+                "Phone": item.resolution.submitted.get("phone", ""),
+            },
+        )
+        try:
+            confirmed = self._prompt_yes_no(
+                styled("Treat these occurrences as one new Contact? [yes/no]: ")
+            )
+        except StopIteration as error:
+            raise ProcessingError(
+                "A shared proposed Contact requires explicit identity confirmation."
+            ) from error
+        if not confirmed:
+            item.ignored = True
+            self._audit_resolution(
+                batch,
+                item.row,
+                item.resolution,
+                ActionStatus.REJECTED,
+                "reject shared proposed Contact identity",
+            )
+            return _ResolvedContact(item.resolution, ignored=True)
+        item.identity_confirmed = True
+        self._audit_resolution(
+            batch,
+            item.row,
+            item.resolution,
+            ActionStatus.VERIFIED_MANUAL,
+            "confirm shared proposed Contact identity",
+        )
+        return _ResolvedContact(item.resolution)
+
+    def _shared_contact_field_change(self, item: _ContactWorkItem, field: str):
+        """Find the durable queue item shared by batches for this Contact field."""
+        if self._queue_store is None:
+            return None
+        comparison_key = item.resolution.comparison_key
+        scope = _display(item.row.get("contact_identity_scope")) or _display(
+            item.row.get("account_id")
+        )
+        temporary_context = (
+            f"contact:{scope}:email:{comparison_key}"
+            if comparison_key and scope
+            else f"email:{comparison_key}" if comparison_key else ""
+        )
+        return next(
+            (
+                change
+                for change in iter_changes(self._queue_store.manifest)
+                if change.phase is QueuePhase.CONTACT
+                and (
+                    (item.contact_id and change.salesforce.record_id == item.contact_id)
+                    or (
+                        temporary_context
+                        and not change.salesforce.record_id
+                        and change.context == temporary_context
+                    )
+                )
+                and change.field == field
+            ),
+            None,
+        )
+
+    def _include_shared_contact_field_proposals(self, item: _ContactWorkItem) -> None:
+        """Load Title/Phone proposals from other batches for this resolved Contact."""
+        if (
+            (not item.contact_id and not item.identity_confirmed)
+            or self._review_rows is None
+        ):
+            return
+        comparison_key = item.resolution.comparison_key
+        for row in self._review_rows:
+            try:
+                resolutions = json.loads(row.get("contact_resolutions", "") or "[]")
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(resolutions, list):
+                continue
+            for resolution in resolutions:
+                if not isinstance(resolution, dict):
+                    continue
+                selected = resolution.get("selected_contact")
+                selected_id = (
+                    _display(selected.get("Id"))
+                    if isinstance(selected, dict)
+                    else ""
+                )
+                same_confirmed_contact = bool(
+                    item.contact_id and selected_id == item.contact_id
+                )
+                same_proposed_identity = (
+                    not selected_id
+                    and comparison_key
+                    and str(
+                        resolution.get("comparison_key")
+                        or resolution.get("normalized_email")
+                        or ""
+                    )
+                    == comparison_key
+                    and resolution.get("classification") == "create_new"
+                    and (
+                        _display(row.get("contact_identity_scope"))
+                        or _display(row.get("account_id"))
+                    )
+                    == (
+                        _display(item.row.get("contact_identity_scope"))
+                        or _display(item.row.get("account_id"))
+                    )
+                )
+                if not same_confirmed_contact and not same_proposed_identity:
+                    continue
+                source_account_id = _display(row.get("account_id"))
+                if source_account_id:
+                    item.account_ids.add(source_account_id)
+                field_proposals = resolution.get("field_proposals")
+                if isinstance(field_proposals, list) and field_proposals:
+                    contributions = [
+                        (proposal.get("submitted", {}), [proposal.get("source")])
+                        for proposal in field_proposals
+                        if isinstance(proposal, dict)
+                    ]
+                else:
+                    submitted = resolution.get("submitted")
+                    sources = resolution.get("sources")
+                    if not isinstance(submitted, dict) or not isinstance(sources, list):
+                        continue
+                    contributions = [(submitted, sources)]
+                for submitted, sources in contributions:
+                    if not isinstance(submitted, dict) or not isinstance(sources, list):
+                        continue
+                    for suffix in ("title", "phone"):
+                        value = normalize_contact_value(suffix, submitted.get(suffix))
+                        if not value:
+                            continue
+                        for source_data in sources:
+                            if not isinstance(source_data, dict):
+                                continue
+                            source = ContactSource(
+                                str(source_data.get("kind", "role")),
+                                role=str(source_data.get("role", "")),
+                                submission_id=str(source_data.get("submission_id", "")),
+                            )
+                            if (
+                                not source.submission_id
+                                or source.submission_id in item.source_submission_ids
+                            ):
+                                continue
+                            if any(
+                                source in existing_sources
+                                for existing_sources in item.proposals.get(
+                                    suffix, {}
+                                ).values()
+                            ):
+                                continue
+                            candidates = item.proposals.setdefault(suffix, {}).setdefault(
+                                value, []
+                            )
+                            if source not in candidates:
+                                candidates.append(source)
+                            if source not in item.resolution.sources:
+                                item.resolution.sources.append(source)
+
     def _reconcile_contact_fields(
         self,
         batch: CaseBatch,
@@ -2606,6 +2849,7 @@ class InteractiveProfileUpdateProcessor:
         else:
             item.current_contact = {}
             item.original_contact = {}
+        self._include_shared_contact_field_proposals(item)
 
         if (
             item.contact_id
@@ -2646,6 +2890,26 @@ class InteractiveProfileUpdateProcessor:
             ):
                 values = {}
             if not values:
+                continue
+            queued_field = self._shared_contact_field_change(item, contact_field)
+            saved_decision = None
+            if queued_field is not None and queued_field.outcome:
+                prefix = "contact_field_decision:"
+                if queued_field.outcome.startswith(prefix):
+                    try:
+                        saved_decision = json.loads(queued_field.outcome[len(prefix) :])
+                    except (TypeError, ValueError):
+                        saved_decision = None
+            if isinstance(saved_decision, str):
+                reconciled[suffix] = saved_decision
+                continue
+            if suffix == "title":
+                # A Contact has one Salesforce Title field. Keep the distinct
+                # submitted titles together so role-specific values remain
+                # visible in provenance while giving the reviewer one useful
+                # default to approve or change. Case-only differences are the
+                # same title, so preserve the first submitted spelling.
+                reconciled[suffix] = _reconcile_title_values(values)
                 continue
             if len(values) == 1:
                 reconciled[suffix] = next(iter(values))
@@ -2759,6 +3023,13 @@ class InteractiveProfileUpdateProcessor:
                     action="resolve Contact field conflict",
                 )
             )
+            if queued_field is not None and self._queue_store is not None:
+                self._queue_store.transition(
+                    queued_field.id,
+                    QueueStatus.COMPLETED,
+                    outcome="contact_field_decision:" + json.dumps(chosen),
+                )
+                self._display_event(ReviewQueueSnapshot(self._queue_store.manifest))
 
         item.reconciled = reconciled
         current = item.current_contact or {}
@@ -3082,7 +3353,10 @@ class InteractiveProfileUpdateProcessor:
                 )
                 raise ProcessingError(str(error)) from error
         else:
-            payload = {"AccountId": batch.account_id, **approved}
+            payload = {
+                "AccountId": self._contact_owner_account_id(batch, item),
+                **approved,
+            }
             aggregate = self._contact_proposal(
                 batch,
                 item,
@@ -3184,6 +3458,14 @@ class InteractiveProfileUpdateProcessor:
         if not original_target:
             return self._assign_created_submitter_if_needed(batch, item)
         return []
+
+    @staticmethod
+    def _contact_owner_account_id(batch: CaseBatch, item: _ContactWorkItem) -> str:
+        """Choose the shared parent as Contact home for multiple related Accounts."""
+        scope = _display(item.row.get("contact_identity_scope"))
+        if len(item.account_ids) > 1 and scope:
+            return scope
+        return batch.account_id
 
     def _fail_contact_fields(
         self,
@@ -6896,7 +7178,19 @@ class InteractiveProfileUpdateProcessor:
                 item_ids.extend(field_candidates)
         item_ids = list(dict.fromkeys(item_ids))
         for item_id in item_ids:
-            self._queue_store.transition(item_id, status, outcome=outcome)
+            existing = next(
+                (change for change in changes if change.id == item_id), None
+            )
+            durable_contact_decision = (
+                existing.outcome
+                if existing is not None
+                and existing.outcome
+                and existing.outcome.startswith("contact_field_decision:")
+                else outcome
+            )
+            self._queue_store.transition(
+                item_id, status, outcome=durable_contact_decision
+            )
         if item_ids:
             self._active_change_id = (
                 item_ids[0] if status is QueueStatus.IN_PROGRESS else None
@@ -7098,6 +7392,34 @@ def _required_datetime(value: str) -> datetime:
 
 def _aware_datetime(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
+
+def _reconcile_title_values(values: Collection[str]) -> str:
+    """Normalize title case and collapse only obvious one-character typos."""
+    titles: list[str] = []
+    for value in values:
+        normalized = normalize_contact_value("title", value)
+        folded = normalized.casefold()
+        match_index = next(
+            (
+                index
+                for index, existing in enumerate(titles)
+                if existing.casefold() == folded
+                or (
+                    min(len(existing), len(normalized)) >= 5
+                    and SequenceMatcher(
+                        None, existing.casefold(), folded
+                    ).ratio()
+                    >= 0.9
+                )
+            ),
+            None,
+        )
+        if match_index is None:
+            titles.append(normalized)
+        elif len(normalized) > len(titles[match_index]):
+            titles[match_index] = normalized
+    return " / ".join(titles)
 
 
 def _display(value: Any) -> str:

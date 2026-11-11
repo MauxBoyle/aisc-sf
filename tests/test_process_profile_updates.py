@@ -329,6 +329,140 @@ def test_shared_mailbox_name_change_checks_all_role_accounts(
         assert item.write_values == {}
 
 
+@pytest.mark.parametrize(
+    ("titles", "expected"),
+    [
+        (("CWI", "cwi"), "CWI"),
+        (("QC Manger", "QC Manager"), "QC Manager"),
+        (("CWI", "QC Manager"), "CWI / QC Manager"),
+    ],
+)
+def test_new_contact_title_reconciliation_combines_distinct_titles(titles, expected):
+    processor = InteractiveProfileUpdateProcessor(
+        FakeClient(), input_fn=Feeder([]), output_fn=lambda message: None
+    )
+    sources = [
+        ContactSource("role", role, f"submission-{index}")
+        for index, role in enumerate(("certification", "quality"), start=1)
+    ]
+    item = _ContactWorkItem(
+        "email:cameron.lackey@example.com",
+        ContactResolution(
+            ContactResolutionClassification.CREATE_NEW,
+            "cameron.lackey@example.com",
+            "cameron.lackey@example.com",
+            sources=sources,
+        ),
+        staged_row(),
+        proposals={
+            "title": {
+                value: [source]
+                for value, source in zip(titles, sources, strict=True)
+            }
+        },
+        source_keys={(source.kind, source.role, source.submission_id) for source in sources},
+    )
+    assert len(item.proposals["title"]) == len(set(titles))
+
+    processor._reconcile_contact_fields(
+        CaseBatch("account-1", "case-1", "00010001", [staged_row()], NOW), item
+    )
+
+    assert item.reconciled["title"] == expected
+    assert item.proposals["title"] == {
+        title: [source]
+        for title, source in zip(titles, sources, strict=True)
+    }
+
+
+def test_confirmed_new_contact_keeps_queue_identity_across_related_batches(tmp_path):
+    title_values = ("CWI", "QC Manager", "CWI", "Office")
+    accounts = ("account-1", "account-2", "account-3", "unrelated-account")
+    rows = []
+    for index, (account_id, title) in enumerate(
+        zip(accounts, title_values, strict=True),
+        start=1,
+    ):
+        rows.append(
+            staged_row(
+                account_id=account_id,
+                contact_identity_scope=(
+                    "parent-1" if account_id != "unrelated-account" else account_id
+                ),
+                case_id=f"case-{index}",
+                source_submission_ids=json.dumps([f"submission-{index}"]),
+                contact_resolutions=json.dumps(
+                    [
+                        {
+                            "classification": "create_new",
+                            "comparison_key": "cameron.lackey@example.com",
+                            "normalized_email": "cameron.lackey@example.com",
+                            "sources": [
+                                {
+                                    "kind": "role",
+                                    "role": "quality",
+                                    "submission_id": f"submission-{index}",
+                                }
+                            ],
+                            "field_proposals": [
+                                {
+                                    "source": {
+                                        "kind": "role",
+                                        "role": "quality",
+                                        "submission_id": f"submission-{index}",
+                                    },
+                                    "submitted": {"title": title},
+                                }
+                            ],
+                            "submitted": {"title": title},
+                            "selected_contact": None,
+                        }
+                    ]
+                ),
+            )
+        )
+    processor = InteractiveProfileUpdateProcessor(
+        FakeClient(), input_fn=Feeder([]), output_fn=lambda message: None
+    )
+    processor._review_rows = rows
+    source = ContactSource("role", "quality", "submission-1")
+    item = _ContactWorkItem(
+        "email:cameron.lackey@example.com",
+        ContactResolution(
+            ContactResolutionClassification.CREATE_NEW,
+            "cameron.lackey@example.com",
+            "cameron.lackey@example.com",
+            sources=[source],
+        ),
+        rows[0],
+        proposals={"title": {"CWI": [source]}},
+        source_keys={(source.kind, source.role, source.submission_id)},
+        identity_confirmed=True,
+    )
+    manifest = build_review_queue(rows, now=NOW)
+    processor._queue_store = ReviewQueueStore(
+        tmp_path / "review_queue.json", manifest
+    )
+
+    processor._include_shared_contact_field_proposals(item)
+    home_account_id = processor._contact_owner_account_id(
+        CaseBatch("account-1", "case-1", "00010001", [rows[0]], NOW), item
+    )
+    item.contact_id = "created-contact"
+    queued = processor._shared_contact_field_change(item, "Title")
+
+    assert list(item.proposals["title"]) == ["CWI", "QC Manager"]
+    assert item.account_ids == {"account-1", "account-2", "account-3"}
+    assert home_account_id == "parent-1"
+    assert queued is not None
+    assert queued.salesforce.record_id == ""
+    assert queued.source_submission_ids == (
+        "submission-1",
+        "submission-2",
+        "submission-3",
+    )
+
+
 def staged_row(**changes):
     row = {column: "" for column in CSV_COLUMNS}
     row.update(
@@ -3730,7 +3864,7 @@ def test_unresolved_role_contact_is_named_in_operator_handoff(tmp_path):
     assert result.pending_batches == 1
 
 
-def test_conflicting_contact_values_are_resolved_before_any_contact_write(tmp_path):
+def test_conflicting_contact_titles_default_to_combined_value_before_write(tmp_path):
     contact = {
         "Id": "contact-1",
         "AccountId": "account-1",
@@ -3766,16 +3900,14 @@ def test_conflicting_contact_values_are_resolved_before_any_contact_write(tmp_pa
         ContactSource("role", role="certification", submission_id="submission-1"),
         ContactSource("role", role="certification", submission_id="submission-2"),
     ]
-    writes_seen_at_conflict = []
+    title_proposals = []
 
     def answer(prompt):
         if prompt.startswith("Continue with this staged row"):
             return ""
-        if prompt.startswith("Choose reconciled Title"):
-            writes_seen_at_conflict.append(
-                [item for item in client.updated if item[0] == "Contact"]
-            )
-            return "current"
+        if prompt.startswith("Decision ["):
+            title_proposals.append("Manager / Director")
+            return "will not be made"
         if prompt.startswith("Was the response email"):
             return "yes"
         raise AssertionError(prompt)
@@ -3799,7 +3931,6 @@ def test_conflicting_contact_values_are_resolved_before_any_contact_write(tmp_pa
 
     result = processor.review([row], tmp_path)
 
-    assert writes_seen_at_conflict == [[]]
     assert not any(item[0] == "Contact" for item in client.updated)
     displayed = "\n".join(output)
     assert "Manager" in displayed
@@ -3810,17 +3941,17 @@ def test_conflicting_contact_values_are_resolved_before_any_contact_write(tmp_pa
         json.loads(line)
         for line in result.audit_path.read_text(encoding="utf-8").splitlines()
     ]
-    conflict = next(
+    title_review = next(
         entry
         for entry in entries
-        if entry["action"] == "resolve Contact field conflict"
+        if entry["field"] == "Title" and entry["action"] == "no Contact field write"
     )
-    assert conflict["field"] == "Title"
-    assert conflict["proposed_value"] == "Current Title"
-    assert conflict["result"] == "verified manually"
+    assert title_proposals == ["Manager / Director"]
+    assert title_review["proposed_value"] == "Manager / Director"
+    assert title_review["result"] == "rejected"
 
 
-def test_interruption_during_contact_conflict_is_audited_before_any_write(tmp_path):
+def test_interruption_during_contact_field_review_is_audited_before_any_write(tmp_path):
     contact = {
         "Id": "contact-1",
         "AccountId": "account-1",
@@ -3851,7 +3982,7 @@ def test_interruption_during_contact_conflict_is_audited_before_any_write(tmp_pa
     def interrupt(prompt):
         if prompt.startswith("Continue with this staged row"):
             return ""
-        if prompt.startswith("Choose reconciled Title"):
+        if prompt.startswith("Decision ["):
             raise KeyboardInterrupt
         raise AssertionError(prompt)
 
@@ -3878,7 +4009,7 @@ def test_interruption_during_contact_conflict_is_audited_before_any_write(tmp_pa
         .splitlines()
     ]
     assert any(
-        entry["action"] == "resolve Contact field conflict"
+        entry["action"] == "review Contact Title"
         and entry["result"] == "interrupted"
         for entry in entries
     )
@@ -4100,6 +4231,7 @@ def test_shared_new_contact_is_created_once_and_reused_for_both_roles(tmp_path):
         client,
         input_fn=Feeder(
             [
+                "yes",
                 "apply automatically",
                 "apply automatically",
                 "apply automatically",

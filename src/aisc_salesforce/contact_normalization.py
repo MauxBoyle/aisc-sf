@@ -10,6 +10,7 @@ from typing import Any
 # changing this tuple never requires changing the normalization algorithm.
 CONTACT_CASE_EXCEPTIONS = (
     "CEO",
+    "CWI",
     "CFO",
     "COO",
     "CTO",
