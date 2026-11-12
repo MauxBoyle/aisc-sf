@@ -1,5 +1,27 @@
 # Usage
 
+## Find Yoshki smart logo users
+
+Run this operator workflow from the repository root after configuring
+`SF_CLIENT_ID` and `SF_CLIENT_SECRET` in `.env` (and optionally
+`SF_LOGIN_URL` for a sandbox):
+
+```bash
+uv run python scripts/find_yoshki_smart_logo_users.py
+```
+
+The command uses Salesforce GET/query calls only. It selects Accounts whose
+`Cert_Certification_Status__c` is `Certified`, `Dropped`, or `Initials`, then
+checks each Account's Website for either retired snippet, `55879r` or `55170r`.
+Matched Accounts appear once even if both snippets are present. The CSV includes
+Account Name, Certification Status, Website, Certification Contact Email, and
+Principal Contact Email, in that order. Missing contacts or emails are blank.
+
+The output is `yoshki_users.csv` in the current repository directory. Site
+failures, including missing websites, are printed while the remaining Accounts
+continue to be scanned. The CSV may contain contact information, is ignored by
+Git, and must not be committed.
+
 ## Installation
 
 Clone the repository and install dependencies:

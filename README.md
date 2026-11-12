@@ -80,6 +80,20 @@ normal automatic provisioning behavior.
 
 ## Commands
 
+Find Accounts using a discontinued Yoshki smart logo snippet:
+
+```bash
+uv run python scripts/find_yoshki_smart_logo_users.py
+```
+
+This read-only workflow queries Accounts with `Certified`, `Dropped`, or
+`Initials` certification status, checks each listed website for `55879r` or
+`55170r`, and writes matching Accounts and contact emails to
+`yoshki_users.csv` in the repository root. It uses the existing Salesforce
+configuration in `.env`; website failures are reported and the scan continues.
+The CSV can contain operational contact information, is ignored by Git, and
+must not be committed. See [the Yoshki scan instructions](docs/usage.md#find-yoshki-smart-logo-users).
+
 Create a read-only snapshot:
 
 ```bash
